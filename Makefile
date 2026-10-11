@@ -401,6 +401,10 @@ bank-recomp: bank
 	@# module's own cursor draw, which is bank code and so outside the mod hook
 	@# map too (`app/src/map_cursor.cpp`).
 	python3 tools/map_cursor.py
+	@# The same mouse drives the mission field's cursor (scene 0x03) from the
+	@# mission module's own cursor mover. A different bank unit and a different
+	@# play area, so it is a second insertion (`app/src/mission_cursor.cpp`).
+	python3 tools/mission_cursor.py
 	@# Assert the invariant session 45's wall broke: a unit must never define a
 	@# RAM range another bank can own *and* call into it from another record (the
 	@# call would be bound at build time to the wrong bank's layout). See

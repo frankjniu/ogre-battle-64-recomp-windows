@@ -289,15 +289,18 @@ extern "C" void ogre_map_cursor_click(int window_x, int window_y, int win_w, int
 
 // Called from `get_input` on the game thread, once per pad poll.
 extern "C" bool ogre_map_cursor_take_confirm() {
-    if (!enabled() || !map_is_active()) {
-        // Another screen is up, so its own `A` handling must not see the click.
+    if (!enabled()) {
         return false;
     }
+    // The armed count is consumed on every poll, whatever screen is up, so a
+    // click that lands on another screen expires instead of waiting to press `A`
+    // on this one the next time it appears. The `A` itself is only reported
+    // while the map's own cursor draw is running.
     int remaining = g_confirm_polls.load(std::memory_order_acquire);
     while (remaining > 0) {
         if (g_confirm_polls.compare_exchange_weak(remaining, remaining - 1,
                                                   std::memory_order_acq_rel)) {
-            return true;
+            return map_is_active();
         }
     }
     return false;

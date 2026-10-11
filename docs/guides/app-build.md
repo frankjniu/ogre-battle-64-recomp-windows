@@ -660,6 +660,70 @@ cursor has to be the one that shows it again. The state is derived from
 events, so a window that opens under a stationary pointer is handled too. The
 close path restores the pointer before the process exits.
 
+### The mission field's mouse cursor (scene `0x03`)
+
+The mission field's cursor follows the pointer, and a left click is the game's
+`A`. The cursor is two **f32 framebuffer pixels** at `state+0x08` (x) and
+`state+0x0C` (y) in the mission field's state object, where
+`state = *(u32*)0x801AB870 = 0x800E91D0` — a **fixed** address (in the main ELF's
+BSS) that the mission's modules each hold as a pointer constant in their data
+(record 7's `0x801AB870`, record 9's `0x80213690`, record 2's `0x8019E1B4`,
+record 3's `0x801AB870`). Session 115 read the same object through
+`*(0x80213690)` and recorded it as a heap pointer; it is fixed. The object is
+re-laid-out per phase, so the hook is gated by its call site, not by the object's
+contents.
+
+`func_ovlN_801BE4E0` (bank unit N, record 7) is the mover. It reads the **held**
+button word `*(0x800E8108)` (the base ELF fills that slot with `&D_800E79B0`)
+and the D-pad masks of the input profile at `*(0x801F0CC0)`, integrates a
+per-frame delta (a ramp of `±26` then `±8*counter`, divided by 128 and multiplied
+by 32.0), stores the pair at `0x801BE974`/`0x801BE988`, and clamps it to x
+40.0..280.0 and y 30.0..210.0 (`0x801BEB98`/`0x801BEBB8`,
+`0x801BEBE0`/`0x801BEC00`).
+
+**The mission's cursor is digital (D-pad) where the world map's is analog.** No
+mission bank reads the stick; the map reads it at `*(0x800C47F0)+2`/`+3`.
+
+**The cursor is also a servo the game runs continuously.** Over a played run the
+pair moves 1-9 px (median 3.6) on nearly every frame with nothing held, from the
+mover's own integration, its pull toward the screen centre, and the snap-to-unit
+writers. So the mouse cannot simply follow whatever the game does — that locks it
+out — and it cannot always overwrite the game either, because a command recentres
+the camera and carries the cursor with it, which is what leaves the cursor on the
+place that was just acted on. The arbitration is by explicit signal:
+
+| the game moves the cursor when | log |
+|---|---|
+| a D-pad direction is held | `pad=1` |
+| C-LEFT is held in a mode that centres (profile `+0x1C`, field mode `*(0x801F0E00)` < 2 or == 42) | `centre=1` |
+| the mover integrated a delta on this call (`state+0x06`/`+0x07`) | `nudge=1` |
+| the window after a click is still running | `yield=1` |
+
+In all four cases the pointer **adopts** the game's position instead of writing;
+otherwise it places the cursor at the pointer's pixel.
+
+The two insertions are in the mover: `ogre_mission_cursor_note_move` at the
+generated label `L_801BEC04` (the only point where the per-frame delta bytes still
+hold this call's values — the mover zeroes them at `0x801BEC48`-`0x801BEC58`), and
+`ogre_mission_cursor` at the epilogue `L_801BECC8`, which both of the mover's
+paths reach, including the screen-centring branch at `0x801BE890`. The sites are
+bank code, so `tools/mission_cursor.py` inserts both calls (it finds the unit that
+defines `func_ovlN_801BE4E0`) and `make bank-recomp` re-applies them.
+
+A click does not move the cursor: it ORs the N64 `A` bit into controller 0 for a
+few pad polls in `get_input`, the same path the keyboard and the live console's
+`press` command use. One click arms both the map's and the mission's confirm, and
+each armed count is consumed on every poll whatever screen is up, so an `A` armed
+on one screen cannot fire later on the other.
+
+| Variable | Effect |
+|---|---|
+| `OGRE_MISSION_CURSOR=0` | disable the pointer-driven cursor and the click's `A` (`off`, `false` and `no` also work) |
+| `OGRE_MISSION_CURSOR_LOG=1` | print one `[missioncursor]` line on every change of the game's cursor position, the pointer position or the D-pad state, one line per confirm poll, and one line per click |
+| `OGRE_MISSION_CURSOR_CONFIRM_POLLS=<n>` | how many pad polls a click holds `A` (default 8) |
+| `OGRE_MISSION_CURSOR_YIELD=<n>` | frames after a click during which the pointer adopts the game's cursor instead of placing it (default 15, ~0.25 s). It has to cover the camera coming to rest after a command; the cost is that the pointer does not respond during the window, so the player moves the mouse afterwards to re-sync it |
+| `OGRE_MISSION_CURSOR_AT=<x>,<y>` | park the pointer at that framebuffer pixel **once**, with no mouse event, as if it had been moved there. A measurement aid, so a scripted run can place the cursor with nobody at the mouse. Do not run it while someone is testing with a real mouse: the parked pointer is what the placement uses |
+
 Environment variables make a run self-driving and bounded, for measurements and
 captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 26 and 27). All default to off.

@@ -47,6 +47,9 @@ extern "C" void ogre_map_cursor_click(int window_x, int window_y, int win_w, int
                                       int draw_w, int draw_h);
 
 // Called from `get_input`. Returns true while the armed click's `A` is held.
+// The armed count is consumed on every poll whatever screen is up, so a click
+// that lands on another screen expires instead of waiting to press `A` on this
+// one the next time it appears. See `app/src/mission_cursor.hpp`.
 extern "C" bool ogre_map_cursor_take_confirm();
 
 // Called from `get_input`. The N64 D-pad bits for the direction the pointer is

@@ -4,6 +4,7 @@
 #include "crash_log.hpp"
 #include "input_map.hpp"
 #include "map_cursor.hpp"
+#include "mission_cursor.hpp"
 #include "overlay.hpp"
 #include "settings.hpp"
 #include "widescreen.hpp"
@@ -803,8 +804,9 @@ void pump_sdl_events(Platform& platform, bool* quit) {
         // close) and, while it is up, the keyboard and mouse.
         ogre::overlay_handle_event(event);
 
-        // The pointer drives the world map's cursor (scene 0x05) and a left
-        // click confirms the location it is on. The overlay owns the mouse while
+        // The pointer drives the cursor of every screen the mouse owns: the
+        // world map (scene 0x05) and the mission field (scene 0x03). A left
+        // click confirms what the cursor is on. The overlay owns the mouse while
         // it is open, and a pointer in the pillarbox names no framebuffer pixel;
         // `note_mouse` and `click` reject that case themselves. Clearing when the
         // pointer leaves the window hands the cursor back to the game's own
@@ -821,12 +823,15 @@ void pump_sdl_events(Platform& platform, bool* quit) {
                 SDL_GL_GetDrawableSize(platform.window, &draw_w, &draw_h);
                 ogre_map_cursor_note_mouse(event.motion.x, event.motion.y, win_w, win_h, draw_w,
                                            draw_h);
+                ogre_mission_cursor_note_mouse(event.motion.x, event.motion.y, win_w, win_h,
+                                               draw_w, draw_h);
             }
             else if ((event.type == SDL_WINDOWEVENT &&
                       event.window.windowID == game_window &&
                       event.window.event == SDL_WINDOWEVENT_LEAVE) ||
                      (event.type == SDL_MOUSEBUTTONDOWN && overlay_visible())) {
                 ogre_map_cursor_clear();
+                ogre_mission_cursor_clear();
             }
             // The operating system pointer is hidden only over the game
             // window. The overlay is its own SDL window, so the window under
@@ -836,9 +841,9 @@ void pump_sdl_events(Platform& platform, bool* quit) {
             const SDL_Window* pointer_window = SDL_GetMouseFocus();
             set_game_cursor_hidden(pointer_window == platform.window && !overlay_visible(),
                                    "pointer over the game window");
-            // A left click confirms the location the pointer is on, through the
-            // game's own `A`. The click does not move the cursor: the pointer
-            // already did that before the button went down.
+            // A left click confirms what the pointer is on, through the game's
+            // own `A`. The click does not move the cursor: the pointer already
+            // did that before the button went down.
             if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT &&
                 event.button.windowID == game_window && !overlay_visible()) {
                 int win_w = 0;
@@ -848,6 +853,8 @@ void pump_sdl_events(Platform& platform, bool* quit) {
                 SDL_GetWindowSize(platform.window, &win_w, &win_h);
                 SDL_GL_GetDrawableSize(platform.window, &draw_w, &draw_h);
                 ogre_map_cursor_click(event.button.x, event.button.y, win_w, win_h, draw_w, draw_h);
+                ogre_mission_cursor_click(event.button.x, event.button.y, win_w, win_h, draw_w,
+                                          draw_h);
             }
         }
 
@@ -1980,10 +1987,15 @@ static bool get_input(int controller_num, uint16_t* buttons, float* x, float* y)
         out_buttons |= keyboard_buttons();
         console = console_input_take(&console_x, &console_y);
         out_buttons |= console;
-        // A left click on the map arms the game's `A` for a few polls; see
-        // app/src/map_cursor.hpp. It is OR'd in like the keyboard and the live
-        // console, so a real `A` and the click cannot disagree.
-        if (ogre_map_cursor_take_confirm()) {
+        // A left click on a screen the mouse drives arms the game's `A` for a
+        // few polls; see app/src/map_cursor.hpp and app/src/mission_cursor.hpp.
+        // It is OR'd in like the keyboard and the live console, so a real `A`
+        // and the click cannot disagree. Both screens are asked every poll (no
+        // short-circuit) so the armed count expires on whichever one is up, and
+        // each only reports the `A` while its own cursor is running.
+        const bool map_click = ogre_map_cursor_take_confirm();
+        const bool mission_click = ogre_mission_cursor_take_confirm();
+        if (map_click || mission_click) {
             out_buttons |= 0x8000u;
         }
         // A pointer pushed past the map's edge holds the matching direction, so

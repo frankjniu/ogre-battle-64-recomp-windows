@@ -139,6 +139,20 @@ Organize Screen, the credits, the ending and the attract loop.
   other screens. `OGRE_MAP_CURSOR=0` and `OGRE_CURSOR=0` disable them
   (`docs/guides/app-build.md` → "The world map's mouse cursor"). The merged
   contribution that claimed this feature had no caller and is deleted.
+- **Mouse (mission field)** — the mission screen's cursor follows the pointer and
+  a left click acts as the game's `A`. The cursor is two f32 framebuffer pixels
+  at `state+0x08`/`+0x0C` (`state = *(u32*)0x801AB870 = 0x800E91D0`, a fixed
+  address), kept by the mover `func_ovlN_801BE4E0` and clamped to x 40..280,
+  y 30..210. The hook is inserted at the generated label `L_801BEC04`, after both
+  clamps, by `tools/mission_cursor.py` and re-applied by `make bank-recomp`
+  (session 128). **The mission's cursor is digital (D-pad) where the map's is
+  analog (the stick), and it is a servo the game moves on nearly every frame**
+  (1-9 px with nothing held, measured), so the pointer hands it to the game only
+  on an explicit signal — a direction held, the C-LEFT centring branch, the
+  mover's own delta, or the window after a click — and adopts the game's position
+  then. The click window is what leaves the cursor on the place a command acted
+  on. `OGRE_MISSION_CURSOR=0` disables it
+  (`docs/guides/app-build.md` → "The mission field's mouse cursor").
 - **HD backgrounds (experiment)** — `mods/backgrounds/` is a pack of PNGs that
   replaces the dialogue/cutscene backdrops. The app writes the pack's image over
   the pixels the njpeg readback copies, split to match the game's four-chunk
@@ -616,6 +630,20 @@ be skipped and calls into swappable RAM would bind to the wrong bank. See
   which scrolls the view. All three are developer-confirmed. See
   `docs/guides/app-build.md` → "The world map's mouse cursor" and
   `docs/DECISIONS.md` (2026-10-10).
+- **The mission field's cursor is also a screen-space pair, and it is digital.**
+  `state = *(u32*)0x801AB870 = 0x800E91D0`, a fixed BSS address that the mission's
+  modules each hold as a pointer constant (session 115 read it through
+  `*(0x80213690)` and called it a heap pointer). `state+0x08`/`+0x0C` are f32
+  framebuffer pixels; the mover `func_ovlN_801BE4E0` reads the **held** button
+  word `*(0x800E8108)` and the profile's D-pad masks at `*(0x801F0CC0)`,
+  integrates a per-frame delta and clamps to x 40..280, y 30..210. There is no
+  analog path in any mission bank: the map reads the stick at
+  `*(0x800C47F0)+2/+3`, the mission does not. `app/src/mission_cursor.cpp` writes
+  the pointer's pixel at the generated label `L_801BEC04`, after both clamps and
+  before the tail that reverts the cursor when no unit is focused, and stands
+  down while a direction is held, adopting the game's position so the release
+  does not jump. See `docs/guides/app-build.md` → "The mission field's mouse
+  cursor" and `docs/DECISIONS.md` (2026-10-10, session 128).
 
 ## Working documents
 

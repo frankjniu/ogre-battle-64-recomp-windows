@@ -282,6 +282,7 @@ if (EMSCRIPTEN)
         src/save_import.cpp
         src/hd_backgrounds.cpp
         src/map_cursor.cpp
+        src/mission_cursor.cpp
     )
 else()
     set(OGRE_APP_SOURCES
@@ -303,6 +304,7 @@ else()
         src/overlay.cpp
         src/hd_backgrounds.cpp
         src/map_cursor.cpp
+        src/mission_cursor.cpp
     )
 endif()
 
