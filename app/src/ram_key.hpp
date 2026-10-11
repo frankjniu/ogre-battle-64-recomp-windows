@@ -14,11 +14,19 @@
 //                             the battle part-palette table)
 //   OGRE_RAM_KEY_LEN=<n>      bytes to dump (default 0x1000)
 //   OGRE_RAM_KEY_OUT=<dir>    where to write (default the run's config dir)
+//   OGRE_RAM_KEY_FULL=1       write the whole 8 MiB image instead of the window,
+//                             to `<dir>/ram-<n>-full.bin`. Session 130 could
+//                             not find the buffer that holds one black sprite
+//                             part from a window alone: with the whole image the
+//                             address the draw binds can be searched for as a
+//                             pointer, which names the table and the buffer.
 //
 // The output is `<dir>/ram-<n>.bin` (the bytes) and `<dir>/ram-<n>.txt` (the
 // same bytes as hex per 16, plus the 0x80-byte slots spelled out, which is what
-// makes an all-zero slot visible at a glance). Each press writes the next
-// number, so a run can take several.
+// makes an all-zero slot visible at a glance). **Every press takes another
+// dump**, numbered in sequence, so one run can compare a buffer before and
+// after an animation step (session 131: the sprite part that goes black when a
+// character bows its head).
 #pragma once
 
 #include <cstdint>

@@ -387,6 +387,20 @@ out the boot intro and the publisher stills. Verified in session 130:
   so a forced scene that misbehaves is not by itself a finding. Use it to reach a
   state faster, and say in the handoff when a result came from a forced entry.
 
+## 14. Launch every game run with no audio
+
+Set `OGRE_NO_AUDIO=1` on every run of the game, in scripts and in the commands
+this file records. It skips opening an output device entirely
+(`app/src/sdl_platform.cpp`), so a test run does not take the machine's sound
+device and does not make noise while a session works.
+
+This applies to debug runs, capture runs and scripted runs. Put it in the script
+that launches the run rather than retyping it, and write it in any example
+command line.
+
+The audio microcode still runs; only the output device is skipped, so a result
+that depends on the game's audio task is unaffected.
+
 ---
 
 ## Verified facts

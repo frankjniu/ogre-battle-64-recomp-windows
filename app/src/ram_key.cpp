@@ -49,8 +49,16 @@ void ram_key_tick(uint8_t* rdram) {
         fired_at = true;
         take = true;
     }
-    if (key != 0 && !take && console::key_pressed(key)) {
-        take = true;
+    // Every press takes another dump, numbered in `counter` below: the
+    // black-part investigation compares one cell before and after an animation
+    // step, which is two presses in one run (session 131).
+    static bool was_down = false;
+    if (key != 0) {
+        const bool down = console::key_down(key);
+        if (down && !was_down) {
+            take = true;
+        }
+        was_down = down;
     }
     if (!take) {
         return;
@@ -79,8 +87,34 @@ void ram_key_tick(uint8_t* rdram) {
         uint32_t n = (v != nullptr) ? (uint32_t)std::strtoul(v, nullptr, 0) : 0x80u;
         return (n == 0) ? 0x80u : n;
     }();
+    // OGRE_RAM_KEY_FULL=1: write the whole 8 MiB image instead of the window, so
+    // a fault that is only visible in the heap can be searched offline for the
+    // pointer that names the faulty buffer. `tools/rdram.py` reads the file.
+    static const bool full = [] {
+        const char* v = std::getenv("OGRE_RAM_KEY_FULL");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
     static int counter = 0;
     ++counter;
+
+    if (full) {
+        char path[512];
+        std::snprintf(path, sizeof(path), "%s/ram-%d-full.bin", dir.c_str(), counter);
+        size_t written = 0;
+        if (FILE* f = std::fopen(path, "wb")) {
+            for (uint32_t i = 0; i < 0x800000u; ++i) {
+                const uint8_t b = logical_byte(rdram, i);
+                if (std::fwrite(&b, 1, 1, f) != 1) {
+                    break;
+                }
+                ++written;
+            }
+            std::fclose(f);
+        }
+        fprintf(stderr, "[ramkey] key %d: wrote %s (%zu bytes, whole image)\n", key, path, written);
+        fflush(stderr);
+        return;
+    }
 
     const uint32_t off0 = base & 0x1FFFFFFFu;
     if (off0 + len > 0x800000u) {

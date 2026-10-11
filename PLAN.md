@@ -258,18 +258,25 @@ Ordered by how much each item blocks a player. Each item names the handoff that
 holds the evidence.
 
 0. **A cutscene sprite part draws solid black on the world-map route into a
-   mission (session 130).** Developer report: sprites are drawn in parts and about
-   10% of cutscenes show one part (the example: the knight's head) as a black
-   texture, static for the whole shot, on a 2D sprite over a pre-rendered
-   background. The fault is path-dependent: loading the suspend save does not show
-   it, while loading the world-map save, entering the mission and triggering the
-   cutscene does. The font/bitmap cache at `0x8017909C` and the "stale cache from
-   the map" theory are both closed at instruction level (see the handoff). The
-   instrument is landed: `OGRE_TEX_TRACE=1` reports every textured rectangle with
-   the RDRAM it samples (`OGRE_TEX_TRACE_DUMP`, `_AFTER_MS`, `_DRAW`, `_MAX`) and
-   `tools/ogre_tex_uv.py` decodes the dump. The capture decides whether the black
-   part's source bytes are black or the rectangle reads the wrong place. See
-   `docs/HANDOFF-2026-10-11-session130.md`.
+   mission (sessions 130-131). Not reproduced in the last capture; the record is
+   in `docs/notes-black-sprite.md`.** Developer report: sprites are drawn in
+   parts and about 10% of cutscenes show one part (the example: the knight's
+   head) as a black texture, static for the whole shot, on a 2D sprite over a
+   pre-rendered background. The fault is path-dependent: loading the suspend save
+   does not show it, while loading the world-map save, entering the mission and
+   triggering the cutscene does. Two developer captures on `scene_14.bin` (scene
+   `0x14`, the Witch's Den) withdraw the earlier readings: the traced 11x14
+   rectangles are the **font cache's glyph cells** (their bytes decode as
+   letters), every captured CI4 rectangle shares one **present** palette, and an
+   all-zero cell decodes to the transparent colour 0. The black head is therefore
+   either a font cell whose palette decodes to black or a draw the `G_TEXRECT`
+   walker does not report, and the second capture rendered correctly with the
+   **same** bound tile, the same all-zero window and the same cell bytes as the
+   capture where it was black. Landed for a later attempt: `OGRE_RAM_KEY_FULL`
+   (whole 8 MiB image, one file per key press), `OGRE_TEX_TRACE_MS=0` (trace from
+   the press to the window close) and `OGRE_TEX_TRACE_KEY2`, all set by
+   `debug/black-sprite-capture.sh`; `tools/ogre_ram.py` reads the image. See
+   `docs/HANDOFF-2026-10-11-session131.md` and `-session130.md`.
 
 1. **Windows access violation when the game starts (`0xC0000005`). Closed, and
    verified on Windows (session 113).** Session 107 root-caused v0.4.0's fault at

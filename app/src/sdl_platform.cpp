@@ -601,6 +601,7 @@ void open_audio(Platform& platform, uint32_t frequency) {
     // diagnostics, so allow a run to proceed silently without it.
     if (getenv("OGRE_NO_AUDIO") != nullptr) {
         platform.audio_frequency = frequency;
+        fprintf(stderr, "[SDL] OGRE_NO_AUDIO: no output device opened\n");
         return;
     }
     SDL_AudioSpec want{};
@@ -1843,17 +1844,25 @@ void exec(const std::string& line) {
 // tick (the renderer's texture trace, which runs at display-list submission).
 // It does not consume the console's own key trigger; each caller keeps its own
 // previous state.
-bool key_pressed(int digit) {
+bool key_pressed(int digit, int slot) {
+    if (digit < 1 || digit > 9 || slot < 0 || slot > 7) {
+        return false;
+    }
+    static bool was_down[8][10] = {};
+    const bool down = key_down(digit);
+    const bool pressed = down && !was_down[slot][digit];
+    was_down[slot][digit] = down;
+    return pressed;
+}
+
+// The raw held state, for a caller that needs more than one edge per run.
+bool key_down(int digit) {
     if (digit < 1 || digit > 9) {
         return false;
     }
-    static bool was_down[10] = {};
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
     const SDL_Scancode sc = static_cast<SDL_Scancode>(SDL_SCANCODE_1 + (digit - 1));
-    const bool down = (keys != nullptr) && (keys[sc] != 0);
-    const bool pressed = down && !was_down[digit];
-    was_down[digit] = down;
-    return pressed;
+    return (keys != nullptr) && (keys[sc] != 0);
 }
 
 // Is the watched-file trigger on? Any of its own variables names it, or

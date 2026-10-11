@@ -491,6 +491,25 @@ struct State {
     uint32_t index = 0;        // every rectangle of the run
     uint32_t reported = 0;
     bool truncated = false;
+    // OGRE_TEX_TRACE_COLOUR: decode the sampled window through its palette and
+    // report the resulting colour, so a draw that samples a correct cutout and
+    // paints it black is visible in the log without a screenshot (session 131).
+    bool colour = false;
+    uint32_t colour_blackness = 0;   // report a draw only at or below this mean
+    uint32_t black_draws = 0;
+    bool reported_black = false;
+    uint32_t dumps_written = 0;      // file pairs written by dump()
+    bool dumps_capped = false;
+
+    // The RDP's own byte order for a sampled image: the trace samples RDRAM the
+    // way the renderer does, so the logical byte at `a` is `rdram[(a ^ 3)]`.
+    uint8_t image_byte(uint32_t addr) const {
+        return rdram[(addr & 0x1FFFFFFFu) ^ 3u];
+    }
+    uint16_t image_half(uint32_t addr) const {
+        const uint32_t o = addr & 0x1FFFFFFEu;
+        return uint16_t(rdram[o ^ 2u] | (rdram[(o + 1) ^ 2u] << 8));
+    }
 
     uint32_t resolve(uint32_t addr) const {
         return (segments[(addr >> 24) & 0xFu] + (addr & 0x00FFFFFFu)) & 0x1FFFFFFFu;
@@ -536,6 +555,23 @@ struct State {
         if (dump_dir.empty() || count == 0 || count > 0x200000u) {
             return;
         }
+        // A capture that runs to the window close reports tens of thousands of
+        // draws, and one file pair per draw is tens of thousands of files: the
+        // capture then stalls on file creation, which looks like a frozen game
+        // (session 131: `OGRE_TEX_TRACE_MS=0` plus a dump directory). Cap it and
+        // say so, once; the log lines are unaffected.
+        constexpr uint32_t kMaxDumpFiles = 4000;
+        if (dumps_written >= kMaxDumpFiles) {
+            if (!dumps_capped) {
+                dumps_capped = true;
+                std::fprintf(stderr,
+                             "[tex] dump limit %u file(s) reached; the [tex] lines continue, "
+                             "the per-draw .bin/.json files stop\n",
+                             kMaxDumpFiles);
+                std::fflush(stderr);
+            }
+            return;
+        }
         const uint32_t off = addr & 0x1FFFFFFFu;
         if (off + count > 0x800000u) {
             return;
@@ -559,6 +595,83 @@ struct State {
                          y);
             std::fclose(f);
         }
+        ++dumps_written;
+    }
+
+    // The colour a draw paints, from the bytes it samples. This is the half the
+    // byte summary cannot show: a CI draw whose indices are a correct cutout and
+    // whose palette is black samples non-zero bytes and still paints black.
+    //
+    // Returns a mean 0..255 over the sampled texels, and sets `opaque` to the
+    // count of texels whose palette entry has alpha 1. Only the formats the game
+    // uses are decoded (CI4/CI8 through the loaded TLUT, RGBA16 directly); any
+    // other format reports `known = false` and no mean.
+    bool colour_mean(uint32_t img, uint32_t t_a, uint32_t s_a, uint32_t tex_w, uint32_t tex_h,
+                     double& mean, uint32_t& opaque) {
+        mean = 0.0;
+        opaque = 0;
+        const bool indexed = (timg_fmt == 2 || timg_fmt == 3);
+        if (!indexed && timg_fmt != 0) {
+            return false;   // only RGBA16 is decoded for the direct formats
+        }
+        if (timg_siz != 2) {
+            return false;   // only 8-bit indices and 16-bit texels are decoded
+        }
+        if (indexed && !tlut_seen) {
+            return false;   // no palette has been loaded yet
+        }
+        const uint32_t bpr = bytes_per_row();
+        if (bpr == 0 || tex_w == 0 || tex_h == 0) {
+            return false;
+        }
+        // Bound the work and the reads. A rectangle's window is 12 bits of texel
+        // per axis, so a wild s/t can ask for millions of texels; every address
+        // is also checked against RDRAM because a bad `timg`/`tlut` would read
+        // past the image (the walker trusts the list, so this sampler cannot).
+        constexpr uint32_t kMaxTexels = 0x10000;   // 65536 texels per draw
+        const uint32_t texels = tex_w * tex_h;
+        if (texels > kMaxTexels) {
+            return false;
+        }
+        const uint32_t pal = indexed ? resolve(tlut_addr) : 0;
+        uint64_t sum = 0;
+        uint32_t n = 0;
+        for (uint32_t ty = 0; ty < tex_h; ++ty) {
+            for (uint32_t tx = 0; tx < tex_w; ++tx) {
+                const uint32_t row = (t_a + ty) * bpr;
+                uint16_t rgb;
+                if (indexed) {
+                    const uint32_t idx_addr = img + row + (s_a + tx);
+                    if ((idx_addr & 0x1FFFFFFFu) >= 0x800000u) {
+                        return false;
+                    }
+                    const uint32_t idx = image_byte(idx_addr);
+                    const uint32_t rgb_addr = pal + idx * 2u;
+                    if ((rgb_addr & 0x1FFFFFFFu) + 1u >= 0x800000u) {
+                        return false;
+                    }
+                    rgb = image_half(rgb_addr);
+                } else {
+                    const uint32_t rgb_addr = img + row + (s_a + tx) * 2u;
+                    if ((rgb_addr & 0x1FFFFFFFu) + 1u >= 0x800000u) {
+                        return false;
+                    }
+                    rgb = image_half(rgb_addr);
+                }
+                if (rgb & 1u) {
+                    ++opaque;
+                }
+                sum += uint32_t((rgb >> 11) & 31u) + uint32_t((rgb >> 6) & 31u) +
+                       uint32_t((rgb >> 1) & 31u);
+                ++n;
+            }
+        }
+        if (n == 0) {
+            return false;
+        }
+        // Three 5-bit channels per texel, so the 0..255 scale is 255/(3*31).
+        mean = double(sum) / double(n) * (255.0 / (3.0 * 31.0));
+        return true;
     }
 
     // A summary of the bytes at `addr`, to separate "the source is black" from
@@ -678,6 +791,35 @@ struct State {
                 dump("pal", resolve(tlut_addr), tlut_count, 2, 2, tlut_count / 2, 0, "pal",
                      "the palette the LOADTLUT before this draw loaded");
                 summarise(resolve(tlut_addr), tlut_count, "pal");
+            }
+        }
+
+        // OGRE_TEX_TRACE_COLOUR: the colour this draw paints. A draw that samples
+        // a correct cutout and paints it black has non-zero source bytes and a
+        // black mean, which is the report both earlier captures could not make.
+        if (colour && timg != 0) {
+            double mean = 0.0;
+            uint32_t opaque = 0;
+            if (colour_mean(resolve(timg), t_a, s_a, tex_w, tex_h, mean, opaque)) {
+                // Only a draw with a real opaque area counts: a thin rule, or a
+                // window of transparent texels, is not a black sprite part. The
+                // report carries the opaque count so the two are distinguishable.
+                const bool black = (opaque >= 32) && (mean <= double(colour_blackness));
+                if (black) {
+                    ++black_draws;
+                }
+                std::fprintf(stderr,
+                             "[tex]   colour: mean %.1f/255 over %ux%u texels, opaque %u%s\n",
+                             mean, tex_w, tex_h, opaque, black ? "   <-- BLACK" : "");
+                if (black && !reported_black) {
+                    reported_black = true;
+                    std::fprintf(stderr,
+                                 "[tex] BLACK DRAW: dl=%u n=%u rect=%d,%d..%d,%d timg=0x%08X "
+                                 "fmt=%u line=%u tlut=%s texels=%ux%u opaque=%u mean=%.1f\n",
+                                 dl, index, x0, y0, x1, y1, timg, timg_fmt, tile_line,
+                                 tlut_seen ? "yes" : "no", tex_w, tex_h, opaque, mean);
+                    std::fflush(stderr);
+                }
             }
         }
         ++reported;
@@ -1429,6 +1571,14 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
                 const char* v = getenv("OGRE_TEX_TRACE_MIN_PX");
                 return (uint32_t)((v != nullptr) ? strtoul(v, nullptr, 0) : 0);
             }();
+            // OGRE_TEX_TRACE_BLACK=<0..255>: a draw whose sampled colour mean is
+            // at or below this is reported as a black draw (default 8). Used with
+            // OGRE_TEX_TRACE_COLOUR.
+            static const uint32_t colourBlackness = [] {
+                const char* v = getenv("OGRE_TEX_TRACE_BLACK");
+                return (uint32_t)((v != nullptr) ? strtoul(v, nullptr, 0) : 4);
+            }();
+            static uint32_t blackDraws = 0;
             static const uint64_t afterMs = [] {
                 const char* v = getenv("OGRE_TEX_TRACE_AFTER_MS");
                 return (uint64_t)((v != nullptr) ? strtoull(v, nullptr, 0) : 0);
@@ -1441,6 +1591,14 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
                 const char* v = getenv("OGRE_TEX_TRACE_KEY");
                 return (v != nullptr) ? (int)strtol(v, nullptr, 0) : 0;
             }();
+            // OGRE_TEX_TRACE_KEY2: a second arming key with its own edge state,
+            // so one run can take an RDRAM dump on one key (OGRE_RAM_KEY) and
+            // arm the trace on another without the two consuming each other's
+            // press. Session 131.
+            static const int hotkey2 = [] {
+                const char* v = getenv("OGRE_TEX_TRACE_KEY2");
+                return (v != nullptr) ? (int)strtol(v, nullptr, 0) : 0;
+            }();
             static bool armed = false;
             static bool hotkey_mode = false;   // a key capture re-arms; a timer does not
             static bool finished = false;      // a timer capture has already run
@@ -1449,13 +1607,16 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
                 // A timer capture runs once; a key capture waits for the next press.
                 bool go = false;
                 if (hotkey != 0) {
-                    go = console::key_pressed(hotkey);
+                    go = console::key_pressed(hotkey, 0);
                 } else if (!finished) {
                     go = (afterMs == 0) || (ultramodern::trace_millis() >= afterMs);
                 }
+                if (hotkey2 != 0) {
+                    go = go || console::key_pressed(hotkey2, 1);
+                }
                 if (go) {
                     armed = true;
-                    hotkey_mode = (hotkey != 0);
+                    hotkey_mode = (hotkey != 0) || (hotkey2 != 0);
                     armed_at = ultramodern::trace_millis();
                     fprintf(stderr, "[tex] armed at t=%llums (%s), holding %llums\n",
                             (unsigned long long)armed_at,
@@ -1479,11 +1640,18 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
                 st.max_draws = maxDraws;
                 st.min_px = minPx;
                 st.trace_all_images = (getenv("OGRE_TEX_TRACE_IMAGES") != nullptr);
+                st.colour = (getenv("OGRE_TEX_TRACE_COLOUR") != nullptr);
+                st.colour_blackness = colourBlackness;
                 st.dl = dl_count_;
                 st.walk(task->t.data_ptr & 0x1FFFFFFF, 1);
                 if (st.truncated) {
                     fprintf(stderr, "[tex] dl=%u truncated after %u rectangles\n", dl_count_,
                             st.reported);
+                }
+                blackDraws += st.black_draws;
+                if (st.black_draws != 0) {
+                    fprintf(stderr, "[tex] dl=%u %u black draw(s) this list (run total %u)\n",
+                            dl_count_, st.black_draws, blackDraws);
                 }
                 fflush(stderr);
             }
