@@ -397,6 +397,10 @@ bank-recomp: bank
 	@# outside the mod hook map, so the app hooks in from the generated unit
 	@# instead (`app/src/hd_backgrounds.cpp`; a no-op with no pack installed).
 	python3 tools/hd_backgrounds.py
+	@# The mouse drives the world map's cursor (scene 0x05) from the map
+	@# module's own cursor draw, which is bank code and so outside the mod hook
+	@# map too (`app/src/map_cursor.cpp`).
+	python3 tools/map_cursor.py
 	@# Assert the invariant session 45's wall broke: a unit must never define a
 	@# RAM range another bank can own *and* call into it from another record (the
 	@# call would be bound at build time to the wrong bank's layout). See

@@ -125,6 +125,20 @@ Organize Screen, the credits, the ending and the attract loop.
   keyboard OR'd into the same slot; pads used to fill slots 1..3, so a pad was
   visible in the launcher and the overlay and invisible in game (session 118,
   issue #13).
+- **Mouse (world map)** — the map screen's cursor follows the pointer, a left
+  click acts as the game's `A` on the location under it, and pushing the pointer
+  past the map's edge scrolls the view. The operating system pointer is hidden
+  while it is over the game window and shown over the ESC overlay window. The
+  cursor is the map module's screen-space sprite at `state+0x52`/`+0x54`
+  (`state = *(u32*)0x80197B18`, clamped by `func_ovlM_8019AF0C` to x
+  `0x28..0x110`, y `0x28..0xC0`), written at the scene hook's cursor draw
+  (`func_ovlM_801A103C`, `0x801A1C48`). The draw site is bank code, so
+  `tools/map_cursor.py` inserts the call and `make bank-recomp` re-applies it
+  (session 127). The click and the edge direction ride `get_input`, the path the
+  keyboard uses, and are gated on the map's cursor draw so they are inert on
+  other screens. `OGRE_MAP_CURSOR=0` and `OGRE_CURSOR=0` disable them
+  (`docs/guides/app-build.md` → "The world map's mouse cursor"). The merged
+  contribution that claimed this feature had no caller and is deleted.
 - **HD backgrounds (experiment)** — `mods/backgrounds/` is a pack of PNGs that
   replaces the dialogue/cutscene backdrops. The app writes the pack's image over
   the pixels the njpeg readback copies, split to match the game's four-chunk
@@ -590,6 +604,18 @@ be skipped and calls into swappable RAM would bind to the wrong bank. See
 - **Display lists are not run through recompiled microcode.** The runtime routes
   gfx tasks to RT64, which parses them with its own GBI interpreters. RSPRecomp
   compiles the game's njpeg and audio microcodes only.
+- **The world map's cursor is a screen-space sprite, and the mouse drives it.**
+  The map module keeps `state+0x52`/`+0x54` as screen pixels and clamps them to
+  x `0x28..0x110`, y `0x28..0xC0` (`func_ovlM_8019AF0C`), and the scene hook's
+  cursor draw (`func_ovlM_801A103C`) reads the pair at
+  `0x801A1C48`/`0x801A1C4C`. `app/src/map_cursor.cpp` writes the pointer's pixel
+  into that pair at the draw site (`tools/map_cursor.py` inserts the call and
+  `make bank-recomp` re-applies it, because bank code is outside the mod hook
+  map). A left click ORs the N64 `A` bit into controller 0 in `get_input`, and a
+  pointer within 24 pixels of a play-area bound holds the matching D-pad bit,
+  which scrolls the view. All three are developer-confirmed. See
+  `docs/guides/app-build.md` → "The world map's mouse cursor" and
+  `docs/DECISIONS.md` (2026-10-10).
 
 ## Working documents
 

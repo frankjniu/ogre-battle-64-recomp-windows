@@ -617,6 +617,49 @@ A self-hosted runner needs, per platform:
 
 ## Scripted runs and diagnostics
 
+### The world map's mouse cursor (scene `0x05`)
+
+The world map's cursor follows the pointer, and a left click confirms the
+location under it. The cursor is a `Flama` sprite at screen pixels in the map
+module's state object (`*(u32*)0x80197B18`): the state machine
+`func_ovlM_8019AF0C` keeps `state+0x52`/`+0x54` and clamps them to its play area
+(x `0x28..0x110`, y `0x28..0xC0`), and the scene hook's cursor draw
+(`func_ovlM_801A103C`) reads the pair at `0x801A1C48`/`0x801A1C4C` and emits the
+sprite there.
+
+`app/src/map_cursor.cpp` samples `SDL_MOUSEMOTION`, aspect-fits the 320x240
+framebuffer inside the drawable, and writes the pixel into that pair at the draw
+site. The draw site is bank code, which is outside the mod hook map, so
+`tools/map_cursor.py` inserts the call and `make bank-recomp` re-applies it.
+
+A click does not move the cursor: it ORs the N64 `A` bit into controller 0 for a
+few pad polls in `get_input`, the same path the keyboard and the live console's
+`press` command use. The map's `A` selects the location under the cursor.
+
+The pointer scrolls the map by pushing past the view's edge. The map's state
+machine clamps the cursor to x `0x28..0x110`, y `0x28..0xC0`, so a pointer beyond
+a bound cannot place the sprite there; instead a pointer within 24 pixels of a
+bound holds the matching **D-pad** bit in `get_input`, which is what the map
+scrolls its view with. The direction is computed from the pointer's pixel clamped
+into the framebuffer, so a pointer in the pillarbox or in the black border of a
+fullscreen window still scrolls.
+
+| Variable | Effect |
+|---|---|
+| `OGRE_MAP_CURSOR=0` | disable the pointer-driven cursor, the click's `A` and the edge scroll (`off`, `false` and `no` also work) |
+| `OGRE_MAP_CURSOR_LOG=1` | print one `[mapcursor]` line on every change of the game's cursor position, the pointer position, the draw flag or the edge push, and one `[cursor] hidden/shown` line on every change of the operating system pointer |
+| `OGRE_MAP_CURSOR_CONFIRM_POLLS=<n>` | how many pad polls a click holds `A` (default 8) |
+| `OGRE_MAP_CURSOR_EDGE=<n>` | how close to a bound the pointer must be to scroll (default 24 pixels) |
+| `OGRE_MAP_CURSOR_EDGE_FORCE=<mask>` | hold that raw D-pad mask (hex or decimal, e.g. `0x100` for right) as if the pointer were at that edge, with no mouse event. A measurement aid, so a scripted run can scroll with nobody at the mouse |
+| `OGRE_CURSOR=0` | keep the operating system pointer visible over the game window (`off`, `false` and `no` also work). It is hidden while the pointer is over the **game** window, and shown again while the pointer is over the Esc overlay window or outside the game window |
+
+The operating system pointer belongs to the whole application, not to one window:
+`pump_sdl_events` owns the hide and show of it, since whoever hides SDL's single
+cursor has to be the one that shows it again. The state is derived from
+`SDL_GetMouseFocus()` and `overlay_visible()` rather than from ENTER/LEAVE
+events, so a window that opens under a stationary pointer is handled too. The
+close path restores the pointer before the process exits.
+
 Environment variables make a run self-driving and bounded, for measurements and
 captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 26 and 27). All default to off.
