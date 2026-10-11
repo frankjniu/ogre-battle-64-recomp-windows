@@ -2,6 +2,9 @@
 
 #include "settings.hpp"
 
+#include "map_cursor.hpp"
+#include "mission_cursor.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -33,6 +36,7 @@ AntialiasMode g_antialias = AntialiasMode::Off;
 DisplayMode g_display = DisplayMode::Windowed;
 SoundMode g_sound = SoundMode::On;
 int g_volume = kVolumeDefaultPercent;
+MouseMode g_mouse = MouseMode::Off;
 
 // Defined below, after the gate that decides whether the two experimental values
 // are applied at all.
@@ -89,6 +93,16 @@ std::atomic<int> g_audio_gain{kVolumeDefaultPercent};
 
 void publish_audio_gain() {
     g_audio_gain.store(g_sound == SoundMode::On ? g_volume : 0, std::memory_order_relaxed);
+}
+
+// Publishes MOUSE ENABLED to the two cursor modules. Both read the value on
+// their next frame, so a change under the Esc overlay takes effect without a
+// restart; `enabled()` in each module still lets `OGRE_MAP_CURSOR` /
+// `OGRE_MISSION_CURSOR` override it for one run.
+void publish_mouse() {
+    const bool on = g_mouse == MouseMode::On;
+    ogre_map_cursor_set_enabled(on);
+    ogre_mission_cursor_set_enabled(on);
 }
 
 // `OGRE_SPEED`'s value, or 0 when unset or unparsable. The runtime reads the
@@ -286,6 +300,17 @@ DisplayMode parse_display(const std::string& text) {
     return DisplayMode::Windowed;
 }
 
+// `mouse = off` / `on`, or 0 / 1. A file written before the row existed has no
+// key, and the value is then the default `off`: the pointer driving a cursor is
+// opt-in.
+MouseMode parse_mouse(const std::string& text) {
+    const std::string value = lowercase(setting_value(text, "mouse"));
+    if (value == "on" || value == "1" || value == "true" || value == "yes") {
+        return MouseMode::On;
+    }
+    return MouseMode::Off;
+}
+
 // `volume = <n>` in percent, clamped to 0..100. A missing or unparsable value
 // is the default, 100.
 int parse_volume(const std::string& text) {
@@ -341,7 +366,10 @@ void write_settings() {
         "# sounds: off or on.\n"
         "sounds = " + lowercase(sound_mode_label(static_cast<int>(g_sound))) + "\n"
         "# volume: the output gain in percent (0..100).\n"
-        "volume = " + std::to_string(g_volume) + "\n";
+        "volume = " + std::to_string(g_volume) + "\n"
+        "# mouse: off or on. on lets the pointer drive the world map's and the\n"
+        "# mission field's cursors, including the click and the edge scroll.\n"
+        "mouse = " + lowercase(mouse_mode_label(static_cast<int>(g_mouse))) + "\n";
     std::fwrite(text.data(), 1, text.size(), file);
     std::fclose(file);
 }
@@ -584,6 +612,44 @@ std::string sound_mode_text() {
     return text;
 }
 
+const char* mouse_mode_label(int index) {
+    switch (static_cast<MouseMode>(index)) {
+        case MouseMode::Off: return "OFF";
+        case MouseMode::On:  return "ON";
+    }
+    return "OFF";
+}
+
+MouseMode mouse_mode() {
+    return g_mouse;
+}
+
+int mouse_mode_index() {
+    const int index = static_cast<int>(g_mouse);
+    return index >= 0 && index < kMouseModeCount ? index : static_cast<int>(MouseMode::Off);
+}
+
+void set_mouse_mode(MouseMode mode) {
+    if (mode == g_mouse) {
+        return;
+    }
+    g_mouse = mode;
+    publish_mouse();
+    write_settings();
+}
+
+std::string mouse_mode_text() {
+    std::string text;
+    for (int i = 0; i < kMouseModeCount; i++) {
+        if (!text.empty()) {
+            text += "  ";
+        }
+        text += std::string(i == static_cast<int>(g_mouse) ? "[x] " : "[ ] ") +
+                mouse_mode_label(i);
+    }
+    return text;
+}
+
 int volume_percent() {
     return g_volume;
 }
@@ -638,6 +704,7 @@ void load_settings(const std::filesystem::path& pref_dir) {
     DisplayMode display = DisplayMode::Windowed;
     SoundMode sound = SoundMode::On;
     int volume = kVolumeDefaultPercent;
+    MouseMode mouse = MouseMode::Off;
     bool have_file = false;
     const std::string text = read_file(settings_path(pref_dir), have_file);
     if (have_file) {
@@ -650,6 +717,7 @@ void load_settings(const std::filesystem::path& pref_dir) {
         display = parse_display(text);
         sound = parse_sound(text);
         volume = parse_volume(text);
+        mouse = parse_mouse(text);
     }
     if (const int env = env_game_speed(); env != 0) {
         // A developer run names its speed on the command line; the value is
@@ -690,6 +758,13 @@ void load_settings(const std::filesystem::path& pref_dir) {
         volume = parse_volume(std::string("volume = ") + env);
         std::fprintf(stderr, "[settings] OGRE_VOLUME=%s overrides the saved volume\n", env);
     }
+    // OGRE_MOUSE=off|on: the same rule, for the MOUSE ENABLED row. The two
+    // cursor modules have their own `OGRE_MAP_CURSOR` / `OGRE_MISSION_CURSOR`
+    // overrides, which win over this one.
+    if (const char* env = std::getenv("OGRE_MOUSE"); env != nullptr && env[0] != '\0') {
+        mouse = parse_mouse(std::string("mouse = ") + env);
+        std::fprintf(stderr, "[settings] OGRE_MOUSE=%s overrides the saved mouse mode\n", env);
+    }
     g_game_speed = speed;
     g_widescreen = widescreen;
     g_resolution = resolution;
@@ -697,8 +772,10 @@ void load_settings(const std::filesystem::path& pref_dir) {
     g_display = display;
     g_sound = sound;
     g_volume = volume;
+    g_mouse = mouse;
     publish_audio_gain();
     publish_graphics();
+    publish_mouse();
     ultramodern::set_speed_multiplier(static_cast<uint32_t>(speed));
     // RESOLUTION and MSAA are experimental: report the value actually applied,
     // and say why a configured one is not.
@@ -713,12 +790,13 @@ void load_settings(const std::filesystem::path& pref_dir) {
     }
     std::fprintf(stderr,
                  "[settings] game speed x%d, widescreen %s, resolution %s, msaa %s, window %s, "
-                 "sounds %s, volume %d%%%s\n",
+                 "sounds %s, volume %d%%, mouse %s%s\n",
                  speed, lowercase(widescreen_mode_label(static_cast<int>(widescreen))).c_str(),
                  lowercase(resolution_mode_label(static_cast<int>(resolution_mode()))).c_str(),
                  lowercase(antialias_mode_label(static_cast<int>(antialias_mode()))).c_str(),
                  lowercase(display_mode_label(static_cast<int>(display))).c_str(),
                  lowercase(sound_mode_label(static_cast<int>(sound))).c_str(), volume,
+                 lowercase(mouse_mode_label(static_cast<int>(mouse))).c_str(),
                  experiments ? " (display experiments on)" : "");
 }
 

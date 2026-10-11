@@ -644,9 +644,16 @@ scrolls its view with. The direction is computed from the pointer's pixel clampe
 into the framebuffer, so a pointer in the pillarbox or in the black border of a
 fullscreen window still scrolls.
 
+Both cursors are off until the player turns on **SETTINGS > INPUT > MOUSE
+ENABLED** (`Off` by default; `mouse = on` in `<config>/settings.cfg`). The
+setting is the player-facing switch; the per-screen `OGRE_*` variables below
+override it for one run, and `OGRE_MOUSE=off|on` sets the row itself.
+
 | Variable | Effect |
 |---|---|
-| `OGRE_MAP_CURSOR=0` | disable the pointer-driven cursor, the click's `A` and the edge scroll (`off`, `false` and `no` also work) |
+| `MOUSE ENABLED` (SETTINGS, default `OFF`) | the player-facing switch for both cursors: the world map's and the mission field's, with the click and the edge scroll. `Off` is what every build before the row did |
+| `OGRE_MOUSE=off\|on` | set the row for one run without the UI |
+| `OGRE_MAP_CURSOR=1` / `=0` | force the map's cursor on / off for one run, whatever the row says (`off`, `false` and `no` also work for 0) |
 | `OGRE_MAP_CURSOR_LOG=1` | print one `[mapcursor]` line on every change of the game's cursor position, the pointer position, the draw flag or the edge push, and one `[cursor] hidden/shown` line on every change of the operating system pointer |
 | `OGRE_MAP_CURSOR_CONFIRM_POLLS=<n>` | how many pad polls a click holds `A` (default 8) |
 | `OGRE_MAP_CURSOR_EDGE=<n>` | how close to a bound the pointer must be to scroll (default 24 pixels) |
@@ -740,7 +747,7 @@ cursor close to the edges (session 129).
 
 | Variable | Effect |
 |---|---|
-| `OGRE_MISSION_CURSOR=0` | disable the pointer-driven cursor, the click's `A` and the edge push (`off`, `false` and `no` also work) |
+| `OGRE_MISSION_CURSOR=1` / `=0` | force the mission's cursor on / off for one run, whatever the MOUSE ENABLED row says (`off`, `false` and `no` also work for 0) |
 | `OGRE_MISSION_CURSOR_LOG=1` | print one `[missioncursor]` line on every change of the game's cursor position, the pointer position, the D-pad state or the camera, one line per edge push, one line per confirm poll, and one line per click |
 | `OGRE_MISSION_CURSOR_CONFIRM_POLLS=<n>` | how many pad polls a click holds `A` (default 8) |
 | `OGRE_MISSION_CURSOR_YIELD=<n>` | frames after a click during which the pointer adopts the game's cursor instead of placing it (default 15, ~0.25 s). It has to cover the camera coming to rest after a command; the cost is that the pointer does not respond during the window, so the player moves the mouse afterwards to re-sync it |
@@ -817,6 +824,7 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_WINDOW=windowed\|fullscreen` | debug spelling of **WINDOW**, the same override rule |
 | `OGRE_SOUNDS=off\|on` | debug spelling of **SOUNDS**: `off` queues silence. Overrides `<config>/settings.cfg` for one run without writing it, the same rule as `OGRE_SPEED` |
 | `OGRE_VOLUME=<0..100>` | debug spelling of **VOLUME**, the output gain in percent, clamped. Same override rule |
+| `OGRE_MOUSE=off\|on` | debug spelling of **MOUSE ENABLED**, the switch for both screen cursors. Overrides `<config>/settings.cfg` for one run without writing it. `OGRE_MAP_CURSOR` / `OGRE_MISSION_CURSOR` then override one screen on top of it |
 | `OGRE_FORCE_SCENE=<hex>` | switch a run to attract scene `<hex>` by poking the scene id (`*(u16*)(D_800C4BBC+4)`) until `D_800E810E` reports it active — no need to wait out the attract loop. `OGRE_FORCE_SCENE_AFTER_MS` (default 3000) delays the first poke so boot can settle |
 | `OGRE_PRESENT_ALWAYS=1` | push a present on every VI even when nothing changed (a stalled boot changes nothing, so the window otherwise freezes on an old frame) |
 | `OGRE_PRESENT_FBTARGET=1` | if the framebuffer manager has no framebuffer at the VI address, present a non-empty render target there instead of the RDRAM copy |
@@ -2116,6 +2124,32 @@ and `native-overlay-settings.png` (the tab in the launcher, the same tab with th
 experimental rows enabled, and in the `ESC` overlay with the pad script above
 having set WINDOW to FULLSCREEN).
 
+### Mouse enabled (the SETTINGS tab)
+```
+INPUT
+MOUSE ENABLED   [x] OFF [ ] ON
+```
+
+MOUSE ENABLED is the switch for the port's mouse support, and `OFF` is the
+default. `ON` lets the pointer drive the two screen cursors the port implements:
+the world map's (scene `0x05`) and the mission field's (scene `0x03`), with the
+left click that acts as the game's `A` and the edge push that scrolls either
+view. `OFF` is what every build before the row did, and the operating system
+pointer is then left visible over the game window, because the game is played
+with the keyboard or a pad.
+
+The row is published to `ogre_map_cursor_set_enabled` and
+`ogre_mission_cursor_set_enabled` on every change, so a change under the `ESC`
+overlay takes effect on the next frame. The value is saved at
+`<config>/settings.cfg` as `mouse = off|on`; `OGRE_MOUSE=off|on` overrides the
+file for one run without writing it, and `OGRE_MAP_CURSOR` /
+`OGRE_MISSION_CURSOR` still force one screen on or off whatever the row says.
+A file written before the row existed has no key and loads as `OFF`.
+
+Proofs: `docs/proofs/native-launcher-mouse-off.png` and
+`-mouse-on.png` (the SETTINGS tab with the row off, and after the scripted key
+run turned it on).
+
 ### The in-game overlay
 
 `ESC` during play opens a borderless, always-on-top SDL window placed over the
@@ -2262,8 +2296,8 @@ CONTROLS     one row per N64 button with its keyboard key, its gamepad source an
              overlay"
 SETTINGS     GAME SPEED, then a DISPLAY section (WIDESCREEN, WINDOW, plus the
              experimental RESOLUTION and MSAA rows when
-             OGRE_DISPLAY_EXPERIMENTS=1) and an AUDIO section (SOUNDS, VOLUME);
-             see the SETTINGS sections below
+             OGRE_DISPLAY_EXPERIMENTS=1), an AUDIO section (SOUNDS, VOLUME) and
+             an INPUT section (MOUSE ENABLED); see the SETTINGS sections below
 DEBUG        the live Chaos Frame readout
 ```
 

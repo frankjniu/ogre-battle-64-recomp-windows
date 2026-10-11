@@ -2,7 +2,9 @@
 
 #include <cstdint>
 
-// The world map's cursor, driven by the mouse (scene 0x05 only).
+// The world map's cursor, driven by the mouse (scene 0x05 only), and only while
+// the MOUSE ENABLED setting is on (`settings.cpp`, off by default;
+// `OGRE_MAP_CURSOR=1`/`=0` overrides it for one run).
 //
 // Milestone A (landed, developer-confirmed 2026-10-10): the cursor sprite
 // follows the pointer smoothly. The game clamps the result to its play area
@@ -37,6 +39,12 @@ extern "C" void ogre_map_cursor_note_mouse(int window_x, int window_y, int win_w
 
 // The pointer left the game window, or the overlay owns it.
 extern "C" void ogre_map_cursor_clear();
+
+// The MOUSE ENABLED setting, published by `settings.cpp` at boot and whenever
+// the row changes. Off by default, so the pointer drives nothing until the
+// player turns it on. `OGRE_MAP_CURSOR` overrides it for one run: `1`/`on`
+// forces it on, `0`/`off` forces it off.
+extern "C" void ogre_map_cursor_set_enabled(bool on);
 
 // A left click on the picture: press the game's `A` for a few frames so the
 // location under the cursor is selected. `A` is the map's confirm button; the

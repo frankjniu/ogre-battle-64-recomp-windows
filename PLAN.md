@@ -136,7 +136,11 @@ Organize Screen, the credits, the ending and the attract loop.
   `tools/map_cursor.py` inserts the call and `make bank-recomp` re-applies it
   (session 127). The click and the edge direction ride `get_input`, the path the
   keyboard uses, and are gated on the map's cursor draw so they are inert on
-  other screens. `OGRE_MAP_CURSOR=0` and `OGRE_CURSOR=0` disable them
+  other screens. **Both this screen and the mission field are behind
+  SETTINGS > INPUT > MOUSE ENABLED, off by default** (session 129): the row
+  publishes to `ogre_map_cursor_set_enabled` / `ogre_mission_cursor_set_enabled`,
+  and `OGRE_MAP_CURSOR=1`/`=0` still forces this screen for a scripted run.
+  `OGRE_CURSOR=0` keeps the operating system pointer visible
   (`docs/guides/app-build.md` → "The world map's mouse cursor"). The merged
   contribution that claimed this feature had no caller and is deleted.
 - **Mouse (mission field)** — the mission screen's cursor follows the pointer and
@@ -163,7 +167,9 @@ Organize Screen, the credits, the ending and the attract loop.
   arrives as input: within `OGRE_MISSION_CURSOR_EDGE` (24) px of a bound the hook
   holds the matching N64 D-pad bit, `get_input` ORs it into controller 0, and the
   `pad=` signal already makes the pointer adopt the game's cursor, so the two do
-  not fight. Developer-confirmed. `OGRE_MISSION_CURSOR=0` disables all of it
+  not fight. Developer-confirmed. Both this screen and the world map are behind
+  SETTINGS > INPUT > MOUSE ENABLED, off by default (session 129), and
+  `OGRE_MISSION_CURSOR=1`/`=0` forces this screen for one run
   (`docs/guides/app-build.md` → "The mission field's mouse cursor").
 - **HD backgrounds (experiment)** — `mods/backgrounds/` is a pack of PNGs that
   replaces the dialogue/cutscene backdrops. The app writes the pack's image over

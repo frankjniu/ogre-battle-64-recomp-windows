@@ -113,6 +113,7 @@ public:
         Antialias,
         Display,
         Sound,
+        Mouse,
         Volume,
         ChaosFrame,
     };

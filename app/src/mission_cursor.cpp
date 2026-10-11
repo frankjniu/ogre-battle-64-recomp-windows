@@ -93,6 +93,11 @@ bool g_moved_by_mover = false;
 // and only read for the log.
 std::atomic<const uint8_t*> g_state_rdram{nullptr};
 
+// The MOUSE ENABLED setting, published by `settings.cpp` at boot and on a
+// change. Off until it says otherwise, so a run that never loads a settings file
+// leaves the pointer alone.
+std::atomic<bool> g_setting_enabled{false};
+
 // True while the mover has run within the last few frames. The click's `A` is
 // armed for a handful of polls and the mover runs once per frame, so the
 // tolerance only has to cover the gap between the click and the next call.
@@ -175,16 +180,25 @@ constexpr float kPlayMaxY = 210.0f;
 constexpr int kEdgeMarginDefault = 24;
 
 
+// Whether the port drives this screen's cursor with the pointer. The MOUSE
+// ENABLED setting (app/src/settings.cpp) is the player-facing switch and is off
+// by default; `OGRE_MISSION_CURSOR` overrides it for one run: `1`/`on` forces it
+// on, `0`/`off` forces it off, and unset follows the setting.
 bool enabled() {
-    static const bool on = [] {
+    static const int override_state = [] {
         const char* value = std::getenv("OGRE_MISSION_CURSOR");
         if (value == nullptr || value[0] == '\0') {
-            return true;
+            return -1;
         }
-        return std::strcmp(value, "0") != 0 && std::strcmp(value, "off") != 0 &&
-               std::strcmp(value, "false") != 0 && std::strcmp(value, "no") != 0;
+        return (std::strcmp(value, "0") == 0 || std::strcmp(value, "off") == 0 ||
+                std::strcmp(value, "false") == 0 || std::strcmp(value, "no") == 0)
+                   ? 0
+                   : 1;
     }();
-    return on;
+    if (override_state >= 0) {
+        return override_state != 0;
+    }
+    return g_setting_enabled.load(std::memory_order_relaxed);
 }
 
 bool log_enabled() {
@@ -419,6 +433,11 @@ extern "C" void ogre_mission_cursor_note_mouse(int window_x, int window_y, int w
 extern "C" void ogre_mission_cursor_clear() {
     g_mouse_live.store(false, std::memory_order_relaxed);
     g_edge_direction.store(0, std::memory_order_relaxed);
+}
+
+// Called by `settings.cpp` when the MOUSE ENABLED row is applied.
+extern "C" void ogre_mission_cursor_set_enabled(bool on) {
+    g_setting_enabled.store(on, std::memory_order_relaxed);
 }
 
 // Called from the platform thread on a left click over the game window. The

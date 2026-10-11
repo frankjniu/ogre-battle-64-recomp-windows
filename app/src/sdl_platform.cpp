@@ -622,20 +622,27 @@ void open_audio(Platform& platform, uint32_t frequency) {
 // hidden state belongs to the application, not to one window: SDL has a single
 // cursor, so whoever hides it must also be the one that shows it again.
 //
-// `OGRE_CURSOR=0` keeps it visible (also `off`/`false`/`no`). The game window's
-// close path and the crash report leave the state alone, so a process that
-// exits while the pointer is hidden restores it here first.
+// The pointer is owned only while the port is driving a cursor with it, i.e.
+// while MOUSE ENABLED is on (`settings.cpp`); with the row off the game is
+// played with the keyboard or a pad and the operating system pointer stays where
+// the player can see it. `OGRE_CURSOR=1`/`0` forces the state for one run (also
+// `off`/`false`/`no` for 0). The game window's close path and the crash report
+// leave the state alone, so a process that exits while the pointer is hidden
+// restores it here first.
 void set_game_cursor_hidden(bool hidden, const char* why) {
     static bool current = false;
-    static const bool enabled = [] {
+    static const int forced = [] {
         const char* value = getenv("OGRE_CURSOR");
         if (value == nullptr || value[0] == '\0') {
-            return true;
+            return -1;
         }
-        return strcmp(value, "0") != 0 && strcmp(value, "off") != 0 &&
-               strcmp(value, "false") != 0 && strcmp(value, "no") != 0;
+        return (strcmp(value, "0") == 0 || strcmp(value, "off") == 0 ||
+                strcmp(value, "false") == 0 || strcmp(value, "no") == 0)
+                   ? 0
+                   : 1;
     }();
-    if (!enabled || hidden == current) {
+    const bool owned = forced >= 0 ? forced != 0 : ogre::mouse_mode() == ogre::MouseMode::On;
+    if (!owned || hidden == current) {
         return;
     }
     current = hidden;

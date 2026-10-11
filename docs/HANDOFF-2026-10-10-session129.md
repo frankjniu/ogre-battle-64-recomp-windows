@@ -1,14 +1,18 @@
-# Handoff — 2026-10-10, session 129: the mission field's view scrolls at the pointer's edge
+# Handoff — 2026-10-10, session 129: the mission field's view scrolls at the pointer's edge, and mouse support is a setting
 
-Developer request: *"read the latest handoff, and let's continue the mouse support
-feature in the mission screen. this time we need to make the camera scroll when
-the cursor is close to the edges."*
+Developer requests: *"read the latest handoff, and let's continue the mouse
+support feature in the mission screen. this time we need to make the camera
+scroll when the cursor is close to the edges."* and then *"to wrap up, let's add
+a [ ] MOUSE ENABLED option in the settings (default off). when enable, the mouse
+controls work in the map screen and the mission screen."*
 
-**Result: the mission field's camera scrolls while the pointer is close to a
-play-area edge.** The pointer holds the direction the field's own mover reads,
+**Results.** (1) The mission field's camera scrolls while the pointer is close to
+a play-area edge: the pointer holds the direction the field's own mover reads,
 and the game's own camera pan does the scrolling. Developer-confirmed twice:
-*"I could move the camera around by moving the cursor close to the edges"*. No
-other screen's cursor changed.
+*"I could move the camera around by moving the cursor close to the edges"*.
+(2) MOUSE ENABLED is the SETTINGS tab's `INPUT` row, off by default, and it
+gates both screen cursors, the click's `A` and both edge scrolls. No other
+screen's cursor changed.
 
 ## 1. What the field's camera scroll is, at instruction level
 
@@ -148,10 +152,14 @@ input was taken at is in the log as `mode=` (the field mode at
 
 | File | What |
 |---|---|
-| `app/src/mission_cursor.cpp` | the edge direction, the camera read, the log fixes |
+| `app/src/mission_cursor.cpp` | the edge direction, the camera read, the log fixes, the setting gate |
 | `app/src/mission_cursor.hpp` | the declaration and the evidence |
-| `app/src/sdl_platform.cpp` | the mission edge direction is OR'd into controller 0 |
-| `docs/guides/app-build.md` | the mechanism and the two new knobs |
+| `app/src/map_cursor.{cpp,hpp}` | the setting gate |
+| `app/src/settings.{hpp,cpp}` | the MOUSE ENABLED row, `mouse = off\|on`, `OGRE_MOUSE`, `publish_mouse` |
+| `app/src/ui.{hpp,cpp}` | `RowKind::Mouse` on the shared radio-row helper, the INPUT section |
+| `app/src/sdl_platform.cpp` | the mission edge direction is OR'd into controller 0; the pointer is hidden only while the row is on |
+| `docs/proofs/native-launcher-mouse-off.png`, `-mouse-on.png` | the new row, off and on |
+| `docs/guides/app-build.md` | the mechanism, the two edge knobs, the MOUSE ENABLED section, `OGRE_MOUSE` |
 | `docs/DECISIONS.md`, `PLAN.md`, `docs/STATUS-LOG.md`, `docs/README.md` | the record |
 | `docs/scenes.md` | the mission field's cursor row |
 | `docs/HANDOFF-2026-10-10-session129.md` | this file |
@@ -171,7 +179,10 @@ about the camera. No `RecompiledFuncs/` or `Bank*Funcs/` file was touched.
 |---|---|
 | `OGRE_MISSION_CURSOR_EDGE=<n>` | how close to a play-area bound the pointer may be before it holds that direction (default 24 px) |
 | `OGRE_MISSION_CURSOR_EDGE_FORCE=<mask>` | hold that raw D-pad mask (hex or decimal, e.g. `0x100`) with no mouse event: a measurement aid for scripted runs |
-| `OGRE_MISSION_CURSOR=0` | disables the placement, the click's `A` and the edge push |
+| `MOUSE ENABLED` (SETTINGS > INPUT, default `OFF`) | the switch for both screen cursors, the click's `A` and both edge scrolls |
+| `OGRE_MOUSE=off\|on` | set the row for one run without the UI |
+| `OGRE_MISSION_CURSOR=1` / `=0` | force this screen on / off whatever the row says |
+| `OGRE_CURSOR=1` / `=0` | force the operating system pointer hidden / visible |
 
 ## 8. Open
 
@@ -187,3 +198,60 @@ about the camera. No `RecompiledFuncs/` or `Bank*Funcs/` file was touched.
 - **The field's `R` hold-menu, the unit-command menu and the Organize Screen
   (scene `0x06`, bank unit S) are still not mouse-driven** (session 128's open
   item).
+
+## 9. MOUSE ENABLED, the settings row
+
+Developer request: *"to wrap up, let's add a [ ] MOUSE ENABLED option in the
+settings (default off). when enable, the mouse controls work in the map screen
+and the mission screen."*
+
+**The row.** `ui::Panel`'s SETTINGS tab gained a fourth group, `INPUT`, with
+`RowKind::Mouse` on the same two-option radio helper as WIDESCREEN and SOUNDS:
+`MOUSE ENABLED   [x] OFF [ ] ON`, `Off` at index 0. LEFT/RIGHT and SPACE step it,
+the pad path and a mouse click on a marker work as they do on the other radio
+rows, and `settings.cpp` saves it as `mouse = off|on` in `<config>/settings.cfg`.
+`OGRE_MOUSE=off|on` overrides the file for one run without writing it, the same
+rule as `OGRE_SPEED`/`OGRE_SOUNDS`. A file written before the row existed has no
+`mouse` key and loads as `OFF`; the boot line now ends `..., mouse off`.
+
+**How it reaches the cursors.** `settings.cpp`'s `publish_mouse()` calls
+`ogre_map_cursor_set_enabled(bool)` and `ogre_mission_cursor_set_enabled(bool)`,
+one atomic in each cursor module. Each module's `enabled()` now resolves in this
+order: `OGRE_MAP_CURSOR` / `OGRE_MISSION_CURSOR` if set (`1`/`on` forces that
+screen on, `0`/`off` forces it off), else the setting. The two per-screen
+variables therefore stay the scripted-run override, and one switch covers the
+map's cursor, the mission's cursor, the click that acts as the game's `A` and
+both edge scrolls.
+
+**The operating system pointer.** `set_game_cursor_hidden` hides it over the game
+window only while the row is on (`ogre::mouse_mode()`), because with the mouse
+off the game is played with the keyboard or a pad; `OGRE_CURSOR=1`/`0` still
+forces that state for one run.
+
+**Verification.** The launcher (no settings file) draws `INPUT / MOUSE ENABLED
+[x] OFF [ ] ON`; `OGRE_LAUNCHER_KEYS="Tab,Tab,Tab,Down,Down,Down,Down,Down,Right"`
+draws `[ ] OFF [x] ON` and writes `mouse = on`
+(`docs/proofs/native-launcher-mouse-off.png`, `-mouse-on.png`). Two game runs on
+the mission route gate the hook exactly as asked: `mouse = on` gives
+`[missioncursor] hook active on the mission field` and 74 lines, `mouse = off`
+gives no `[missioncursor]` line at all; `tools/runlog.py --check` PASS on both.
+
+| run | evidence |
+|---|---|
+| `/tmp/mouse-launch-off.log`, `/tmp/mouse-launch-on.log` | the launcher row, its ON state and `mouse = on` written to `settings.cfg` |
+| `/tmp/mouse-on5.log`, `/tmp/mouse-off5.log` | the two game controls on the **final** binary (probes reverted): `[overlay] shown` count 0 in both, `mouse on` gives `hook active` and 74 lines against `mouse off` and no `[missioncursor]` line at all, `PASS` from `tools/runlog.py --check` on each |
+| `/tmp/mouse-on4.log`, `/tmp/mouse-off4.log` | the same two controls on the probe build, which is what pinned the value: `g_mouse=1`, `setting=1` for the on case and `g_mouse=0` with no hook line for the off case |
+| `/tmp/mouse-on2.log`, `/tmp/mouse-off2.log` | **discarded.** The Esc overlay opened on both (3 and 4 `[overlay] shown` lines), and the off run's panel turned MOUSE ENABLED on, so its hook ran. The probe below is what separated them. |
+
+**A probe was used and reverted.** `probe129` printed `g_mouse`/parsed in
+`load_settings` and the flag in the mission hook's one-time line; it showed
+`g_mouse=0, parsed=0` with no hook lines for the off case and `g_mouse=1`,
+`setting=1` for the on case. `grep -rl probe129 RecompiledFuncs/ Bank*Funcs/
+app/` is empty, and both builds were rebuilt before the final controls
+(`/tmp/mouse-on5.log`, `/tmp/mouse-off5.log`).
+
+**Process note (repeats session 128 §6).** A scripted run that opens a window on
+the developer's desktop can be contaminated by input to that window: the
+`[overlay] shown` lines and the rewritten `settings.cfg` (`sounds = off`,
+`game_speed = 4`) are how it shows. Check `[overlay] shown` before trusting a
+run's cursors.

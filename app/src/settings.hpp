@@ -20,7 +20,7 @@
 //   callback scales every buffer it queues by `audio_gain_percent()`. See
 //   `SoundMode` and the block below it.
 //
-// Seven settings in three groups, in the order the SETTINGS tab draws them:
+// Eight settings in four groups, in the order the SETTINGS tab draws them:
 //
 // * GAME SPEED.
 // * DISPLAY: WIDESCREEN, then RESOLUTION, MSAA and WINDOW, which are the rest of
@@ -31,6 +31,8 @@
 //   `wm_option`; each writer starts from the live config, so neither loses the
 //   other's value.
 // * AUDIO: SOUNDS and VOLUME.
+// * INPUT: MOUSE ENABLED, off by default, which is what lets the pointer drive
+//   the world map's and the mission field's cursors. See `MouseMode` below.
 //
 // The file is `<config>/settings.cfg`, plain text.
 #pragma once
@@ -229,6 +231,43 @@ void set_sound_mode(SoundMode mode);
 
 // The SOUNDS row's options as one string (radio markers and labels).
 std::string sound_mode_text();
+
+// The MOUSE ENABLED row: the same two-option radio group as WIDESCREEN, and
+// `Off` is the default. `On` makes the pointer drive the two screen cursors the
+// port implements: the world map's (scene `0x05`, screen pixels at
+// `state+0x52`/`+0x54`) and the mission field's (scene `0x03`, f32 framebuffer
+// pixels at `state+0x08`/`+0x0C`), including the click that acts as the game's
+// `A` and the edge push that scrolls either view. `Off` is the state every build
+// before the row had, made the default here at the developer's request; the two
+// cursor modules read the same value through `ogre_map_cursor_set_enabled` and
+// `ogre_mission_cursor_set_enabled`, and `OGRE_MAP_CURSOR` /
+// `OGRE_MISSION_CURSOR` still override it for one run.
+//
+// The enumerators follow the row's display order, so `Off` is the marker of the
+// first option and the default, as index 0 is on the other radio rows.
+enum class MouseMode {
+    Off = 0,
+    On = 1,
+};
+
+constexpr int kMouseModeCount = 2;
+
+// "OFF" or "ON" for the radio row's `index`-th option.
+const char* mouse_mode_label(int index);
+
+// The live mode.
+MouseMode mouse_mode();
+
+// The index of the live mode in the radio row.
+int mouse_mode_index();
+
+// Stores `mode`, publishes it to the cursor modules and writes
+// `<config>/settings.cfg`. Both cursors read the value on their next frame, so a
+// change under the Esc overlay takes effect immediately.
+void set_mouse_mode(MouseMode mode);
+
+// The MOUSE ENABLED row's options as one string (radio markers and labels).
+std::string mouse_mode_text();
 
 // The VOLUME row: a slider over 0..100 percent, drawn as `kVolumeCells`
 // characters with the handle on one of them.

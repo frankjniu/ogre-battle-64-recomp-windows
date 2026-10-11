@@ -203,11 +203,23 @@ RadioLayout layout_sound(const Font& font, int scale, int max_width, int current
     return layout_radio(font, scale, max_width, sound_labels(), current);
 }
 
+std::vector<std::string> mouse_labels() {
+    std::vector<std::string> labels;
+    for (int i = 0; i < kMouseModeCount; i++) {
+        labels.push_back(mouse_mode_label(i));
+    }
+    return labels;
+}
+
+RadioLayout layout_mouse(const Font& font, int scale, int max_width, int current) {
+    return layout_radio(font, scale, max_width, mouse_labels(), current);
+}
+
 // --- radio rows ---------------------------------------------------------------
-// Six row kinds draw as a radio group (GAME SPEED, WIDESCREEN, RESOLUTION, MSAA,
-// WINDOW, SOUNDS). The measure, draw, step, click and pad paths each need the
-// layout and the live option, so both are looked up in one place: a kind added
-// to the table is handled by all of them.
+// Seven row kinds draw as a radio group (GAME SPEED, WIDESCREEN, RESOLUTION,
+// MSAA, WINDOW, SOUNDS, MOUSE ENABLED). The measure, draw, step, click and pad
+// paths each need the layout and the live option, so both are looked up in one
+// place: a kind added to the table is handled by all of them.
 
 bool is_radio_row(Panel::RowKind kind) {
     switch (kind) {
@@ -217,6 +229,7 @@ bool is_radio_row(Panel::RowKind kind) {
         case Panel::RowKind::Antialias:
         case Panel::RowKind::Display:
         case Panel::RowKind::Sound:
+        case Panel::RowKind::Mouse:
             return true;
         default:
             return false;
@@ -239,6 +252,8 @@ int radio_row_current(Panel::RowKind kind) {
             return display_mode_index();
         case Panel::RowKind::Sound:
             return sound_mode_index();
+        case Panel::RowKind::Mouse:
+            return mouse_mode_index();
         default:
             return -1;
     }
@@ -252,6 +267,7 @@ int radio_row_count(Panel::RowKind kind) {
         case Panel::RowKind::Antialias:   return kAntialiasModeCount;
         case Panel::RowKind::Display:     return kDisplayModeCount;
         case Panel::RowKind::Sound:       return kSoundModeCount;
+        case Panel::RowKind::Mouse:       return kMouseModeCount;
         default:                          return 0;
     }
 }
@@ -269,6 +285,8 @@ RadioLayout radio_row_layout(Panel::RowKind kind, const Font& font, int scale, i
             return layout_antialias(font, scale, max_width, current);
         case Panel::RowKind::Display:
             return layout_display(font, scale, max_width, current);
+        case Panel::RowKind::Mouse:
+            return layout_mouse(font, scale, max_width, current);
         default:
             return layout_sound(font, scale, max_width, sound_mode_index());
     }
@@ -299,6 +317,9 @@ RowAction store_radio_row(Panel::RowKind kind, int option) {
             break;
         case Panel::RowKind::Sound:
             set_sound_mode(static_cast<SoundMode>(option));
+            break;
+        case Panel::RowKind::Mouse:
+            set_mouse_mode(static_cast<MouseMode>(option));
             break;
         default:
             return RowAction::None;
@@ -763,6 +784,8 @@ std::vector<Panel::Row> Panel::build_rows(Tab tab) const {
             rows.push_back(Row{RowKind::Section, "AUDIO", 0, 0, -1});
             rows.push_back(Row{RowKind::Sound, {}, 0, 0, -1});
             rows.push_back(Row{RowKind::Volume, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::Section, "INPUT", 0, 0, -1});
+            rows.push_back(Row{RowKind::Mouse, {}, 0, 0, -1});
             break;
 
         case Tab::Debug:
@@ -959,6 +982,8 @@ std::string Panel::left_text(size_t index) const {
             return "WINDOW";
         case RowKind::Sound:
             return "SOUNDS";
+        case RowKind::Mouse:
+            return "MOUSE ENABLED";
         case RowKind::Volume:
             return "VOLUME";
         case RowKind::ChaosFrame:
@@ -1009,6 +1034,8 @@ std::string Panel::right_text_for(const Row& row) const {
             return display_mode_text();
         case RowKind::Sound:
             return sound_mode_text();
+        case RowKind::Mouse:
+            return mouse_mode_text();
         case RowKind::Volume:
             return volume_text(volume_percent());
         case RowKind::ChaosFrame: {
@@ -1125,6 +1152,7 @@ RowAction Panel::activate(size_t index, int direction) {
         case RowKind::Antialias:
         case RowKind::Display:
         case RowKind::Sound:
+        case RowKind::Mouse:
             // Left/Right and Space step the radio group, wrapping at the ends
             // like a mod option row. Each setting applies itself (the runtime for
             // GAME SPEED, `widescreen.cpp` or the renderer for the DISPLAY rows),

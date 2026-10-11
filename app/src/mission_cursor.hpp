@@ -79,6 +79,12 @@ extern "C" void ogre_mission_cursor_note_mouse(int window_x, int window_y, int w
 // The pointer left the game window, or the overlay owns it.
 extern "C" void ogre_mission_cursor_clear();
 
+// The MOUSE ENABLED setting, published by `settings.cpp` at boot and whenever
+// the row changes. Off by default, so the pointer drives nothing until the
+// player turns it on. `OGRE_MISSION_CURSOR` overrides it for one run: `1`/`on`
+// forces it on, `0`/`off` forces it off.
+extern "C" void ogre_mission_cursor_set_enabled(bool on);
+
 // A left click on the picture: press the game's `A` for a few frames so the
 // location under the cursor is confirmed. `A` is the field's confirm button; the
 // press is OR'd into controller 0 by `get_input`, which is the same path the
@@ -112,7 +118,10 @@ extern "C" bool ogre_mission_cursor_take_confirm();
 extern "C" uint16_t ogre_mission_cursor_edge_direction();
 
 // Environment:
-//   OGRE_MISSION_CURSOR=0                  disable the placement and the click's A
+//   OGRE_MISSION_CURSOR=1 / =0             force this screen's pointer control
+//                                          on / off for one run; unset follows
+//                                          the MOUSE ENABLED setting, which is
+//                                          off by default
 //   OGRE_MISSION_CURSOR_LOG=1              one `[missioncursor]` line per change
 //   OGRE_MISSION_CURSOR_CONFIRM_POLLS=<n>  how many polls a click holds A (8)
 //   OGRE_MISSION_CURSOR_YIELD=<n>          frames after a click during which the

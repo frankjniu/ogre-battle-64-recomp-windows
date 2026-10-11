@@ -77,6 +77,11 @@ bool map_is_active() {
     return last != 0 && now - last <= 4u;
 }
 
+// The MOUSE ENABLED setting, published by `settings.cpp` at boot and on a
+// change. Off until it says otherwise, so a run that never loads a settings file
+// leaves the pointer alone.
+std::atomic<bool> g_setting_enabled{false};
+
 // How many input polls a click holds the game's `A`. The game polls the pad
 // about once per emulated frame, and a real button press lasts many frames, so
 // a one-poll press is at the edge of what the map's state machine samples.
@@ -108,15 +113,20 @@ constexpr int kPlayMaxY = 0xC0;
 constexpr int kEdgeMarginDefault = 24;
 
 bool enabled() {
-    static const bool on = [] {
+    static const int override_state = [] {
         const char* value = std::getenv("OGRE_MAP_CURSOR");
         if (value == nullptr || value[0] == '\0') {
-            return true;
+            return -1;
         }
-        return std::strcmp(value, "0") != 0 && std::strcmp(value, "off") != 0 &&
-               std::strcmp(value, "false") != 0 && std::strcmp(value, "no") != 0;
+        return (std::strcmp(value, "0") == 0 || std::strcmp(value, "off") == 0 ||
+                std::strcmp(value, "false") == 0 || std::strcmp(value, "no") == 0)
+                   ? 0
+                   : 1;
     }();
-    return on;
+    if (override_state >= 0) {
+        return override_state != 0;
+    }
+    return g_setting_enabled.load(std::memory_order_relaxed);
 }
 
 bool log_enabled() {
@@ -244,6 +254,11 @@ extern "C" void ogre_map_cursor_note_mouse(int window_x, int window_y, int win_w
 void ogre_map_cursor_clear() {
     g_mouse_live.store(false, std::memory_order_relaxed);
     g_edge_direction.store(0, std::memory_order_relaxed);
+}
+
+// Called by `settings.cpp` when the MOUSE ENABLED row is applied.
+extern "C" void ogre_map_cursor_set_enabled(bool on) {
+    g_setting_enabled.store(on, std::memory_order_relaxed);
 }
 
 // Called from the platform thread on a left click over the game window. The
