@@ -1998,9 +1998,12 @@ static bool get_input(int controller_num, uint16_t* buttons, float* x, float* y)
         if (map_click || mission_click) {
             out_buttons |= 0x8000u;
         }
-        // A pointer pushed past the map's edge holds the matching direction, so
-        // the map scrolls the way the pointer is pushing; see map_cursor.hpp.
+        // A pointer pushed past a screen's edge holds the matching direction, so
+        // that screen scrolls the way the pointer is pushing; see
+        // app/src/map_cursor.hpp and app/src/mission_cursor.hpp. Each entry point
+        // reports 0 unless its own screen is the active one.
         out_buttons |= ogre_map_cursor_edge_direction();
+        out_buttons |= ogre_mission_cursor_edge_direction();
         connected = true;
     }
 

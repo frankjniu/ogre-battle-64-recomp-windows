@@ -716,13 +716,43 @@ few pad polls in `get_input`, the same path the keyboard and the live console's
 each armed count is consumed on every poll whatever screen is up, so an `A` armed
 on one screen cannot fire later on the other.
 
+**The field's view scrolls when the pointer is close to a play-area edge.** The
+camera pans with the cursor, not with a held direction: the mover converts the
+held D-pad into the per-frame delta bytes `state+0x06`/`+0x07` (`0x801BE5A8`
+`li $v1,26`, then the ramp at `0x801BE6D4`), and `func_ovlN_801BECF0` — called
+right after the mover at `0x801AF130` — reads those same bytes and adds
+`delta/128 * 8.5 * table[e]` to the eye x and the look-at x of the camera at
+`*(u32*)0x8018F5AC` (`0x801BEE04`-`0x801BEE1C`), with the same for z
+(`0x801BEE9C`-`0x801BEF5C`), and clamps the result to the map's world rect at
+`0x801F0DD8`. It only runs while `*(0x801F3630)` is set, which the mover sets only
+when the cursor pair actually changed on that call (`0x801BEC3C`-`0x801BEC70`), so
+the pan is coupled to cursor movement. The pointer's own pixel is clamped by the
+mover to 40..280 / 30..210, so a pointer past that bound cannot place the cursor
+there and the intent arrives as a held direction instead: a pointer within
+`OGRE_MISSION_CURSOR_EDGE` pixels (default 24) of a play-area bound holds the
+matching D-pad bit, which the mover decodes through the profile `*(0x801F0CC0)`.
+The masks this mode's profile uses are the N64 D-pad bits (right `0x100`, left
+`0x200`, up `0x800`, down `0x400`), which the hook prints once per run beside
+`hook active`. This is the world map's mechanism, and the arbitration already
+adopts the game's cursor while a direction is held, so the push and the pointer
+do not fight. Developer-confirmed: the camera could be moved around by moving the
+cursor close to the edges (session 129).
+
 | Variable | Effect |
 |---|---|
-| `OGRE_MISSION_CURSOR=0` | disable the pointer-driven cursor and the click's `A` (`off`, `false` and `no` also work) |
-| `OGRE_MISSION_CURSOR_LOG=1` | print one `[missioncursor]` line on every change of the game's cursor position, the pointer position or the D-pad state, one line per confirm poll, and one line per click |
+| `OGRE_MISSION_CURSOR=0` | disable the pointer-driven cursor, the click's `A` and the edge push (`off`, `false` and `no` also work) |
+| `OGRE_MISSION_CURSOR_LOG=1` | print one `[missioncursor]` line on every change of the game's cursor position, the pointer position, the D-pad state or the camera, one line per edge push, one line per confirm poll, and one line per click |
 | `OGRE_MISSION_CURSOR_CONFIRM_POLLS=<n>` | how many pad polls a click holds `A` (default 8) |
 | `OGRE_MISSION_CURSOR_YIELD=<n>` | frames after a click during which the pointer adopts the game's cursor instead of placing it (default 15, ~0.25 s). It has to cover the camera coming to rest after a command; the cost is that the pointer does not respond during the window, so the player moves the mouse afterwards to re-sync it |
 | `OGRE_MISSION_CURSOR_AT=<x>,<y>` | park the pointer at that framebuffer pixel **once**, with no mouse event, as if it had been moved there. A measurement aid, so a scripted run can place the cursor with nobody at the mouse. Do not run it while someone is testing with a real mouse: the parked pointer is what the placement uses |
+| `OGRE_MISSION_CURSOR_EDGE=<n>` | how close to a play-area bound (40/280 x, 30/210 y) the pointer may be before it pushes that direction (default 24 px) |
+| `OGRE_MISSION_CURSOR_EDGE_FORCE=<mask>` | hold that raw D-pad mask (hex or decimal, e.g. `0x100` for right) as if the pointer were at that edge, with no mouse event. A measurement aid, so a scripted run can hold a direction with nobody at the mouse |
+
+The `[missioncursor]` line carries the field's camera as
+`cam=<eye x>,<eye z>/<look x>,<look z>`. `*(u32*)0x8018F5AC` is the camera the
+mover and `func_ovlA_801AAE30` both use, `+0x14` is the eye (its height is
+`+0x18`) and `+0x20` the point it looks at, and `func_ovlN_801BECF0` moves both
+to pan. `edge=` is the D-pad mask the pointer is currently pushing.
 
 Environment variables make a run self-driving and bounded, for measurements and
 captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,

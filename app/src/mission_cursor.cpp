@@ -68,7 +68,12 @@ std::atomic<bool> g_mouse_live{false};
 std::atomic<float> g_mouse_x{0.0f};
 std::atomic<float> g_mouse_y{0.0f};
 
-
+// The N64 D-pad bits the pointer is pushing past the play area, sampled with the
+// pointer position. A pointer outside the 320x240 framebuffer (the pillarbox, or
+// any pixel of a fullscreen window beyond the picture) still names an edge, so
+// the direction is computed where the pointer is clamped into the framebuffer's
+// range rather than where `g_mouse_live` is true.
+std::atomic<uint16_t> g_edge_direction{0};
 
 // The mover runs once per frame, so its call site is the only report that the
 // mission field is the active screen. The input side reads the counter, so the
@@ -118,6 +123,10 @@ constexpr uint16_t kPadDirections = 0x0F00u;  // right 0x100, left 0x200, down 0
 // at 0x801BE890. `*(0x801F0E00)` is the field mode; that branch runs for modes
 // below 2 and for mode 42.
 constexpr uint32_t kProfilePointer = 0x801F0CC0u;
+constexpr uint32_t kProfileRight = 0x0Eu;
+constexpr uint32_t kProfileLeft = 0x0Cu;
+constexpr uint32_t kProfileUp = 0x08u;
+constexpr uint32_t kProfileDown = 0x0Au;
 constexpr uint32_t kProfileCentreButton = 0x1Cu;
 constexpr uint32_t kFieldMode = 0x801F0E00u;
 
@@ -132,6 +141,30 @@ constexpr uint32_t kDeltaY = 0x07u;  // s8
 // `A` in the N64 pad report (`func_8007284C` reads `lhu 0(D_800C4BF0)`).
 constexpr uint16_t kButtonA = 0x8000u;
 
+// The D-pad bits the pointer can hold. They are the same masks the mover
+// compares the held word against (`*(0x801F0CC0)`: right +0x0E, left +0x0C, up
+// +0x08, down +0x0A), so a held bit reaches the mover as if a pad had sent it.
+constexpr uint16_t kPadRight = 0x0100u;
+constexpr uint16_t kPadLeft = 0x0200u;
+constexpr uint16_t kPadDown = 0x0400u;
+constexpr uint16_t kPadUp = 0x0800u;
+
+// The camera the field renders through: `*(u32*)0x8018F5AC` is a pointer to a
+// struct whose +0x14 is the eye position (x at +0x14, y at +0x18, z at +0x1C)
+// and whose +0x20 is the look-at point (x at +0x20, y at +0x24, z at +0x28);
+// `func_ovlA_801AAE30` builds the view basis from those two vectors and
+// intersects the ground plane at y = 0 to map a screen pixel to a world point.
+// `func_ovlN_801BECF0` pans by adding the same amount to the eye and the
+// look-at (0x801BEE04-0x801BEE1C for x, 0x801BEE9C-0x801BEF5C for z), which is
+// what a mouse edge push is measured against. The word is
+// `lw $v0, -2644($v0)` with `lui $v0, 0x8019`, so the address is
+// `0x80190000 - 0xA54`.
+constexpr uint32_t kCameraPointer = 0x8018F5ACu;
+constexpr uint32_t kCameraEyeX = 0x14u;
+constexpr uint32_t kCameraEyeZ = 0x1Cu;
+constexpr uint32_t kCameraLookX = 0x20u;
+constexpr uint32_t kCameraLookZ = 0x28u;
+
 // The play area the mover clamps the cursor into (x at 0x801BEB98/0x801BEBB8,
 // y at 0x801BEBE0/0x801BEC00). A pointer outside it would be clamped by the
 // game anyway; clamping here keeps the logged value equal to the stored one.
@@ -139,6 +172,7 @@ constexpr float kPlayMinX = 40.0f;
 constexpr float kPlayMaxX = 280.0f;
 constexpr float kPlayMinY = 30.0f;
 constexpr float kPlayMaxY = 210.0f;
+constexpr int kEdgeMarginDefault = 24;
 
 
 bool enabled() {
@@ -206,6 +240,71 @@ int yield_frames() {
         return parsed >= 0 ? parsed : kYieldFramesDefault;
     }();
     return frames;
+}
+
+int edge_margin() {
+    static const int margin = [] {
+        const char* value = std::getenv("OGRE_MISSION_CURSOR_EDGE");
+        if (value == nullptr || value[0] == '\0') {
+            return kEdgeMarginDefault;
+        }
+        const int parsed = std::atoi(value);
+        return parsed >= 0 ? parsed : kEdgeMarginDefault;
+    }();
+    return margin;
+}
+
+// `OGRE_MISSION_CURSOR_EDGE_FORCE=<n>` holds that raw D-pad mask (hex or
+// decimal, e.g. `0x100` for right) as if the pointer were at that edge, with no
+// mouse event needed. It is a test aid: it makes the edge scroll measurable in a
+// scripted run that no one is driving.
+uint16_t edge_forced() {
+    static const uint16_t forced = []() -> uint16_t {
+        const char* value = std::getenv("OGRE_MISSION_CURSOR_EDGE_FORCE");
+        if (value == nullptr || value[0] == '\0') {
+            return 0;
+        }
+        return static_cast<uint16_t>(std::strtoul(value, nullptr, 0));
+    }();
+    return forced;
+}
+
+// The D-pad bits for a framebuffer pixel inside the field's view. A pixel within
+// `kEdgeMargin` of a play-area bound pushes that way, and the bounds are the
+// mover's own clamps, so the push starts where the cursor would stop moving.
+uint16_t edge_direction_for(int fb_x, int fb_y) {
+    const int margin = edge_margin();
+    uint16_t direction = 0;
+    if (fb_x <= static_cast<int>(kPlayMinX) + margin) {
+        direction |= kPadLeft;
+    }
+    else if (fb_x >= static_cast<int>(kPlayMaxX) - margin) {
+        direction |= kPadRight;
+    }
+    if (fb_y <= static_cast<int>(kPlayMinY) + margin) {
+        direction |= kPadUp;
+    }
+    else if (fb_y >= static_cast<int>(kPlayMaxY) - margin) {
+        direction |= kPadDown;
+    }
+    return direction;
+}
+
+// The camera's eye and look-at x/z, or false when the field's module is not the
+// resident one. Only the log reads these.
+bool read_camera(const uint8_t* rdram, float& eye_x, float& eye_z, float& look_x, float& look_z) {
+    if (!in_ram(kCameraPointer, 4u)) {
+        return false;
+    }
+    const uint32_t camera = read_u32(rdram, kCameraPointer);
+    if (camera == 0 || !in_ram(camera, kCameraLookZ + 4u)) {
+        return false;
+    }
+    eye_x = read_f32(rdram, camera + kCameraEyeX);
+    eye_z = read_f32(rdram, camera + kCameraEyeZ);
+    look_x = read_f32(rdram, camera + kCameraLookX);
+    look_z = read_f32(rdram, camera + kCameraLookZ);
+    return true;
 }
 
 // `OGRE_MISSION_CURSOR_AT=<x>,<y>` parks the pointer at that framebuffer pixel,
@@ -297,6 +396,15 @@ extern "C" void ogre_mission_cursor_note_mouse(int window_x, int window_y, int w
     int fb_y = 0;
     const bool inside =
         window_to_framebuffer(window_x, window_y, win_w, win_h, draw_w, draw_h, fb_x, fb_y);
+    // The edge push uses the clamped pixel, so a pointer in the pillarbox (or
+    // outside a fullscreen window's picture) still scrolls the field.
+    const uint16_t direction = edge_direction_for(fb_x, fb_y);
+    const uint16_t previous = g_edge_direction.exchange(direction, std::memory_order_relaxed);
+    if (direction != previous && log_enabled()) {
+        std::fprintf(stderr, "[missioncursor] edge push 0x%03X at (%d,%d)\n", direction, fb_x,
+                     fb_y);
+        std::fflush(stderr);
+    }
     if (!inside) {
         // The pointer names no framebuffer pixel, so it does not place the
         // cursor; the game's own input drives it again.
@@ -308,7 +416,10 @@ extern "C" void ogre_mission_cursor_note_mouse(int window_x, int window_y, int w
     g_mouse_live.store(true, std::memory_order_release);
 }
 
-extern "C" void ogre_mission_cursor_clear() { g_mouse_live.store(false, std::memory_order_relaxed); }
+extern "C" void ogre_mission_cursor_clear() {
+    g_mouse_live.store(false, std::memory_order_relaxed);
+    g_edge_direction.store(0, std::memory_order_relaxed);
+}
 
 // Called from the platform thread on a left click over the game window. The
 // click itself carries no position: the pointer has already placed the cursor,
@@ -374,6 +485,18 @@ extern "C" bool ogre_mission_cursor_take_confirm() {
     return false;
 }
 
+// Called from `get_input` on the game thread, once per pad poll.
+extern "C" uint16_t ogre_mission_cursor_edge_direction() {
+    if (!enabled() || !mission_is_active()) {
+        return 0;
+    }
+    const uint16_t forced = edge_forced();
+    if (forced != 0) {
+        return forced;
+    }
+    return g_edge_direction.load(std::memory_order_relaxed);
+}
+
 // Called from the game thread at the mover's `L_801BEC04`, the one point on the
 // mover's default path where its per-frame delta bytes still hold this call's
 // values. Records whether the mover moved the cursor itself this call.
@@ -410,11 +533,20 @@ extern "C" void ogre_mission_cursor(uint8_t* rdram) {
     }
 
     // One line per process, so a run's log says the hook is in this binary and
-    // that the mission's field module is the one that reached it.
+    // that the mission's field module is the one that reached it. The four
+    // direction masks the mover compares the held word against are printed with
+    // it: the edge push holds the N64 D-pad bits, so this line says whether this
+    // mode's own profile uses those same bits.
     static bool reported = false;
     if (!reported) {
         reported = true;
-        std::fprintf(stderr, "[missioncursor] hook active on the mission field\n");
+        std::fprintf(stderr,
+                     "[missioncursor] hook active on the mission field (profile right=0x%04X "
+                     "left=0x%04X up=0x%04X down=0x%04X)\n",
+                     static_cast<unsigned>(profile_mask(rdram, kProfileRight)),
+                     static_cast<unsigned>(profile_mask(rdram, kProfileLeft)),
+                     static_cast<unsigned>(profile_mask(rdram, kProfileUp)),
+                     static_cast<unsigned>(profile_mask(rdram, kProfileDown)));
         std::fflush(stderr);
     }
 
@@ -480,6 +612,14 @@ extern "C" void ogre_mission_cursor(uint8_t* rdram) {
     const float x = std::min(std::max(mouse_x, kPlayMinX), kPlayMaxX);
     const float y = std::min(std::max(mouse_y, kPlayMinY), kPlayMaxY);
 
+    // The camera's eye and look-at x/z, so a log shows whether the field's view
+    // actually panned. `func_ovlN_801BECF0` moves both together.
+    float cam_eye_x = 0.0f;
+    float cam_eye_z = 0.0f;
+    float cam_look_x = 0.0f;
+    float cam_look_z = 0.0f;
+    const bool cam_ok = read_camera(rdram, cam_eye_x, cam_eye_z, cam_look_x, cam_look_z);
+
     // Log only on change: one line per frame of pointer movement would be
     // unreadable.
     if (log_enabled()) {
@@ -487,15 +627,22 @@ extern "C" void ogre_mission_cursor(uint8_t* rdram) {
         static float last_game_y = -1.0f;
         static float last_mouse_x = -1.0f;
         static float last_mouse_y = -1.0f;
+        static float last_cam_eye_x = 1.0e30f;
+        static float last_cam_eye_z = 1.0e30f;
+        static float last_cam_look_x = 1.0e30f;
+        static float last_cam_look_z = 1.0e30f;
         static bool last_live = false;
         static bool last_pad = false;
         static bool last_centre = false;
         static bool last_integrate = false;
         static bool last_yield = false;
+        const bool cam_changed =
+            cam_ok && (cam_eye_x != last_cam_eye_x || cam_eye_z != last_cam_eye_z ||
+                       cam_look_x != last_cam_look_x || cam_look_z != last_cam_look_z);
         if (game_x != last_game_x || game_y != last_game_y || mouse_x != last_mouse_x ||
             mouse_y != last_mouse_y || live != last_live || pad_driving != last_pad ||
             centring != last_centre || integrating != last_integrate ||
-            yielding != last_yield) {
+            yielding != last_yield || cam_changed) {
             last_game_x = game_x;
             last_game_y = game_y;
             last_mouse_x = mouse_x;
@@ -505,16 +652,23 @@ extern "C" void ogre_mission_cursor(uint8_t* rdram) {
             last_centre = centring;
             last_integrate = integrating;
             last_yield = yielding;
+            last_cam_eye_x = cam_eye_x;
+            last_cam_eye_z = cam_eye_z;
+            last_cam_look_x = cam_look_x;
+            last_cam_look_z = cam_look_z;
             std::fprintf(stderr,
                          "[missioncursor] game=(%.2f,%.2f) mouse=%s(%.2f,%.2f) "
-                         "(%.2f,%.2f) pad=%d centre=%d nudge=%d yield=%d held=0x%04X mode=%u -> "
-                         "(%.2f,%.2f)\n",
+                         "pad=%d centre=%d nudge=%d yield=%d held=0x%04X mode=%u "
+                         "edge=0x%03X cam=%.2f,%.2f/%.2f,%.2f -> (%.2f,%.2f)\n",
                          static_cast<double>(game_x), static_cast<double>(game_y),
                          live ? "" : "off",
                          static_cast<double>(mouse_x), static_cast<double>(mouse_y),
                          pad_driving ? 1 : 0, centring ? 1 : 0, integrating ? 1 : 0,
                          yielding ? 1 : 0, static_cast<unsigned>(held),
                          static_cast<unsigned>(read_u32(rdram, kFieldMode)),
+                         static_cast<unsigned>(g_edge_direction.load(std::memory_order_relaxed)),
+                         static_cast<double>(cam_eye_x), static_cast<double>(cam_eye_z),
+                         static_cast<double>(cam_look_x), static_cast<double>(cam_look_z),
                          static_cast<double>(x), static_cast<double>(y));
             std::fflush(stderr);
         }

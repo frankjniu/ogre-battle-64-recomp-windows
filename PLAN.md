@@ -151,7 +151,19 @@ Organize Screen, the credits, the ending and the attract loop.
   on an explicit signal — a direction held, the C-LEFT centring branch, the
   mover's own delta, or the window after a click — and adopts the game's position
   then. The click window is what leaves the cursor on the place a command acted
-  on. `OGRE_MISSION_CURSOR=0` disables it
+  on. **The view scrolls when the pointer is close to a play-area edge**
+  (session 129): the field's camera pans with the cursor, not with a held
+  direction. The mover turns the held D-pad into the delta bytes
+  `state+0x06`/`+0x07`, and `func_ovlN_801BECF0` (called right after the mover at
+  `0x801AF130`) adds `delta/128 * 8.5 * table[e]` to the eye and the look-at x of
+  the camera at `*(u32*)0x8018F5AC` (`0x801BEE04`-`0x801BEE1C`; the same for z at
+  `0x801BEE9C`-`0x801BEF5C`), clamped to the world rect at `0x801F0DD8`, and only
+  while `*(0x801F3630)` is set, which the mover sets only when the cursor pair
+  changed. The pointer's pixel is clamped by the mover, so the edge intent
+  arrives as input: within `OGRE_MISSION_CURSOR_EDGE` (24) px of a bound the hook
+  holds the matching N64 D-pad bit, `get_input` ORs it into controller 0, and the
+  `pad=` signal already makes the pointer adopt the game's cursor, so the two do
+  not fight. Developer-confirmed. `OGRE_MISSION_CURSOR=0` disables all of it
   (`docs/guides/app-build.md` → "The mission field's mouse cursor").
 - **HD backgrounds (experiment)** — `mods/backgrounds/` is a pack of PNGs that
   replaces the dialogue/cutscene backdrops. The app writes the pack's image over
@@ -642,8 +654,25 @@ be skipped and calls into swappable RAM would bind to the wrong bank. See
   the pointer's pixel at the generated label `L_801BEC04`, after both clamps and
   before the tail that reverts the cursor when no unit is focused, and stands
   down while a direction is held, adopting the game's position so the release
-  does not jump. See `docs/guides/app-build.md` → "The mission field's mouse
-  cursor" and `docs/DECISIONS.md` (2026-10-10, session 128).
+  does not jump. **The mission field's camera pans with the cursor, and not with
+  a held direction, so the pointer scrolls the view by holding the direction the
+  game's own mover reads.** The mover `func_ovlN_801BE4E0` converts the held
+  D-pad into the delta bytes `state+0x06`/`+0x07`, and `func_ovlN_801BECF0`
+  (called right after it at `0x801AF130`) adds `delta/128 * 8.5 * table[e]` to
+  the eye x and the look-at x of the camera at `*(u32*)0x8018F5AC`
+  (`0x801BEE04`-`0x801BEE1C`), and the same for z (`0x801BEE9C`-`0x801BEF5C`),
+  clamped to the map's world rect at `0x801F0DD8`; it runs only while
+  `*(0x801F3630)` is set, which the mover sets only when the cursor pair changed
+  on that call (`0x801BEC3C`-`0x801BEC70`). The camera is `+0x14` the eye (its
+  height at `+0x18`), `+0x20` the look-at and `+0x2C` the up vector, which
+  `func_ovlA_801AAE30` builds the screen-to-world basis from; `lw $v0,-2644($v0)`
+  with `lui $v0,0x8019` is `0x8018F5AC`, and not `0x8019F5AC`.
+  `app/src/mission_cursor.cpp` holds the matching N64 D-pad bit while the pointer
+  is within `OGRE_MISSION_CURSOR_EDGE` (24) px of a play-area bound, and
+  `get_input` ORs it into controller 0; the four masks the mover compares are this mode's
+  profile's own (`*(0x801F0CC0)`), which are the N64 bits. See
+  `docs/guides/app-build.md` → "The mission field's mouse cursor" and
+  `docs/DECISIONS.md` (2026-10-10, sessions 128 and 129).
 
 ## Working documents
 

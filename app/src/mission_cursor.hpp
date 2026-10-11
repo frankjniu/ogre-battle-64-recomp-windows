@@ -92,6 +92,25 @@ extern "C" void ogre_mission_cursor_click(int window_x, int window_y, int win_w,
 // one the next time it appears. One click arms both this and the world map's.
 extern "C" bool ogre_mission_cursor_take_confirm();
 
+// Called from `get_input`. The N64 D-pad bits for the direction the pointer is
+// pushing past the field's play area, or 0.
+//
+// The field's camera pans with the cursor, not with a held direction: the mover
+// `func_ovlN_801BE4E0` converts the held D-pad into the per-frame delta bytes
+// `state+0x06`/`+0x07` (0x801BE5A8 `li $v1,26`, then the ramp at 0x801BE6D4),
+// and the camera scroll `func_ovlN_801BECF0` (called right after the mover at
+// 0x801AF130) reads those same bytes and adds `delta/128 * 8.5 * table[e]` to
+// the eye x and the look-at x of the camera at `*(u32*)0x8019F5AC`
+// (0x801BEE04-0x801BEE1C), clamped to the map's world rect at `0x801F0DD8`.
+// It only runs while `*(0x801F3630)` is set, which the mover sets only when the
+// cursor pair actually changed on that call (0x801BEC3C-0x801BEC70), so the
+// pan is coupled to cursor movement. Holding the game's own D-pad is therefore
+// how the pointer scrolls the field: the pointer's own pixel is clamped by the
+// mover to 40..280 / 30..210, so a pointer past that bound cannot place the
+// cursor there and the intent has to arrive as input. This is the same
+// mechanism as the world map's edge scroll; see `app/src/map_cursor.hpp`.
+extern "C" uint16_t ogre_mission_cursor_edge_direction();
+
 // Environment:
 //   OGRE_MISSION_CURSOR=0                  disable the placement and the click's A
 //   OGRE_MISSION_CURSOR_LOG=1              one `[missioncursor]` line per change
@@ -101,4 +120,11 @@ extern "C" bool ogre_mission_cursor_take_confirm();
 //                                          instead of placing it (15, ~0.25 s)
 //   OGRE_MISSION_CURSOR_AT=<x>,<y>         park the pointer at that framebuffer
 //                                          pixel once, with no mouse event: a
+//                                          measurement aid for scripted runs
+//   OGRE_MISSION_CURSOR_EDGE=<n>           how close to a play-area bound the
+//                                          pointer may be before it pushes that
+//                                          direction (24 px)
+//   OGRE_MISSION_CURSOR_EDGE_FORCE=<mask>  hold that raw D-pad mask (hex or
+//                                          decimal) as if the pointer were at
+//                                          that edge, with no mouse event: a
 //                                          measurement aid for scripted runs
