@@ -257,6 +257,20 @@ run produces is evidence about the port until the five checks in
 Ordered by how much each item blocks a player. Each item names the handoff that
 holds the evidence.
 
+0. **A cutscene sprite part draws solid black on the world-map route into a
+   mission (session 130).** Developer report: sprites are drawn in parts and about
+   10% of cutscenes show one part (the example: the knight's head) as a black
+   texture, static for the whole shot, on a 2D sprite over a pre-rendered
+   background. The fault is path-dependent: loading the suspend save does not show
+   it, while loading the world-map save, entering the mission and triggering the
+   cutscene does. The font/bitmap cache at `0x8017909C` and the "stale cache from
+   the map" theory are both closed at instruction level (see the handoff). The
+   instrument is landed: `OGRE_TEX_TRACE=1` reports every textured rectangle with
+   the RDRAM it samples (`OGRE_TEX_TRACE_DUMP`, `_AFTER_MS`, `_DRAW`, `_MAX`) and
+   `tools/ogre_tex_uv.py` decodes the dump. The capture decides whether the black
+   part's source bytes are black or the rectangle reads the wrong place. See
+   `docs/HANDOFF-2026-10-11-session130.md`.
+
 1. **Windows access violation when the game starts (`0xC0000005`). Closed, and
    verified on Windows (session 113).** Session 107 root-caused v0.4.0's fault at
    `ogrebattle64.exe+0x10001AE`: `plume::d3d12::D3D12CommandList::setSamplePositions`

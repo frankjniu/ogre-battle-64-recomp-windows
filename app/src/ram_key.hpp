@@ -1,0 +1,33 @@
+// OGRE_RAM_KEY: press a digit key and the run writes a file with the guest
+// RDRAM at a chosen address, so a bug can be investigated offline without the
+// developer copying anything out of a terminal.
+//
+// Session 130 uses it for a palette table the battle scene builds: one slot of
+// 24 is all zero, and the run only shows it as a black character part. The dump
+// answers "is this slot zero in the game" and "what do the other slots hold"
+// in one key press, with no timing requirement (the table is filled when the
+// scene starts and stays put).
+//
+// Knobs:
+//   OGRE_RAM_KEY=<1..9>       the key that takes the dump
+//   OGRE_RAM_KEY_ADDR=<hex>   the guest address to dump (default 0x802696C8,
+//                             the battle part-palette table)
+//   OGRE_RAM_KEY_LEN=<n>      bytes to dump (default 0x1000)
+//   OGRE_RAM_KEY_OUT=<dir>    where to write (default the run's config dir)
+//
+// The output is `<dir>/ram-<n>.bin` (the bytes) and `<dir>/ram-<n>.txt` (the
+// same bytes as hex per 16, plus the 0x80-byte slots spelled out, which is what
+// makes an all-zero slot visible at a glance). Each press writes the next
+// number, so a run can take several.
+#pragma once
+
+#include <cstdint>
+
+namespace ogre {
+
+// Call once per frame from the platform update, after SDL's keyboard state is
+// current. Reads the environment on the first call; does nothing when
+// OGRE_RAM_KEY is unset.
+void ram_key_tick(uint8_t* rdram);
+
+}  // namespace ogre

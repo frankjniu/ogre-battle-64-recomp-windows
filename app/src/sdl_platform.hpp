@@ -18,6 +18,11 @@ namespace ogre {
 namespace console {
 bool tick();
 void exec(const std::string& line);
+// True once per press of one of the number keys `1`..`9`, read from SDL's
+// keyboard state without pumping events (the same read `tick` does). `<digit>`
+// is 1..9. The renderer's OGRE_TEX_TRACE capture uses it, because that capture
+// lives at display-list submission and not in the console's tick.
+bool key_pressed(int digit);
 // Reads the user's `OGRE_CAPTURE_PRESENT` once, so a later `snap` cannot
 // overwrite it. Call once, before the runtime starts its present thread.
 void init_capture_env();

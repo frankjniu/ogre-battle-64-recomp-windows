@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 
+#include <sys/stat.h>
+
 #include "hle/rt64_application.h"
 #include "shared/rt64_f3d_defines.h"
 
@@ -26,6 +28,7 @@
 
 #include "renderer.hpp"
 #include "gbi.hpp"
+#include "sdl_platform.hpp"
 #include "widescreen.hpp"
 
 namespace ogre {
@@ -433,6 +436,377 @@ inline std::vector<Selector> parse(const char* spec) {
 }
 
 }  // namespace nop_rect
+
+// --- OGRE_TEX_TRACE: report what every textured rectangle samples ----------
+//
+// Diagnostic for "one part of a sprite draws as a black rectangle while the
+// rest of the sprite is correct". The submitted display list is walked before
+// RT64 parses it, and every G_TEXRECT is reported with the rectangle it covers
+// and the texel window it reads. RDRAM is then sampled at the address the
+// window resolves to and the bytes are summarised, so the run says whether the
+// source data is black, whether the sample landed outside the intended image,
+// or whether the palette is wrong.
+//
+// The source address of a rectangle depends on the format in effect, so each
+// line carries the whole state (SETTIMG format/size/width/address, the tile's
+// line and palette, the SETTILESIZE window, and the rectangle's s/t). The
+// bytes are written beside the line and `tools/ogre_tex_uv.py` decodes both
+// offline. Nothing here decides what is correct.
+//
+// Knobs:
+//   OGRE_TEX_TRACE=1           one line per textured rectangle
+//   OGRE_TEX_TRACE_DUMP=<dir>  also write the sampled RDRAM to <dir>/tex/
+//   OGRE_TEX_TRACE_DRAW=<n>    report only the nth rectangle of the run
+//   OGRE_TEX_TRACE_MAX=<n>     stop after n reported rectangles (default 20000)
+namespace tex_trace {
+
+inline uint32_t rd32(const uint8_t* p) {
+    uint32_t v;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+inline uint32_t p0(uint32_t w, uint8_t pos, uint8_t bits) {
+    return (w >> pos) & ((1u << bits) - 1u);
+}
+
+struct State {
+    uint8_t* rdram = nullptr;
+    std::string dump_dir;
+    uint32_t only_draw = 0;    // 0 = every rectangle
+    uint32_t max_draws = 20000;
+    uint32_t min_px = 0;       // skip rectangles narrower and shorter than this
+    uint32_t dl = 0;
+    uint32_t segments[16] = {};
+    // SETTIMG
+    uint32_t timg = 0, timg_fmt = 0, timg_siz = 0, timg_width = 0;
+    // SETTILE, tile 0
+    uint32_t tile_line = 0, tile_palette = 0;
+    // SETTILESIZE, tile 0
+    uint32_t uls = 0, ult = 0, lrs = 0, lrt = 0;
+    // LOADTLUT, tile 0
+    uint32_t tlut_addr = 0, tlut_count = 0;
+    bool tlut_seen = false;
+    bool trace_all_images = false;   // report every SETTIMG, not only TEXRECT sources
+    uint32_t index = 0;        // every rectangle of the run
+    uint32_t reported = 0;
+    bool truncated = false;
+
+    uint32_t resolve(uint32_t addr) const {
+        return (segments[(addr >> 24) & 0xFu] + (addr & 0x00FFFFFFu)) & 0x1FFFFFFFu;
+    }
+
+    // Bytes per image row, from the format and the image width.
+    uint32_t bytes_per_row() const {
+        const uint32_t w = timg_width + 1;
+        switch (timg_siz) {
+            case 0: return (w + 1) / 2;   // 4b
+            case 1: return w;             // 8b
+            case 2: return w * 2;         // 16b
+            default: return w * 4;        // 32b
+        }
+    }
+
+    // A cheap fingerprint of an image's data: sample count, non-zero count and
+    // a sum, so the log alone says which of the bound images is all zero
+    // (the black-part case) without a per-frame dump of every image.
+    void fingerprint(uint32_t addr, uint32_t count, const char* tag) {
+        const uint32_t off = addr & 0x1FFFFFFFu;
+        if (count == 0 || off + count > 0x800000u) {
+            std::fprintf(stderr, "[tex]   %s: 0x%08X+%u outside RDRAM\n", tag, addr, count);
+            return;
+        }
+        const uint8_t* p = rdram + off;
+        uint32_t nonzero = 0, sum = 0, samples = 0;
+        const uint32_t step = (count > 1024) ? (count / 1024) : 1;
+        for (uint32_t i = 0; i < count; i += step) {
+            sum += p[i];
+            if (p[i] != 0) {
+                ++nonzero;
+            }
+            ++samples;
+        }
+        std::fprintf(stderr, "[tex]   %s: %u bytes, nonZero %u/%u, mean %.1f%s\n", tag, count,
+                     nonzero, samples, samples ? double(sum) / double(samples) : 0.0,
+                     (nonzero == 0) ? "   <-- ALL ZERO" : "");
+    }
+
+    void dump(const std::string& tag, uint32_t addr, uint32_t count, uint32_t fmt, uint32_t siz,
+              uint32_t width, uint32_t y, const char* what, const char* note) {
+        if (dump_dir.empty() || count == 0 || count > 0x200000u) {
+            return;
+        }
+        const uint32_t off = addr & 0x1FFFFFFFu;
+        if (off + count > 0x800000u) {
+            return;
+        }
+        char base[64];
+        std::snprintf(base, sizeof(base), "%06u_%s", index, tag.c_str());
+        const std::string dir = dump_dir + "/tex";
+        ::mkdir(dump_dir.c_str(), 0777);
+        ::mkdir(dir.c_str(), 0777);
+        if (FILE* f = std::fopen((dir + "/" + base + ".bin").c_str(), "wb")) {
+            std::fwrite(rdram + off, 1, count, f);
+            std::fclose(f);
+        }
+        if (FILE* f = std::fopen((dir + "/" + base + ".json").c_str(), "w")) {
+            std::fprintf(f,
+                         "{\"what\":\"%s\",\"note\":\"%s\",\"rdram\":%u,\"count\":%u,\"fmt\":%u,"
+                         "\"siz\":%u,\"width\":%u,\"line\":%u,\"palette\":%u,\"tlut\":%u,"
+                         "\"tlut_rdram\":%u,\"dl\":%u,\"draw\":%u,\"y\":%u}\n",
+                         what, note, off, count, fmt, siz, width, tile_line, tile_palette,
+                         tlut_seen ? 1u : 0u, tlut_seen ? (tlut_addr & 0x1FFFFFFFu) : 0u, dl, index,
+                         y);
+            std::fclose(f);
+        }
+    }
+
+    // A summary of the bytes at `addr`, to separate "the source is black" from
+    // "the source is fine and the rectangle reads the wrong place".
+    void summarise(uint32_t addr, uint32_t count, const char* tag) {
+        if (count == 0 || count > 0x200000u) {
+            std::fprintf(stderr, "[tex]   %s: out-of-range count %u\n", tag, count);
+            return;
+        }
+        const uint32_t off = addr & 0x1FFFFFFFu;
+        if (off + count > 0x800000u) {
+            std::fprintf(stderr, "[tex]   %s: 0x%08X+%u leaves RDRAM\n", tag, addr, count);
+            return;
+        }
+        const uint8_t* p = rdram + off;
+        uint32_t nonzero = 0, sum = 0, distinct = 0, samples = 0;
+        uint8_t seen[16] = {};
+        const uint32_t step = (count > 512) ? (count / 512) : 1;
+        for (uint32_t i = 0; i < count; i += step) {
+            const uint8_t b = p[i];
+            sum += b;
+            if (b != 0) {
+                ++nonzero;
+            }
+            bool known = false;
+            for (uint32_t s = 0; s < distinct; ++s) {
+                if (seen[s] == b) {
+                    known = true;
+                    break;
+                }
+            }
+            if (!known && distinct < 16) {
+                seen[distinct++] = b;
+            }
+            ++samples;
+        }
+        std::fprintf(stderr, "[tex]   %s: raw=%u nonZero=%u/%u mean=%.1f distinct=%u first16=", tag,
+                     count, nonzero, samples, samples ? double(sum) / double(samples) : 0.0,
+                     distinct);
+        for (uint32_t i = 0; i < 16 && i < count; ++i) {
+            std::fprintf(stderr, "%02x", p[i]);
+        }
+        std::fprintf(stderr, "\n");
+    }
+
+    // The 24-byte G_TEXRECT, as `gbi.cpp`'s own decoder reads it:
+    //   +0  w0  = lower-right  (x in bits 12..23, y in bits 0..11, quarter px)
+    //   +4  w1  = upper-left   (same packing) and the tile in bits 24..26
+    //   +8  RDPHALF_1 (its second word = s in bits 16..31, t in bits 0..15)
+    //   +16 RDPHALF_2 (its second word = dsdx in bits 16..31, dtdy in bits 0..15)
+    void rect(uint32_t off, const uint8_t* q, uint32_t w0, uint32_t w1, bool flip) {
+        const uint32_t st_w = rd32(q + 12);
+        const uint32_t ds_w = rd32(q + 20);
+        const int32_t s = int16_t(p0(st_w, 16, 16));
+        const int32_t t = int16_t(p0(st_w, 0, 16));
+        const int32_t dsdx = int16_t(p0(ds_w, 16, 16));
+        const int32_t dtdy = int16_t(p0(ds_w, 0, 16));
+        const int x0 = int(p0(w1, 12, 12)) / 4, y0 = int(p0(w1, 0, 12)) / 4;
+        const int x1 = int(p0(w0, 12, 12)) / 4, y1 = int(p0(w0, 0, 12)) / 4;
+        const int px_w = (x1 > x0) ? (x1 - x0) : (x0 - x1);
+        const int px_h = (y1 > y0) ? (y1 - y0) : (y0 - y1);
+
+        if (only_draw != 0 && only_draw != index) {
+            ++index;
+            return;
+        }
+        // OGRE_TEX_TRACE_MIN_PX: skip small rectangles (the font's 11x14 glyphs
+        // are the bulk of a frame and never the suspect part).
+        if (min_px != 0 && uint32_t(px_w) < min_px && uint32_t(px_h) < min_px) {
+            ++index;
+            return;
+        }
+        if (reported >= max_draws) {
+            truncated = true;
+            return;
+        }
+
+        // The texel window the rectangle walks, in whole texels. s and t are in
+        // 1/32 texel, dsdx and dtdy are the change per pixel in 1/1024 texel.
+        const int32_t s_end = s + (dsdx * px_w) / 32;
+        const int32_t t_end = t + (dtdy * px_h) / 32;
+        const uint32_t s_a = uint32_t(s) / 32, s_b = uint32_t(s_end) / 32;
+        const uint32_t t_a = uint32_t(t) / 32, t_b = uint32_t(t_end) / 32;
+        const uint32_t tex_w = (s_b > s_a ? s_b - s_a : s_a - s_b) + 1;
+        const uint32_t tex_h = (t_b > t_a ? t_b - t_a : t_a - t_b) + 1;
+
+        std::fprintf(stderr,
+                     "[tex] dl=%u n=%u %s rect=%d,%d..%d,%d px=%dx%d s=%d t=%d dsdx=%d dtdy=%d "
+                     "window=uls%u ult%u lrs%u lrt%u tile=line%u pal%u timg=0x%08X "
+                     "fmt=%u siz=%u imgw=%u texels=%ux%u\n",
+                     dl, index, flip ? "TEXRECTFLIP" : "TEXRECT", x0, y0, x1, y1, px_w, px_h, s, t,
+                     dsdx, dtdy, uls, ult, lrs, lrt, tile_line, tile_palette, timg, timg_fmt,
+                     timg_siz, timg_width + 1, tex_w, tex_h);
+
+        // The bytes the draw reads, addressed the same way for every format.
+        if (!dump_dir.empty() && timg != 0) {
+            const uint32_t bpr = bytes_per_row();
+            const uint32_t indexed = (timg_fmt == 2 || timg_fmt == 3) ? 1u : 0u;
+            const uint32_t img = resolve(timg);
+            // A generous window: the image rows the window covers plus margin,
+            // capped so a wild tile does not dump the whole RDRAM.
+            uint32_t rows = tex_h;
+            if (((lrt - ult) >> 4) + 1 > rows) {
+                rows = ((lrt - ult) >> 4) + 1;
+            }
+            uint32_t count = bpr * (rows + 2);
+            if (count > 0x40000u) {
+                count = 0x40000u;
+            }
+            char note[256];
+            std::snprintf(note, sizeof(note),
+                          "window=%u,%u,%u,%u start=%d,%d end=%d,%d rect=%d,%d..%d,%d",
+                          uls, ult, lrs, lrt, s_a, t_a, s_b, t_b, x0, y0, x1, y1);
+            dump("src", img, count, timg_fmt, timg_siz, timg_width, t_a, "src", note);
+            summarise(img, count, "src");
+            if (indexed && tlut_seen) {
+                dump("pal", resolve(tlut_addr), tlut_count, 2, 2, tlut_count / 2, 0, "pal",
+                     "the palette the LOADTLUT before this draw loaded");
+                summarise(resolve(tlut_addr), tlut_count, "pal");
+            }
+        }
+        ++reported;
+        ++index;
+    }
+
+    void walk(uint32_t off, int depth) {
+        if (depth > 32 || truncated) {
+            return;
+        }
+        for (;;) {
+            if (truncated || off + 8 > 0x20000000u) {
+                return;
+            }
+            const uint8_t* q = rdram + off;
+            const uint32_t w0 = rd32(q);
+            const uint32_t w1 = rd32(q + 4);
+            const uint8_t op = uint8_t(w0 >> 24);
+
+            switch (op) {
+                case gbi::OP_SETTIMG:  // 0xFD
+                    timg_fmt = p0(w0, 21, 3);
+                    timg_siz = p0(w0, 19, 2);
+                    timg_width = p0(w0, 0, 12);
+                    timg = w1;
+                    // Every image the frame binds, whether or not it ends up in a
+                    // G_TEXRECT. A 3D character's texture is bound here and drawn
+                    // by triangles, so this is the only place a TEXRECT-only
+                    // report would miss it.
+                    if (trace_all_images) {
+                        // One line per image per capture, not per bind: the game
+                        // re-binds the same image every frame and the data is
+                        // static for the frame. Tracked by address and size.
+                        static std::vector<uint64_t> seen_images;
+                        const uint64_t key = (uint64_t(resolve(timg)) << 16) | (timg_width & 0xFFFF);
+                        bool first = true;
+                        for (uint64_t k : seen_images) {
+                            if (k == key) { first = false; break; }
+                        }
+                        if (first && seen_images.size() < 4096) {
+                            seen_images.push_back(key);
+                        }
+                        if (first) {
+                        std::fprintf(stderr,
+                                     "[tex] dl=%u SETTIMG img=0x%08X raw=0x%08X fmt=%u siz=%u "
+                                     "width=%u\n",
+                                     dl, resolve(timg), timg, timg_fmt, timg_siz, timg_width + 1);
+                        // 32 rows covers the largest character part; the count is
+                        // capped so a wild bind cannot read the whole RDRAM.
+                        const uint32_t fp_bpr = bytes_per_row();
+                        uint32_t fp = fp_bpr * 32;
+                        if (fp == 0 || fp > 0x4000u) {
+                            fp = 0x4000u;
+                        }
+                        if (fp_bpr != 0) {
+                            fingerprint(resolve(timg), fp, "img");
+                        }
+                        }
+                    }
+                    off += 8;
+                    continue;
+                case gbi::OP_SETTILE:  // 0xF5
+                    if (p0(w1, 24, 3) == 0) {
+                        tile_line = p0(w0, 9, 9);
+                        tile_palette = p0(w1, 20, 4);
+                    }
+                    off += 8;
+                    continue;
+                case gbi::OP_SETTILESIZE:  // 0xF2
+                    if (p0(w1, 24, 3) == 0) {
+                        uls = p0(w0, 12, 12);
+                        ult = p0(w0, 0, 12);
+                        lrs = p0(w1, 12, 12);
+                        lrt = p0(w1, 0, 12);
+                    }
+                    off += 8;
+                    continue;
+                case gbi::OP_LOADTLUT: {  // 0xF0, every tile: the palette may be
+                                          // loaded for a tile the draw does not name
+                    const uint32_t tile = p0(w1, 24, 3);
+                    const uint32_t addr = timg + 2 * p0(w0, 14, 10);
+                    const uint32_t count = (p0(w1, 14, 10) + 1) * 2;
+                    if (!tlut_seen) {
+                        tlut_addr = addr;
+                        tlut_count = count;
+                        tlut_seen = true;
+                    }
+                    if (dump_dir.empty() == false) {
+                        std::fprintf(stderr, "[tex]   LOADTLUT t%u addr=0x%08X count=%u\n",
+                                     tile, addr, count);
+                    }
+                    off += 8;
+                    continue;
+                }
+                case gbi::OP_MOVEWORD:  // 0xDB, segment registers
+                    if (((w0 >> 16) & 0xFF) == 0x06) {
+                        segments[(w0 >> 2) & 0xF] = w1;
+                    }
+                    off += 8;
+                    continue;
+                case gbi::OP_DL: {  // 0xDE
+                    const uint32_t target = resolve(w1);
+                    if (((w0 >> 16) & 1) == 0) {
+                        walk(target, depth + 1);
+                        off += 8;
+                    } else {
+                        off = target;
+                    }
+                    continue;
+                }
+                case gbi::OP_ENDDL:  // 0xDF
+                    return;
+                case 0xE4:      // G_TEXRECT
+                case 0xE5:      // G_TEXRECTFLIP
+                    rect(off, q, w0, w1, op == 0xE5);
+                    if (truncated) {
+                        return;
+                    }
+                    off += 24;
+                    continue;
+                default:
+                    break;
+            }
+            off += (op == 0x04) ? 16 : 8;  // G_BRANCH_Z is the only 16-byte command
+        }
+    }
+};
+
+}  // namespace tex_trace
 
 // --- OGRE_FOG: repair the stale-tile fog pieces ---------------------------
 //
@@ -1016,6 +1390,103 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
             fprintf(stderr, "[nop-rect] dl=%u walked=%u removed=%u\n", dl_count_, walker.index,
                     walker.removed);
             fflush(stderr);
+        }
+
+        // OGRE_TEX_TRACE=<1>: report every textured rectangle and the RDRAM it
+        // samples (see the helper above). Read-only; nothing is patched.
+        //
+        // The capture is armed by the first of:
+        //   OGRE_TEX_TRACE_KEY=<1..9>  the digit key is pressed (edge-triggered)
+        //   OGRE_TEX_TRACE_AFTER_MS=<n>  the run's trace clock passes n ms
+        // and it stops after OGRE_TEX_TRACE_MS=<n> ms (default 2000), so pressing
+        // a key at the bad frame captures that frame and the next second and
+        // nothing else. OGRE_TEX_TRACE_KEY=0 (or no key and no AFTER_MS) traces
+        // from the first display list.
+        if (getenv("OGRE_TEX_TRACE") != nullptr) {
+            static const std::string dumpDir = [] {
+                const char* d = getenv("OGRE_TEX_TRACE_DUMP");
+                if (d == nullptr || d[0] == '\0') {
+                    return std::string();
+                }
+                std::string dir(d);
+                if (!dir.empty() && dir.back() == '/') {
+                    dir.pop_back();
+                }
+                mkdir(dir.c_str(), 0777);
+                mkdir((dir + "/tex").c_str(), 0777);
+                fprintf(stderr, "[tex] dumping sampled RDRAM to %s/tex\n", dir.c_str());
+                return dir;
+            }();
+            static const uint32_t onlyDraw = [] {
+                const char* v = getenv("OGRE_TEX_TRACE_DRAW");
+                return (uint32_t)((v != nullptr) ? strtoul(v, nullptr, 0) : 0);
+            }();
+            static const uint32_t maxDraws = [] {
+                const char* v = getenv("OGRE_TEX_TRACE_MAX");
+                return (uint32_t)((v != nullptr) ? strtoul(v, nullptr, 0) : 20000);
+            }();
+            static const uint32_t minPx = [] {
+                const char* v = getenv("OGRE_TEX_TRACE_MIN_PX");
+                return (uint32_t)((v != nullptr) ? strtoul(v, nullptr, 0) : 0);
+            }();
+            static const uint64_t afterMs = [] {
+                const char* v = getenv("OGRE_TEX_TRACE_AFTER_MS");
+                return (uint64_t)((v != nullptr) ? strtoull(v, nullptr, 0) : 0);
+            }();
+            static const uint64_t holdMs = [] {
+                const char* v = getenv("OGRE_TEX_TRACE_MS");
+                return (uint64_t)((v != nullptr) ? strtoull(v, nullptr, 0) : 2000);
+            }();
+            static const int hotkey = [] {
+                const char* v = getenv("OGRE_TEX_TRACE_KEY");
+                return (v != nullptr) ? (int)strtol(v, nullptr, 0) : 0;
+            }();
+            static bool armed = false;
+            static bool hotkey_mode = false;   // a key capture re-arms; a timer does not
+            static bool finished = false;      // a timer capture has already run
+            static uint64_t armed_at = 0;
+            if (!armed) {
+                // A timer capture runs once; a key capture waits for the next press.
+                bool go = false;
+                if (hotkey != 0) {
+                    go = console::key_pressed(hotkey);
+                } else if (!finished) {
+                    go = (afterMs == 0) || (ultramodern::trace_millis() >= afterMs);
+                }
+                if (go) {
+                    armed = true;
+                    hotkey_mode = (hotkey != 0);
+                    armed_at = ultramodern::trace_millis();
+                    fprintf(stderr, "[tex] armed at t=%llums (%s), holding %llums\n",
+                            (unsigned long long)armed_at,
+                            hotkey_mode ? "key pressed" : "timer", (unsigned long long)holdMs);
+                    fflush(stderr);
+                }
+            } else if (holdMs != 0 && (ultramodern::trace_millis() - armed_at) >= holdMs) {
+                fprintf(stderr, "[tex] capture window closed at t=%llums\n",
+                        (unsigned long long)ultramodern::trace_millis());
+                fflush(stderr);
+                armed = false;
+                if (!hotkey_mode) {
+                    finished = true;          // a timer capture does not repeat
+                }
+            }
+            if (armed) {
+                tex_trace::State st;
+                st.rdram = app_->core.RDRAM;
+                st.dump_dir = dumpDir;
+                st.only_draw = onlyDraw;
+                st.max_draws = maxDraws;
+                st.min_px = minPx;
+                st.trace_all_images = (getenv("OGRE_TEX_TRACE_IMAGES") != nullptr);
+                st.dl = dl_count_;
+                st.walk(task->t.data_ptr & 0x1FFFFFFF, 1);
+                if (st.truncated) {
+                    fprintf(stderr, "[tex] dl=%u truncated after %u rectangles\n", dl_count_,
+                            st.reported);
+                }
+                fflush(stderr);
+            }
         }
 
         // OGRE_FOG: repair OB64's stale-tile fog/cloud "wrap" pieces (see the

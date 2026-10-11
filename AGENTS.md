@@ -313,6 +313,80 @@ it means stop chasing the path as a port bug.
   submodules. Vendored code is gitignored; list it explicitly in the handoff.
 - `git status --short` before you finish must show only intended changes.
 
+## 11. Do not drive the game yourself; ask the developer
+
+The developer plays the game and drives it to the state a bug needs. Ask them for
+that state instead of scripting a route to it.
+
+A scripted route costs more than it looks. Session 130 spent two runs and a long
+stretch of wall clock trying to tap the opening into a mission, and the app on
+this machine reached 5.9 s of game time in 70 s of wall clock with tracing on, so
+the taps landed in the wrong scene and both runs were discarded. The developer
+reached the same state in one attempt.
+
+- When a bug needs a played state, say which state and let them reach it. Ask for
+  the state in their terms ("the cutscene where the knight's head goes black")
+  and attach whatever identification helps (a screenshot, the scene, the save).
+- A save is their instrument too. `OGRE_SAVE=<path>` loads a battery image, and
+  session 130's investigation ran on their `pre_ogre.bin` and `scene_7.bin`
+  copies rather than on a tap schedule.
+- Scripted taps (`OGRE_TAP_*`) stay for routes that must be exact and short, such
+  as a known boot sequence in CI. They are not the tool for reaching a scene the
+  developer can load from a save or walk to in seconds.
+- Ask for the artefact you need in a form you can read yourself (see rule 12),
+  and read it from disk instead of asking them to copy terminal output.
+
+## 12. Instrument the game with debugging shortcuts, and have the developer press a key
+
+A bug that appears in a played state is investigated by instrumenting the run and
+**pressing a key at the moment of the bug**, not by parsing a log of the whole
+session afterwards.
+
+`OGRE_TEX_TRACE` (session 130) is the worked example of the shape to build:
+
+- **A key arms the capture.** `OGRE_TEX_TRACE_KEY=<1..9>` takes the capture on
+  the press, and `OGRE_TEX_TRACE_MS=<n>` closes it by itself, so one key press
+  captures the bad frame and a second of context and nothing else. A capture that
+  cannot be stopped is a capture of the whole run: session 130's first version
+  re-armed after every window and produced a 7.6 MB log from a 2 s capture.
+- **A key writes a file, so nothing is copied out of a terminal.**
+  `OGRE_RAM_KEY=<1..9>` (`_ADDR`, `_LEN`, `_OUT`) writes guest RDRAM to
+  `<OGRE_PREF_DIR>/ram-<n>.bin` and `.txt`. Read those files from disk; do not
+  ask the developer to paste console output. Asking them to drive and then paste
+  cost this project several rounds in session 130.
+- **Answer offline what the log can answer.** A fingerprint in the log beats a
+  dump per frame: `OGRE_TEX_TRACE_IMAGES` prints each bound image once with a
+  nonzero-byte count, and the `OGRE_RAM_KEY` text file ends in a per-slot
+  summary that marks an empty slot. Session 130 found the fault from a `mean 0.0`
+  and a row of zero bytes, with no further run.
+- **Filter at the source.** `OGRE_TEX_TRACE_MIN_PX` and the per-image dedup cut a
+  frame from 28 rectangles and 90 image binds to a handful of lines.
+- **Bracket the bug.** Take a dump on each side of the change (before and after a
+  pose, before and after a transition) so a single run answers "empty from the
+  start" against "emptied later".
+- The rule for probes still holds (rule 6): tag them, revert them with
+  `make recomp && make bank-recomp`, and prove the revert. A diagnostic that is
+  part of the port's toolkit (`OGRE_TEX_TRACE`, `OGRE_RAM_KEY`) is not a probe
+  and stays.
+
+## 13. Start debug runs at the title screen
+
+`OGRE_SCENE=title` boots straight to the title scene `0x04` instead of waiting
+out the boot intro and the publisher stills. Verified in session 130:
+`forcing scene 0x04`, then `forced scene 0x04 is active` at `t=3793ms`.
+
+- `OGRE_SCENE=<name|hex>` uses the scene table in `app/src/bank_overlays.cpp`
+  (`title`, `intro`, `publishers`, `story`, `unit-info`, `tutorial`, `menu`,
+  `new-game`), and a hex id works for a scene with no name.
+- Pair it with the state the bug needs: `OGRE_SAVE=<path> OGRE_SCENE=title` lands
+  on the title with the battery already loaded, so the run reaches Load Game and
+  the save's scene without replaying the boot.
+- Keep the diagnostics that make the run readable: `OGRE_SCENE_LOG=1` (one
+  `[scene]` line per change) or `OGRE_SCENE_TRACE=1`.
+- A forced scene enters **without** the pre-state a natural path builds (rule 9),
+  so a forced scene that misbehaves is not by itself a finding. Use it to reach a
+  state faster, and say in the handoff when a result came from a forced entry.
+
 ---
 
 ## Verified facts

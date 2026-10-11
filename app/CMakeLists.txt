@@ -283,6 +283,7 @@ if (EMSCRIPTEN)
         src/hd_backgrounds.cpp
         src/map_cursor.cpp
         src/mission_cursor.cpp
+        src/ram_key.cpp
     )
 else()
     set(OGRE_APP_SOURCES
@@ -305,6 +306,7 @@ else()
         src/hd_backgrounds.cpp
         src/map_cursor.cpp
         src/mission_cursor.cpp
+        src/ram_key.cpp
     )
 endif()
 

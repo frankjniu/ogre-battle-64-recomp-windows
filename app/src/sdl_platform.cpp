@@ -1,3 +1,4 @@
+#include "ram_key.hpp"
 #include "sdl_platform.hpp"
 #include "synth_frame.hpp"
 #include "bank_overlays.hpp"
@@ -707,6 +708,11 @@ void pump_sdl_events(Platform& platform, bool* quit) {
     // still executes, and on the main thread because a command may write a
     // multi-megabyte dump (see the console block in this file).
     console::tick();
+
+    // OGRE_RAM_KEY=<1..9>: press that key and write the guest RDRAM at
+    // OGRE_RAM_KEY_ADDR to a file, so a bug can be investigated offline with no
+    // copying out of a terminal (see app/src/ram_key.hpp).
+    ram_key_tick(ultramodern_get_rdram_base());
 
     // OGRE_WINDOW_CLOSE_AT_MS=<n>: push one SDL_WINDOWEVENT_CLOSE for the game
     // window `n` ms after the platform was configured. Development aid for the
@@ -1831,6 +1837,23 @@ void console_exec(const std::string& line_in) {
 // bank_overlays.cpp). Same semantics as a line in the watched file.
 void exec(const std::string& line) {
     console_exec(line);
+}
+
+// Edge-triggered read of the number keys, for callers outside the console's
+// tick (the renderer's texture trace, which runs at display-list submission).
+// It does not consume the console's own key trigger; each caller keeps its own
+// previous state.
+bool key_pressed(int digit) {
+    if (digit < 1 || digit > 9) {
+        return false;
+    }
+    static bool was_down[10] = {};
+    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    const SDL_Scancode sc = static_cast<SDL_Scancode>(SDL_SCANCODE_1 + (digit - 1));
+    const bool down = (keys != nullptr) && (keys[sc] != 0);
+    const bool pressed = down && !was_down[digit];
+    was_down[digit] = down;
+    return pressed;
 }
 
 // Is the watched-file trigger on? Any of its own variables names it, or
