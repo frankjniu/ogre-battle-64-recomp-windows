@@ -73,8 +73,13 @@ Organize Screen, the credits, the ending and the attract loop.
   profile's rightmost DEF/MDEF digit rectangle and made it sample the next font
   cell (session 101). RT64's framebuffer tile copy is refused when the tile's
   texels lie outside the framebuffer's `lastWriteRect`, the rect the copy is
-  actually filled from; a texture load then reads RDRAM. That was the flat
-  ENV-coloured block on a map unit's head (session 134, open work 0).
+  actually filled from, and when the source framebuffer was not written in the
+  workload being processed (`Framebuffer::lastWriteWorkload`, printed as
+  `[fbcopy-nowrite]`); a texture load then reads RDRAM. The first condition fixed
+  the flat ENV-coloured block on a map unit's head (session 134), the second the
+  same block in a second cutscene, where the record was a leftover from an earlier
+  scene whose stale rect covered the tiles the game had put its sprite scratch on
+  (session 136, open work 0).
 - **Audio** — the game's own audio microcode is recompiled and runs by default.
   The Linux package needs a static SDL2 with an ALSA, PulseAudio or PipeWire
   backend. The 0.3.0 build host had no audio development headers, SDL2 dropped
@@ -268,36 +273,48 @@ run produces is evidence about the port until the five checks in
 Ordered by how much each item blocks a player. Each item names the handoff that
 holds the evidence.
 
-0. **A map unit's head sprite drew as a flat ENV-coloured block. Fixed (session
-   134).** The head is the mission field's 14-part map-unit sprite and its 16x15
-   colour tile was served by RT64's framebuffer tile-copy path instead of being
-   read from RDRAM. A framebuffer at masked `0x2E6840` whose `lastWriteFmt` is
-   `G_IM_FMT_DEPTH` is still on record over the heap the game builds the head-down
-   bitmap in (`func_8019ABC4`, `0x802FB0E8`), and
-   `FramebufferManager::createTileCopyRecord` fills a tile copy from that
+0. **A map unit's head sprite drew as a flat ENV-coloured block. Fixed in two
+   steps (sessions 134 and 136).** The head is the mission field's 14-part
+   map-unit sprite and its 16x15 colour tile was served by RT64's framebuffer
+   tile-copy path instead of being read from RDRAM. A framebuffer at masked
+   `0x2E6840` whose `lastWriteFmt` is `G_IM_FMT_DEPTH` is still on record over the
+   heap the game builds the head-down bitmap in (`func_8019ABC4`, `0x802FB0E8`),
+   and `FramebufferManager::createTileCopyRecord` fills a tile copy from that
    framebuffer's `lastWriteRect` only. The head's tile (`468,65..484,67`) lies
    outside it, so the copy it sampled was never written: `TEXEL1` read zero and the
    combiner `(1 - TEXEL1) * ENV + TEXEL1` (`FC62FE03 2F0D73FD`, `G_CYC_2CYCLE`)
-   painted the flat `ENV >> 3` = `0x2947` over the mask's correct silhouette. The
-   fix refuses a tile copy whose texels are not inside the framebuffer's
-   `lastWriteRect` (`FramebufferManager::checkRegionsTMEM`), so the load reads RDRAM
-   the way hardware does; the frame's head box then holds 1 pixel of `0x2947`
-   against 76 before and the developer confirms the head renders. A blanket refusal
-   of depth framebuffers as colour sources also fixed the head but changed one
-   scenery scanline, because a one-row strip legitimately samples the same
-   framebuffer's rendered rows; the write-rect test keeps that copy. Instruments
-   that found it and stay: `OGRE_SPRITE_TRACE=1` (one line per small tile with the
-   draw-call state, descriptor and resolved hash, printed after the upload
-   decision), `OGRE_TILE_DECODE=1` (the RGBA the renderer decodes out of the TMEM
+   painted the flat `ENV >> 3` = `0x2947` over the mask's correct silhouette
+   (session 134). The same fault in a second cutscene, reached from `pre_ogre.bin`,
+   showed the write-rect test is one instance of a larger condition: there the
+   source record (`0x32AF40`, 320x240 RGBA16) is not a colour image of the frame at
+   all (`SETCIMG` is `0x400`), its stale `lastWriteRect` `0,0..319,239` covers the
+   tiles, and the addresses hold the game's CPU-built sprite scratch, so the
+   guard served 23 copies and the head was the frame's own `G_SETENVCOLOR 0x000001`
+   (session 136). A tile copy is now served only when the source framebuffer was
+   written **in the workload being processed** (`Framebuffer::lastWriteWorkload`
+   against the manager's per-workload `usedTimestamp`, `[fbcopy-nowrite]`), which
+   keeps the copy for a framebuffer this frame rendered and refuses a leftover one.
+   `FramebufferManager::checkRegionsTMEM` holds both conditions; the load then
+   reads RDRAM the way hardware does. Verified in the first scene (the head box
+   holds 1 pixel of `0x2947` against 76 before) and in the second (14
+   `[fbcopy-nowrite]` refusals, 0 `[fbcopy]`, developer-confirmed), with the
+   scene-14 regression frame matching the session-134 verified dump and its
+   `y=120` scenery row unchanged. A blanket refusal of depth framebuffers as colour
+   sources also fixed the first scene but changed one scenery scanline, because a
+   one-row strip legitimately samples the same framebuffer's rendered rows; the
+   write-rect test keeps that copy. Instruments that found it and stay:
+   `OGRE_SPRITE_TRACE=1` (one line per small tile with the draw-call state,
+   descriptor and resolved hash, printed after the upload decision; stops at 40000
+   lines), `OGRE_TILE_DECODE=1` (the RGBA the renderer decodes out of the TMEM
    snapshot it hashes, plus the raw-TMEM path and the `[fbcopy]` lines), and
-   `OGRE_TILE_TRACE_ALL=1` with `OGRE_TILE_TRACE_MAXH=64`. `OGRE_FB_GPU_COPY=0`
-   removes the copy path entirely for an A/B. Residual: a freshness test against
-   `fb->RAMHash` is unreliable on its own because `hashTracking` re-hashes every
-   framebuffer at each frame end without touching the GPU copies, and the writer of
-   the depth image at `0x802E6840` is not identified (the address is not in the
-   fault frame's image). See `docs/HANDOFF-2026-10-11-session134.md`,
-   `docs/notes-black-sprite.md` §10, and the session-133 handoff for the evidence
-   that led here.
+   `OGRE_TILE_TRACE_ALL=1` with `OGRE_TILE_TRACE_MAXH=64` (cap 5000). Residual: a
+   freshness test against `fb->RAMHash` is unreliable on its own because
+   `hashTracking` re-hashes every framebuffer at each frame end without touching
+   the GPU copies, and the writers of the two leftover framebuffer records
+   (`0x802E6840` and `0x32AF40`) are not identified; neither address is in its
+   fault frame's image. See `docs/HANDOFF-2026-10-11-session134.md`,
+   `docs/HANDOFF-2026-10-12-session136.md`, `docs/notes-black-sprite.md` §10-§11,
+   and the session-133 handoff for the evidence that led here.
 
 1. **Windows access violation when the game starts (`0xC0000005`). Closed, and
    verified on Windows (session 113).** Session 107 root-caused v0.4.0's fault at

@@ -434,3 +434,66 @@ against `fb->RAMHash` is unreliable on its own, because `hashTracking` re-hashes
 every framebuffer at the end of every frame without touching the GPU copies; that
 is what made the first version of the fix render the head correctly on some frames
 and not others.
+
+## 11. Session 136: the same fault in a second cutscene, and the general guard
+
+The developer found a second cutscene with a black part (a town street, a knight
+whose head is black, a dialogue balloon *"Help! Someone, help me!!"*), reachable
+from `pre_ogre.bin`, and reported that the head **flashes**: the correct sprite
+lasts a single frame and the black one lasts seconds.
+
+**The shipped guard does not fire there.** `debug/head-trace.sh` on that save
+(`black-sprite-136`) gives 23 `[fbcopy]` lines — a tile served by a framebuffer
+copy — and **0 `[fbcopy-outside]`**, i.e. session 134's write-rect test passes on
+every one of them. All 23 name the same framebuffer: `fb=0x32AF40`,
+`bytes=153600` (320x240 RGBA16), at 16-32 wide strips of one to three rows. One
+`[fbcopy-stale]` line is the freshness guard firing on one frame, which is the
+correct frame the developer sees.
+
+**The fault frame's signature is session 134's.** The two `1` presses are the
+fault frame: the game's own framebuffers hold the black-headed knight, and the
+head's box (`140..170 x 95..135`) is 162 of 900 pixels of exactly `0x0001`, which
+is the frame's only `G_SETENVCOLOR`, `0x000001`. The head is drawn in the ENV
+colour because `TEXEL1` sampled as zero — the same combiner path as `0x2947` in
+§10, with a different scene's ENV.
+
+**Why the write-rect test cannot see it.** That framebuffer is not part of the
+frame at all. The fault frame's display list has one `SETCIMG`, at `0x802DE890`,
+and it is `addr=0x00000400`; nothing targets `0x32AF40`. The record is a leftover
+from an earlier scene, and its `lastWriteRect` is the stale `0,0..319,239` that
+covers every one of those tiles. What sits in that range at fault time is the
+game's CPU-built unit sprite scratch: 7 of the frame's 264 texture loads read from
+inside `0x32AF40..0x350740`, the unit's blocks span `0x329098..0x32C770`, the head
+payloads are at `0x32A318`, `0x32A5C0` and `0x32B0B0`, and the blocks carry
+`36 34 00 02 w h` headers at `0x32C1F0`, `0x32CC40`, `0x32D850`, `0x32DF80`,
+`0x32E350`. The region's words are 78.9% `0xFFFE` and 11.3% `0xFFFC`, a leftover
+image rather than sprite art.
+
+**The general guard.** A tile copy holds the framebuffer's GPU content, and that
+is the truth only for the workload that rendered it; after that the content is
+written back to RDRAM and the game may reuse the addresses. `checkRegionsTMEM` now
+also requires the source framebuffer to have been written **in the workload being
+processed** (`Framebuffer::lastWriteWorkload` against the manager's per-workload
+`usedTimestamp`, stamped in `State::submitFramebufferPair`), and prints
+`[fbcopy-nowrite]` for that refusal. The per-load site is required: a `RegionTMEM`
+stamped in an earlier workload survives in `activeRegionsTMEM`, and
+`checkRegionsTMEM` re-reads the framebuffer for every load.
+
+**Verified.** With the guard (`black-sprite-139`) the same route gives 14
+`[fbcopy-nowrite]`, all `fb=0x32AF40`, `writeRect=0,0..319,239`,
+`fbWorkload=9342` against `workload=9583..9660`, and **zero `[fbcopy]`**; the
+developer confirms the head renders. `OGRE_FB_GPU_COPY=0` on the same route gives
+the same correct picture, which is the A/B. The scene-14 regression run
+(`black-sprite-141`) still refuses the head tile there
+(`[fbcopy-outside] fb=0x2E6840 fmt=5 tile=468,65..484,67 writeRect=null`), refuses
+no legitimate copy (`[fbcopy-nowrite]` = 0), and its dumped frame matches the
+session-134 verified dump: the unit crop's colour histogram is identical and
+`y=120`, `x=110..119` is `5a49 624b 51c7 5a09 5a09 628b 6a8b 628b 72cd 7b0f` in
+the new dump, the session-134 dump and the pre-fix fault dump.
+
+**Two instrument limits this run hit.** `OGRE_SPRITE_TRACE` stops at 40000 lines
+and `OGRE_TILE_TRACE_ALL` at `OGRE_TILE_TRACE_MAX=5000`; both were consumed by
+call 201 of a long run, so late scenes have no `[spr]`/`[gpu-tile]` line.
+`[fbcopy]`, `[fbcopy-stale]`, `[fbcopy-outside]`/`[fbcopy-nowrite]` and `[dec]`
+are deduplicated instead and still print.
+

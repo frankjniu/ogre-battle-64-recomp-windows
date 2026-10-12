@@ -436,10 +436,18 @@ index 6c83fe0..18ac07c 100644
          void updateMultisampling();
          void end();
 diff --git a/src/hle/rt64_framebuffer.cpp b/src/hle/rt64_framebuffer.cpp
-index 873883d..4ed7785 100644
+index 873883d..a6e32b8 100644
 --- a/src/hle/rt64_framebuffer.cpp
 +++ b/src/hle/rt64_framebuffer.cpp
-@@ -174,6 +174,47 @@ namespace RT64 {
+@@ -41,6 +41,7 @@ namespace RT64 {
+         lastWriteType = Type::None;
+         lastWriteFmt = 0;
+         lastWriteTimestamp = 0;
++        lastWriteWorkload = UINT64_MAX;
+         widthChanged = false;
+         sizChanged = false;
+         rdramChanged = false;
+@@ -174,6 +175,47 @@ namespace RT64 {
  #   endif
      }
  
@@ -488,7 +496,7 @@ index 873883d..4ed7785 100644
          widthChanged = false;
          sizChanged = false;
 diff --git a/src/hle/rt64_framebuffer.h b/src/hle/rt64_framebuffer.h
-index 6e8c9b8..b053b01 100644
+index 6e8c9b8..8aa622f 100644
 --- a/src/hle/rt64_framebuffer.h
 +++ b/src/hle/rt64_framebuffer.h
 @@ -4,6 +4,7 @@
@@ -519,7 +527,21 @@ index 6e8c9b8..b053b01 100644
      struct RenderTarget;
  
      struct TileCopyCache {
-@@ -74,6 +88,9 @@ namespace RT64 {
+@@ -49,6 +63,13 @@ namespace RT64 {
+         uint8_t lastWriteFmt;
+         Type lastWriteType;
+         uint64_t lastWriteTimestamp;
++        // OGRE: the tile copy cache id (`FramebufferManager::usedTimestamp`) of
++        // the workload that submitted this framebuffer's most recent write. A
++        // tile copy is the authoritative version of this framebuffer's RDRAM
++        // range only while the GPU target holds a render from the workload
++        // being processed; after that the written-back RDRAM is authoritative.
++        // `UINT64_MAX` = never written.
++        uint64_t lastWriteWorkload;
+         uint32_t modifiedBytes;
+         uint32_t RAMBytes;
+         uint64_t RAMHash;
+@@ -74,6 +95,9 @@ namespace RT64 {
  
          void copyRenderTargetToNative(RenderWorker *worker, RenderTarget *target, uint32_t dstRowWidth, uint32_t dstRowStart, uint32_t dstRowEnd, uint8_t fmt, uint32_t ditherRandomSeed, const ShaderLibrary *shaderLibrary);
          void copyNativeToRAM(uint8_t *dst, uint32_t dstRowWidth, uint32_t dstRowStart, uint32_t dstRowEnd);
@@ -530,7 +552,7 @@ index 6e8c9b8..b053b01 100644
          void addDitherPatterns(const std::array<uint32_t, 4> &extraPatterns);
          uint32_t bestDitherPattern() const;
 diff --git a/src/hle/rt64_framebuffer_manager.cpp b/src/hle/rt64_framebuffer_manager.cpp
-index d7caa12..da9a038 100644
+index d7caa12..97d80bc 100644
 --- a/src/hle/rt64_framebuffer_manager.cpp
 +++ b/src/hle/rt64_framebuffer_manager.cpp
 @@ -6,6 +6,10 @@
@@ -544,7 +566,7 @@ index d7caa12..da9a038 100644
  
  #include "xxHash/xxh3.h"
  
-@@ -719,7 +723,69 @@ namespace RT64 {
+@@ -719,7 +723,84 @@ namespace RT64 {
                      }
                  }
  
@@ -570,20 +592,35 @@ index d7caa12..da9a038 100644
 +                    Framebuffer *copyFb = find(it->fbTile.address);
 +                    const bool insideWrite = (copyFb != nullptr) && !copyFb->lastWriteRect.isNull() &&
 +                        copyFb->lastWriteRect.fullyInside(FixedRect(it->fbTile.left * 4, it->fbTile.top * 4, it->fbTile.right * 4, it->fbTile.bottom * 4));
-+                    if (!insideWrite) {
++                    // OGRE fix (black body parts, second case): a tile copy holds
++                    // the framebuffer's *GPU* content, which is the truth only for
++                    // the workload that rendered it -- after that the content was
++                    // written back to RDRAM and the game is free to reuse that
++                    // address range. A leftover framebuffer from an earlier scene
++                    // keeps a `lastWriteRect` that covers texels it has nothing to
++                    // do with, which is why the write-rect test alone left the
++                    // knight's head black in the field cutscene (framebuffer
++                    // 0x32AF40 is not even a colour image of that frame;
++                    // `SETCIMG` is 0x400) while the game's CPU-built sprite blocks
++                    // sit in the same addresses. RDRAM is what hardware samples.
++                    const bool writtenThisWorkload = (copyFb != nullptr) && (copyFb->lastWriteWorkload == usedTimestamp);
++                    if (!insideWrite || !writtenThisWorkload) {
 +                        if (getenv("OGRE_TILE_DECODE") != nullptr) {
 +                            static std::set<std::string> outsideSeen;
 +                            char key[192];
 +                            snprintf(key, sizeof(key), "%u/%u/%u/%u/%u/%06X", tmemStart, tmemEnd, lineWidth, siz, fmt, it->fbTile.address);
 +                            if (outsideSeen.size() < 40 && outsideSeen.insert(key).second) {
-+                                fprintf(stderr, "[fbcopy-outside] fb=0x%06X fmt=%u tile=%u,%u..%u,%u writeRect=%d,%d..%d,%d "
-+                                        "tmem=%u..%u siz=%u fmt=%u -> copy refused, reading RDRAM\n",
++                                fprintf(stderr, "[fbcopy-%s] fb=0x%06X fmt=%u tile=%u,%u..%u,%u writeRect=%d,%d..%d,%d "
++                                        "fbWorkload=%lld workload=%llu tmem=%u..%u siz=%u fmt=%u -> copy refused, reading RDRAM\n",
++                                        insideWrite ? "nowrite" : "outside",
 +                                        (unsigned)it->fbTile.address, (unsigned)it->fbTile.fmt,
 +                                        (unsigned)it->fbTile.left, (unsigned)it->fbTile.top, (unsigned)it->fbTile.right, (unsigned)it->fbTile.bottom,
 +                                        copyFb != nullptr ? copyFb->lastWriteRect.left(false) : -1,
 +                                        copyFb != nullptr ? copyFb->lastWriteRect.top(false) : -1,
 +                                        copyFb != nullptr ? copyFb->lastWriteRect.right(false) : -1,
 +                                        copyFb != nullptr ? copyFb->lastWriteRect.bottom(false) : -1,
++                                        copyFb != nullptr ? (long long)copyFb->lastWriteWorkload : -1LL,
++                                        (unsigned long long)usedTimestamp,
 +                                        (unsigned)tmemStart, (unsigned)tmemEnd, (unsigned)siz, (unsigned)fmt);
 +                                fflush(stderr);
 +                            }
@@ -1552,7 +1589,7 @@ index 61bb3b1..3402883 100644
  
          struct {
 diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
-index 2970e71..f9cc3da 100644
+index 2970e71..49f45b9 100644
 --- a/src/hle/rt64_state.cpp
 +++ b/src/hle/rt64_state.cpp
 @@ -5,7 +5,9 @@
@@ -1574,7 +1611,23 @@ index 2970e71..f9cc3da 100644
              uint32_t colorWriteWidth = (colorHeight > 1) ? colorImg.width : std::min(fbPair.drawColorRect.right(true), int32_t(colorImg.width));
              uint32_t depthWriteWidth = 0;
              RT64::Framebuffer *colorFb = &framebufferManager.get(colorImg.address, colorImg.siz, colorImg.width, colorHeight);
-@@ -616,6 +618,118 @@ namespace RT64 {
+@@ -587,6 +589,7 @@ namespace RT64 {
+             colorFb->modifiedBytes = std::max(int32_t(colorFb->modifiedBytes - colorFbBytes), 0);
+             colorFb->lastWriteFmt = colorImg.fmt;
+             colorFb->lastWriteTimestamp = writeTimestamp;
++            colorFb->lastWriteWorkload = framebufferManager.getUsedTimestamp();
+             framebufferManager.changeRAM(colorFb, colorFb->addressStart, colorFb->addressStart + colorFbBytes);
+ 
+             bool depthWrite = fbPair.depthWrite && (depthFb != nullptr);
+@@ -596,6 +599,7 @@ namespace RT64 {
+                 depthFb->modifiedBytes = std::max(int32_t(depthFb->modifiedBytes - depthFbBytes), 0);
+                 depthFb->lastWriteFmt = G_IM_FMT_DEPTH;
+                 depthFb->lastWriteTimestamp = writeTimestamp;
++                depthFb->lastWriteWorkload = framebufferManager.getUsedTimestamp();
+                 framebufferManager.changeRAM(depthFb, depthFb->addressStart, depthFb->addressStart + depthFbBytes);
+             }
+ 
+@@ -616,6 +620,118 @@ namespace RT64 {
          workload.fbPairSubmitted++;
      }
      
@@ -1693,7 +1746,7 @@ index 2970e71..f9cc3da 100644
      void State::checkRDRAM() {
          if (!rdramCheckPending) {
              return;
-@@ -753,6 +867,36 @@ namespace RT64 {
+@@ -753,6 +869,36 @@ namespace RT64 {
                      callTile.tmemHashOrID = newTileId;
                  }
              }
@@ -1730,7 +1783,7 @@ index 2970e71..f9cc3da 100644
          };
  
          for (uint32_t p = 0; p < fbPair.projectionCount; p++) {
-@@ -1177,7 +1321,7 @@ namespace RT64 {
+@@ -1177,7 +1323,7 @@ namespace RT64 {
                  if (!fbPair.drawColorRect.isEmpty()) {
                      const auto &colorImg = fbPair.colorImage;
                      const auto &depthImg = fbPair.depthImage;
@@ -1739,7 +1792,7 @@ index 2970e71..f9cc3da 100644
                      colorWriteWidth = (colorHeight > 1) ? colorImg.width : std::min(fbPair.drawColorRect.right(true), int32_t(colorImg.width));
                      depthWriteWidth = 0;
                      colorFb = &framebufferManager.get(colorImg.address, colorImg.siz, colorImg.width, colorHeight);
-@@ -1200,6 +1344,37 @@ namespace RT64 {
+@@ -1200,6 +1346,37 @@ namespace RT64 {
                          depthRowEnd = fbPair.drawDepthRect.bottom(true);
                      }
  
@@ -1777,7 +1830,7 @@ index 2970e71..f9cc3da 100644
                      return true;
                  }
                  else {
-@@ -1476,6 +1651,21 @@ namespace RT64 {
+@@ -1476,6 +1653,21 @@ namespace RT64 {
                  pairCursor = framebufferPairCursor;
                  while (pairCursor < maxFramebufferPair) {
                      if (getFramebufferPairs(pairCursor)) {
@@ -1799,7 +1852,7 @@ index 2970e71..f9cc3da 100644
                          colorFb->copyNativeToRAM(&RDRAM[colorFb->addressStart], colorWriteWidth, colorRowStart, std::min(colorRowEnd, colorFb->height));
  
                          if (depthWriteWidth > 0) {
-@@ -1944,9 +2134,42 @@ namespace RT64 {
+@@ -1944,9 +2136,42 @@ namespace RT64 {
                  uint64_t newScreenHash = XXH3_64bits(present.storage.data(), screenFbBytes);
                  screenChangesMade = (newScreenHash != lastScreenHash);
                  lastScreenHash = newScreenHash;
