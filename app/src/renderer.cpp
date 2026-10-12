@@ -14,11 +14,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
-
-#include <sys/stat.h>
 
 #include "hle/rt64_application.h"
 #include "shared/rt64_f3d_defines.h"
@@ -57,6 +56,17 @@ uint32_t DPC_TMEM_REG = 0;
 uint8_t dummy_rom_header[0x40];
 
 void dummy_check_interrupts() {}
+
+// Create `path` and its parents, or do nothing if it already exists. POSIX
+// `mkdir(path, mode)` has no Windows declaration (`<direct.h>` declares the
+// one-argument `_mkdir`), and clang-cl rejects the call, so use the C++17 call
+// the rest of the app already uses. The error_code overload does not throw on
+// the EEXIST case that every dump-directory call hits.
+void ensure_dir(const std::string& path) {
+    std::error_code ec;
+    std::filesystem::create_directories(path, ec);
+}
+
 // --- ultramodern GraphicsConfig -> RT64 config mappers -------------------
 
 RT64::UserConfiguration::Antialiasing to_rt64(ultramodern::renderer::Antialiasing option) {
@@ -583,8 +593,8 @@ struct State {
         char base[64];
         std::snprintf(base, sizeof(base), "%06u_%s", index, tag.c_str());
         const std::string dir = dump_dir + "/tex";
-        ::mkdir(dump_dir.c_str(), 0777);
-        ::mkdir(dir.c_str(), 0777);
+        ensure_dir(dump_dir);
+        ensure_dir(dir);
         if (FILE* f = std::fopen((dir + "/" + base + ".bin").c_str(), "wb")) {
             std::fwrite(rdram + off, 1, count, f);
             std::fclose(f);
@@ -1584,8 +1594,8 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
                 if (!dir.empty() && dir.back() == '/') {
                     dir.pop_back();
                 }
-                mkdir(dir.c_str(), 0777);
-                mkdir((dir + "/tex").c_str(), 0777);
+                ensure_dir(dir);
+                ensure_dir(dir + "/tex");
                 fprintf(stderr, "[tex] dumping sampled RDRAM to %s/tex\n", dir.c_str());
                 return dir;
             }();

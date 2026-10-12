@@ -58,6 +58,14 @@ Organize Screen, the credits, the ending and the attract loop.
 - **Streamed code** — no un-recompiled module remains on any reachable path
   (session 85). A hand-played session executes 44.4% of the entries; the rest
   are paths nobody has played.
+- **Windows build** — the Release workflow's Windows job compiles the app with
+  clang-cl against the MSVC and UCRT headers, and those headers declare no
+  two-argument `mkdir`. The trace dump directories now use
+  `std::filesystem::create_directories` (`ensure_dir` in `renderer.cpp`), the
+  call the rest of the app uses, and the job's four errors are gone (session
+  135). A hosted run needs the private data bundle regenerated for the commit it
+  builds, because the unpack step refuses a bundle whose recorded commit differs
+  from `GITHUB_SHA`; `platforms=windows` is the ~8-minute iteration path.
 - **Renderer** — RT64 (Metal, Vulkan, D3D12) with a null renderer for bring-up.
   RT64's **"Fix LR with Scissor"** rect enhancement is off by default here
   (`OGRE_RECT_LR_FIX=1` restores it): it rewrites a rectangle's right edge to the
