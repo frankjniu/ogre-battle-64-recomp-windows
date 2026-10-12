@@ -63,7 +63,10 @@ Organize Screen, the credits, the ending and the attract loop.
   (`OGRE_RECT_LR_FIX=1` restores it): it rewrites a rectangle's right edge to the
   scissor's edge whenever the two are within one pixel, which widened the unit
   profile's rightmost DEF/MDEF digit rectangle and made it sample the next font
-  cell (session 101).
+  cell (session 101). RT64's framebuffer tile copy is refused when the tile's
+  texels lie outside the framebuffer's `lastWriteRect`, the rect the copy is
+  actually filled from; a texture load then reads RDRAM. That was the flat
+  ENV-coloured block on a map unit's head (session 134, open work 0).
 - **Audio** — the game's own audio microcode is recompiled and runs by default.
   The Linux package needs a static SDL2 with an ALSA, PulseAudio or PipeWire
   backend. The 0.3.0 build host had no audio development headers, SDL2 dropped
@@ -257,26 +260,36 @@ run produces is evidence about the port until the five checks in
 Ordered by how much each item blocks a player. Each item names the handoff that
 holds the evidence.
 
-0. **A cutscene sprite part draws solid black on the world-map route into a
-   mission (sessions 130-131). Not reproduced in the last capture; the record is
-   in `docs/notes-black-sprite.md`.** Developer report: sprites are drawn in
-   parts and about 10% of cutscenes show one part (the example: the knight's
-   head) as a black texture, static for the whole shot, on a 2D sprite over a
-   pre-rendered background. The fault is path-dependent: loading the suspend save
-   does not show it, while loading the world-map save, entering the mission and
-   triggering the cutscene does. Two developer captures on `scene_14.bin` (scene
-   `0x14`, the Witch's Den) withdraw the earlier readings: the traced 11x14
-   rectangles are the **font cache's glyph cells** (their bytes decode as
-   letters), every captured CI4 rectangle shares one **present** palette, and an
-   all-zero cell decodes to the transparent colour 0. The black head is therefore
-   either a font cell whose palette decodes to black or a draw the `G_TEXRECT`
-   walker does not report, and the second capture rendered correctly with the
-   **same** bound tile, the same all-zero window and the same cell bytes as the
-   capture where it was black. Landed for a later attempt: `OGRE_RAM_KEY_FULL`
-   (whole 8 MiB image, one file per key press), `OGRE_TEX_TRACE_MS=0` (trace from
-   the press to the window close) and `OGRE_TEX_TRACE_KEY2`, all set by
-   `debug/black-sprite-capture.sh`; `tools/ogre_ram.py` reads the image. See
-   `docs/HANDOFF-2026-10-11-session131.md` and `-session130.md`.
+0. **A map unit's head sprite drew as a flat ENV-coloured block. Fixed (session
+   134).** The head is the mission field's 14-part map-unit sprite and its 16x15
+   colour tile was served by RT64's framebuffer tile-copy path instead of being
+   read from RDRAM. A framebuffer at masked `0x2E6840` whose `lastWriteFmt` is
+   `G_IM_FMT_DEPTH` is still on record over the heap the game builds the head-down
+   bitmap in (`func_8019ABC4`, `0x802FB0E8`), and
+   `FramebufferManager::createTileCopyRecord` fills a tile copy from that
+   framebuffer's `lastWriteRect` only. The head's tile (`468,65..484,67`) lies
+   outside it, so the copy it sampled was never written: `TEXEL1` read zero and the
+   combiner `(1 - TEXEL1) * ENV + TEXEL1` (`FC62FE03 2F0D73FD`, `G_CYC_2CYCLE`)
+   painted the flat `ENV >> 3` = `0x2947` over the mask's correct silhouette. The
+   fix refuses a tile copy whose texels are not inside the framebuffer's
+   `lastWriteRect` (`FramebufferManager::checkRegionsTMEM`), so the load reads RDRAM
+   the way hardware does; the frame's head box then holds 1 pixel of `0x2947`
+   against 76 before and the developer confirms the head renders. A blanket refusal
+   of depth framebuffers as colour sources also fixed the head but changed one
+   scenery scanline, because a one-row strip legitimately samples the same
+   framebuffer's rendered rows; the write-rect test keeps that copy. Instruments
+   that found it and stay: `OGRE_SPRITE_TRACE=1` (one line per small tile with the
+   draw-call state, descriptor and resolved hash, printed after the upload
+   decision), `OGRE_TILE_DECODE=1` (the RGBA the renderer decodes out of the TMEM
+   snapshot it hashes, plus the raw-TMEM path and the `[fbcopy]` lines), and
+   `OGRE_TILE_TRACE_ALL=1` with `OGRE_TILE_TRACE_MAXH=64`. `OGRE_FB_GPU_COPY=0`
+   removes the copy path entirely for an A/B. Residual: a freshness test against
+   `fb->RAMHash` is unreliable on its own because `hashTracking` re-hashes every
+   framebuffer at each frame end without touching the GPU copies, and the writer of
+   the depth image at `0x802E6840` is not identified (the address is not in the
+   fault frame's image). See `docs/HANDOFF-2026-10-11-session134.md`,
+   `docs/notes-black-sprite.md` §10, and the session-133 handoff for the evidence
+   that led here.
 
 1. **Windows access violation when the game starts (`0xC0000005`). Closed, and
    verified on Windows (session 113).** Session 107 root-caused v0.4.0's fault at

@@ -38,4 +38,18 @@ namespace ogre {
 // OGRE_RAM_KEY is unset.
 void ram_key_tick(uint8_t* rdram);
 
+// Write the whole 8 MiB image to `<OGRE_PREF_DIR>/ram-<serial>-full.bin`.
+//
+// This exists so a fault can be captured without a human key press: the
+// renderer's texture trace calls it the first time it sees a draw paint black
+// (session 132). A key press cannot bracket a per-pose fault -- every capture
+// taken that way missed the frame -- and the trace has already decided the draw
+// is black, which is exactly the moment the image is worth having. `serial` is
+// the caller's sequence number, so repeated calls do not overwrite.
+//
+// Returns true when the file was written. Safe to call while the game thread is
+// parked on the RSP task (the renderer's send_dl path), which is where the trace
+// runs.
+bool ram_key_dump_full(uint8_t* rdram, int serial);
+
 }  // namespace ogre

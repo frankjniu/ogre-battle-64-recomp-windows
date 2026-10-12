@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 """Read an `OGRE_DUMP_RDRAM=<path>` image with the runtime's byte order.
 
-The runtime byte-reverses RDRAM (see `recomp.h`), so with `d` the image bytes:
+**The image stores bytes in ROM order.** The four file bytes at a guest address,
+read big-endian, are the guest word; the file byte at `a & 0x1FFFFFFF` is the
+logical byte the game holds at guest address `a`. Session 132 verified this on
+`D_8018FC88` (= `0x80269640`: the file bytes are `80 26 96 40`) and on the whole
+part-cache layout, whose presence bitmap, sheets and code table come out at
+`+0x8000`, `+0x8200`, `+0x82A8` and `+0x8350` only under this rule.
 
-    word  at guest address a : struct.unpack_from('<I', d, a & 0x1FFFFFFF)
-    half  at guest address a : struct.unpack_from('<H', d, a & 0x1FFFFFFE)
-    byte  at guest address a : d[(a & 0x1FFFFFFF) ^ 3]
+    word  at guest address a : int.from_bytes(d[a & 0x1FFFFFFF : +4], 'big')
+    half  at guest address a : int.from_bytes(d[a & 0x1FFFFFFE : +2], 'big')
+    byte  at guest address a : d[a & 0x1FFFFFFF]
 
-(`docs/guides/app-build.md` -> "Reading a dump".) Every session re-derives this,
-which is why it lives here.
+An LE read of the same four bytes returns the byte-reversed value
+(`0x40962680` for the pointer above), which is not the guest word.
+
+(`docs/guides/app-build.md` -> "Reading a dump" and
+`docs/guides/sprite-mechanisms.md`.) Every session re-derives this, which is why
+it lives here.
 
 Usage:
     tools/rdram.py <dump> word   <addr> [count]     # big-endian guest words
@@ -61,13 +70,11 @@ class Dump:
         self.data = open(path, "rb").read()
         self.base = RDRAM_BASE
         # The whole dump in logical (guest) byte order: logical[off] ==
-        # d.byte(0x80000000 + off). One transpose beats a per-byte accessor for
-        # the whole-image scans `banks` does.
-        self.logical = bytearray(len(self.data))
-        self.logical[0::4] = self.data[3::4]
-        self.logical[1::4] = self.data[2::4]
-        self.logical[2::4] = self.data[1::4]
-        self.logical[3::4] = self.data[0::4]
+        # d.byte(0x80000000 + off). The file already stores the logical bytes in
+        # order, so this is a straight copy. An earlier version transposed each
+        # 4-byte group, which is right only for a byte-reversed image and is what
+        # made the `banks` comparison read the wrong bytes (session 132).
+        self.logical = bytearray(self.data)
 
     def logical_at(self, addr: int, length: int) -> bytes:
         off = self.off(addr)
@@ -80,18 +87,15 @@ class Dump:
         return off
 
     def word(self, addr: int) -> int:
-        return struct.unpack_from("<I", self.data, self.off(addr))[0]
+        off = self.off(addr)
+        return int.from_bytes(self.data[off:off + 4], "big")
 
     def half(self, addr: int) -> int:
-        # A halfword needs the XOR-2 as well: guest bytes are reversed inside
-        # each word (logical byte at `a` == `data[off(a) ^ 3]`), so the logical
-        # halfword at an even `a` lives at `(a & ~1) ^ 2`. Reading `a & ~1`
-        # returns the *neighbouring* halfword — the same defect the in-app
-        # console had; session 58 fixed both.
-        return struct.unpack_from("<H", self.data, self.off((addr & ~1) ^ 2))[0]
+        off = self.off(addr & ~1)
+        return int.from_bytes(self.data[off:off + 2], "big")
 
     def byte(self, addr: int) -> int:
-        return self.data[self.off(addr) ^ 3]
+        return self.data[self.off(addr)]
 
     def raw(self, addr: int, length: int) -> bytes:
         # Logical bytes are XOR-3 within their word, so decode byte-wise.

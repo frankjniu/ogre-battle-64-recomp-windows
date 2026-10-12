@@ -529,6 +529,91 @@ index 6e8c9b8..b053b01 100644
          void clearChanged();
          void addDitherPatterns(const std::array<uint32_t, 4> &extraPatterns);
          uint32_t bestDitherPattern() const;
+diff --git a/src/hle/rt64_framebuffer_manager.cpp b/src/hle/rt64_framebuffer_manager.cpp
+index d7caa12..da9a038 100644
+--- a/src/hle/rt64_framebuffer_manager.cpp
++++ b/src/hle/rt64_framebuffer_manager.cpp
+@@ -6,6 +6,10 @@
+ 
+ #include <cassert>
+ #include <algorithm>
++#include <cstdio>
++#include <set>
++#include <string>
++#include <cstdlib>
+ 
+ #include "xxHash/xxh3.h"
+ 
+@@ -719,7 +723,69 @@ namespace RT64 {
+                     }
+                 }
+ 
++                // OGRE fix (black head sprite): the tile copy machinery only fills
++                // the framebuffer's `lastWriteRect`
++                // (`FramebufferManager::recordOperations` copies exactly that rect
++                // out of the depth target into the colour target), so a tile whose
++                // texels lie outside it samples a copy that was never written. OB64
++                // leaves a framebuffer on record whose declared range
++                // (`addressStart + imageRowBytes(width) * height`, the depth image's
++                // address with the colour image's width and
++                // `framebufferHeightForDisplay`'s height) reaches into heap that the
++                // game later builds the map unit's head-down bitmap in with the CPU,
++                // so a texture load asked for texels the framebuffer never rendered:
++                // the sampler got zero and the combiner
++                // `(1 - TEXEL1) * ENV + TEXEL1` painted the head the flat ENV colour.
++                // On hardware a texture load reads RDRAM, which is what refusing the
++                // copy falls back to. The check is general, not depth-specific: a
++                // one-row scenery strip that legitimately samples the same
++                // framebuffer's rendered rows stays a copy, which is why a blanket
++                // refusal of depth sources changed that strip's scanline.
+                 if (validCopy) {
++                    Framebuffer *copyFb = find(it->fbTile.address);
++                    const bool insideWrite = (copyFb != nullptr) && !copyFb->lastWriteRect.isNull() &&
++                        copyFb->lastWriteRect.fullyInside(FixedRect(it->fbTile.left * 4, it->fbTile.top * 4, it->fbTile.right * 4, it->fbTile.bottom * 4));
++                    if (!insideWrite) {
++                        if (getenv("OGRE_TILE_DECODE") != nullptr) {
++                            static std::set<std::string> outsideSeen;
++                            char key[192];
++                            snprintf(key, sizeof(key), "%u/%u/%u/%u/%u/%06X", tmemStart, tmemEnd, lineWidth, siz, fmt, it->fbTile.address);
++                            if (outsideSeen.size() < 40 && outsideSeen.insert(key).second) {
++                                fprintf(stderr, "[fbcopy-outside] fb=0x%06X fmt=%u tile=%u,%u..%u,%u writeRect=%d,%d..%d,%d "
++                                        "tmem=%u..%u siz=%u fmt=%u -> copy refused, reading RDRAM\n",
++                                        (unsigned)it->fbTile.address, (unsigned)it->fbTile.fmt,
++                                        (unsigned)it->fbTile.left, (unsigned)it->fbTile.top, (unsigned)it->fbTile.right, (unsigned)it->fbTile.bottom,
++                                        copyFb != nullptr ? copyFb->lastWriteRect.left(false) : -1,
++                                        copyFb != nullptr ? copyFb->lastWriteRect.top(false) : -1,
++                                        copyFb != nullptr ? copyFb->lastWriteRect.right(false) : -1,
++                                        copyFb != nullptr ? copyFb->lastWriteRect.bottom(false) : -1,
++                                        (unsigned)tmemStart, (unsigned)tmemEnd, (unsigned)siz, (unsigned)fmt);
++                                fflush(stderr);
++                            }
++                        }
++                        validCopy = false;
++                    }
++                }
++
++                if (validCopy) {
++                    // OGRE diagnostic: a tile whose TMEM range is fully covered by a
++                    // region that has a tile copy samples that copy instead of the
++                    // texture cache. One line per distinct (tile, region) so a tile
++                    // that silently stops being a texture upload is visible.
++                    if (getenv("OGRE_TILE_DECODE") != nullptr) {
++                        static std::set<std::string> copySeen;
++                        char key[192];
++                        snprintf(key, sizeof(key), "%u/%u/%u/%u/%u/%llX", tmemStart, tmemEnd, lineWidth, siz, fmt, (unsigned long long)it->tileCopyId);
++                        if (copySeen.size() < 200 && copySeen.insert(key).second) {
++                            fprintf(stderr, "[fbcopy] tmem=%u..%u lineWidth=%u siz=%u fmt=%u tileId=%016llX "
++                                    "fb=0x%06X fbTile=%u,%u..%u,%u fbLine=%u fbSiz=%u fbFmt=%u reinterpret=%d\n",
++                                    (unsigned)tmemStart, (unsigned)tmemEnd, (unsigned)lineWidth, (unsigned)siz, (unsigned)fmt,
++                                    (unsigned long long)it->tileCopyId, (unsigned)it->fbTile.address,
++                                    (unsigned)it->fbTile.left, (unsigned)it->fbTile.top, (unsigned)it->fbTile.right, (unsigned)it->fbTile.bottom,
++                                    (unsigned)it->fbTile.lineWidth, (unsigned)it->fbTile.siz, (unsigned)it->fbTile.fmt, (int)reinterpret);
++                            fflush(stderr);
++                        }
++                    }
+                     result.tileId = it->tileCopyId;
+                     result.tileWidth = tileWidth;
+                     result.lineWidth = tileLineWidth;
 diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
 index 7de5b69..1519428 100644
 --- a/src/hle/rt64_present_queue.cpp
@@ -903,10 +988,25 @@ index 7de5b69..1519428 100644
              }
  
 diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
-index a10c11a..288792d 100644
+index a10c11a..64059f9 100644
 --- a/src/hle/rt64_rdp.cpp
 +++ b/src/hle/rt64_rdp.cpp
-@@ -26,6 +26,14 @@
+@@ -5,9 +5,14 @@
+ #include "rt64_rdp.h"
+ 
+ #include <cassert>
++#include <cstdio>
++#include <cstdlib>
++#include <set>
+ 
+ #include "../include/rt64_extended_gbi.h"
+ 
++#include "xxHash/xxh3.h"
++
+ #include "common/rt64_math.h"
+ #include "gbi/rt64_f3d.h"
+ 
+@@ -26,6 +31,14 @@
  #endif
  
  namespace RT64 {
@@ -921,7 +1021,50 @@ index a10c11a..288792d 100644
      // RDP
      static uint8_t getCommandLength(uint32_t commandId) {
          if (commandId == (G_TEXRECT & 0x3F) || commandId == (G_TEXRECTFLIP & 0x3F)) {
-@@ -248,9 +256,92 @@ namespace RT64 {
+@@ -144,6 +157,42 @@ namespace RT64 {
+             if (makeTileCopy) {
+                 // Find the best possible fitting GPU copy to store in this TMEM region.
+                 couldMakeTile = fbManager.makeFramebufferTile(fb, addressStart, addressEnd, tileWidth, tileHeight, fbTile, RGBA32);
++
++                // OGRE fix (black head sprite): a tile copy is only valid while the
++                // framebuffer's GPU copy is the authoritative version of its RDRAM
++                // range. `RAMHash` is the hash of that RDRAM when RT64 last
++                // synchronised with it, so a mismatch means the game has written
++                // RDRAM itself since then and the copy is stale. OB64 does exactly
++                // that: `func_8019ABC4` builds the map unit's head-down bitmap with
++                // the CPU into heap that a depth framebuffer at (masked) 0x2E6840
++                // still covers, so the load's masked source address 0x2FB0E8 lands
++                // inside a framebuffer whose stored image is the old depth buffer.
++                // Without this the head's 16x15 RGBA16 colour tile is served from
++                // that stale copy, samples as zero, and the combiner
++                // `(1 - TEXEL1) * ENV + TEXEL1` paints it the flat ENV colour while
++                // its mask (whose descriptor does not match the tile copy's line
++                // width and size) still comes from the correct RDRAM bytes.
++                // On hardware a texture load always reads RDRAM, which is what the
++                // load falls back to when the copy is refused.
++                if (couldMakeTile) {
++                    const bool rdramInSync = (fb->RAMBytes > 0) &&
++                        (XXH3_64bits(&state->RDRAM[fb->addressStart], fb->RAMBytes) == fb->RAMHash);
++                    if (!rdramInSync) {
++                        if (getenv("OGRE_TILE_DECODE") != nullptr) {
++                            static std::set<uint32_t> staleSeen;
++                            if (staleSeen.size() < 40 && staleSeen.insert(fb->addressStart).second) {
++                                fprintf(stderr, "[fbcopy-stale] fb=0x%06X bytes=%u storedHash=%016llX rdramHash=%016llX "
++                                        "load=0x%06X..0x%06X -> copy refused, reading RDRAM\n",
++                                        (unsigned)fb->addressStart, (unsigned)fb->RAMBytes,
++                                        (unsigned long long)fb->RAMHash,
++                                        (unsigned long long)XXH3_64bits(&state->RDRAM[fb->addressStart], fb->RAMBytes),
++                                        (unsigned)addressStart, (unsigned)addressEnd);
++                                fflush(stderr);
++                            }
++                        }
++                        couldMakeTile = false;
++                    }
++                }
+             }
+ 
+             // Always tags regions in TMEM, regardless of whether it's possible to make a copy or not.
+@@ -248,9 +297,92 @@ namespace RT64 {
      }
  
      void RDP::setColorImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t address) {
@@ -1014,7 +1157,7 @@ index a10c11a..288792d 100644
          if ((colorImage.fmt != fmt) ||
              (colorImage.siz != siz) ||
              (colorImage.width != width) ||
-@@ -281,12 +372,39 @@ namespace RT64 {
+@@ -281,12 +413,39 @@ namespace RT64 {
      }
  
      void RDP::setTextureImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t address) {
@@ -1054,7 +1197,7 @@ index a10c11a..288792d 100644
  #   ifdef LOG_TEXTURE_IMAGE_METHODS
          RT64_LOG_PRINTF("RDP::setTextureImage(fmt %u, siz %u, width %u, address 0x%08X)", fmt, siz, width, address);
  #   endif
-@@ -471,6 +589,43 @@ namespace RT64 {
+@@ -471,6 +630,43 @@ namespace RT64 {
          }
      }
  
@@ -1098,7 +1241,7 @@ index a10c11a..288792d 100644
      void RDP::loadTileOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred) {
          const uint32_t bytesOffset = (loadTile.uls >> 2) << loadTexture.siz >> 1;
          const uint32_t bytesPerRow = loadTexture.width << loadTexture.siz >> 1;
-@@ -501,7 +656,10 @@ namespace RT64 {
+@@ -501,7 +697,10 @@ namespace RT64 {
              // Load into TMEM.
              uint8_t *TMEM8 = reinterpret_cast<uint8_t *>(TMEM);
              const uint8_t *RDRAM = state->RDRAM;
@@ -1110,7 +1253,7 @@ index a10c11a..288792d 100644
                  loadToTMEMCommon<true>(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, wordsPerRow, rowCount);
              }
              else {
-@@ -1007,6 +1165,17 @@ namespace RT64 {
+@@ -1007,6 +1206,17 @@ namespace RT64 {
          convertK[3] = k3;
          convertK[4] = k4;
          convertK[5] = k5;
@@ -1128,7 +1271,7 @@ index a10c11a..288792d 100644
          state->updateDrawStatusAttribute(DrawAttribute::Convert);
      }
  
-@@ -1035,6 +1204,14 @@ namespace RT64 {
+@@ -1035,6 +1245,14 @@ namespace RT64 {
          RT64_LOG_PRINTF("RDP::fillRect(ulx %d, uly %d, lrx %d, lry %d)", ulx, uly, lrx, lry);
  #   endif
  
@@ -1143,7 +1286,7 @@ index a10c11a..288792d 100644
          // Filter out incorrect rectangles.
          if ((lrx < ulx) || (lry < uly)) {
              return;
-@@ -1197,6 +1374,52 @@ namespace RT64 {
+@@ -1197,6 +1415,52 @@ namespace RT64 {
              return;
          }
  
@@ -1196,7 +1339,7 @@ index a10c11a..288792d 100644
          // Check if framebuffer pair must be changed.
          checkFramebufferPair();
  
-@@ -1222,6 +1445,17 @@ namespace RT64 {
+@@ -1222,6 +1486,17 @@ namespace RT64 {
                  }
              }
          }
@@ -1214,7 +1357,7 @@ index a10c11a..288792d 100644
          
          bool flushedState = state->checkDrawState();
  
-@@ -1322,6 +1556,44 @@ namespace RT64 {
+@@ -1322,6 +1597,44 @@ namespace RT64 {
          RT64_LOG_PRINTF("RDP::drawTexRect(ulx %d, uly %d, lrx %d, lry %d, tile %u, uls %d, ult %d, dsdx %d, dtdy %d, flip %u)", ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip);
  #   endif
  
@@ -1274,6 +1417,118 @@ index 84f4e7c..7cb42da 100644
          void loadBlockOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred);
          void loadTLUTOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred);
          void loadTile(uint8_t tile, uint16_t uls, uint16_t ult, uint16_t lrs, uint16_t lrt);
+diff --git a/src/hle/rt64_rdp_tmem.cpp b/src/hle/rt64_rdp_tmem.cpp
+index 6051f4e..0fa2754 100644
+--- a/src/hle/rt64_rdp_tmem.cpp
++++ b/src/hle/rt64_rdp_tmem.cpp
+@@ -16,6 +16,66 @@
+ namespace RT64 {
+     // TextureManager
+ 
++    // OGRE diagnostic: OGRE_TILE_DECODE=1 prints, for every small tile that is
++    // hashed for the texture cache, the RGBA the renderer would decode out of the
++    // TMEM snapshot it is about to hash, computed with the same rules as
++    // TextureDecodeCS.hlsl's `sampleTMEM` (see `ogreDecodeTMEM`). This separates
++    // "the TMEM snapshot is not the tile's data" from "the sampler reads the
++    // decoded texture wrong" without a screenshot: the line is printed at the
++    // moment the hash is taken, i.e. for exactly the bytes the hash covers.
++    // It is a diagnostic, not a probe: nothing is written to the guest.
++    static void ogreDecodeTMEM(const uint8_t *TMEM, const LoadTile &loadTile, uint16_t width, uint16_t height, uint32_t tlut, uint32_t &nonZero, double &mean, uint32_t out[4][3]) {
++        nonZero = 0;
++        mean = 0.0;
++        double sum = 0.0;
++        uint32_t count = 0;
++        const int32_t tmemShift = (loadTile.fmt == G_IM_FMT_RGBA && loadTile.siz == G_IM_SIZ_32b) ? 2 : loadTile.siz;
++        const uint32_t addressMask = 0xFFF;
++        const uint32_t stride = uint32_t(loadTile.line) << 3;
++        const uint32_t textureStart = uint32_t(loadTile.tmem) << 3;
++        for (uint32_t y = 0; y < height; y++) {
++            for (uint32_t x = 0; x < width; x++) {
++                const bool oddRow = (y & 1) != 0;
++                const uint32_t pixelAddress = y * stride + ((x << tmemShift) >> 1);
++                auto loadByte = [&](uint32_t relativeAddress) {
++                    const uint32_t rowStart = (relativeAddress / (stride == 0 ? 1 : stride)) * stride;
++                    const uint32_t wordIndex = (relativeAddress - rowStart) / 4;
++                    const uint32_t swapWordIndex = wordIndex ^ 1;
++                    const uint32_t finalAddress = oddRow ? (textureStart + rowStart + swapWordIndex * 4 + (relativeAddress & 3)) : (textureStart + relativeAddress);
++                    return uint32_t(TMEM[(finalAddress & addressMask) & 0xFFF]);
++                };
++                uint32_t r = 0, g = 0, b = 0, a = 0;
++                if (loadTile.siz == G_IM_SIZ_16b) {
++                    const uint32_t p0 = loadByte(pixelAddress + 0);
++                    const uint32_t p1 = loadByte(pixelAddress + 1);
++                    const uint32_t v = p1 | (p0 << 8);
++                    r = ((v >> 11) & 0x1F) << 3; g = ((v >> 6) & 0x1F) << 3; b = ((v >> 1) & 0x1F) << 3; a = (v & 1) ? 255 : 0;
++                    r |= r >> 5; g |= g >> 5; b |= b >> 5;
++                }
++                else if (loadTile.siz == G_IM_SIZ_8b) {
++                    const uint32_t v = loadByte(pixelAddress);
++                    r = g = b = v; a = 255;
++                }
++                else if (loadTile.siz == G_IM_SIZ_4b) {
++                    const uint32_t v = loadByte(pixelAddress);
++                    const uint32_t nib = (v >> ((x & 1) ? 0 : 4)) & 0xF;
++                    r = g = b = nib * 17; a = nib * 17;
++                }
++                const uint32_t px[3] = { r, g, b };
++                for (int i = 0; i < 3; i++) {
++                    sum += px[i];
++                    if (px[i] != 0) nonZero++;
++                }
++                count += 3;
++                if ((x == 0 && y == 0) || (x == (width / 2) && y == (height / 2)) || (x == (width - 1) && y == (height - 1))) {
++                    const int slot = (x == 0) ? 0 : ((x == (width / 2)) ? 1 : 2);
++                    out[slot][0] = r; out[slot][1] = g; out[slot][2] = b;
++                }
++            }
++        }
++        mean = (count > 0) ? (sum / double(count)) : 0.0;
++    }
++
+     void TextureManager::uploadEmpty(State *state, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint64_t replacementHash) {
+         if (hashSet.find(replacementHash) == hashSet.end()) {
+             hashSet.insert(replacementHash);
+@@ -31,6 +91,14 @@ namespace RT64 {
+         XXH3_64bits_update(&xxh3, &byteOffset, sizeof(byteOffset));
+         XXH3_64bits_update(&xxh3, &byteCount, sizeof(byteCount));
+         const uint64_t hash = XXH3_64bits_digest(&xxh3);
++        // OGRE diagnostic: the raw-TMEM path never reaches uploadTexture, so
++        // OGRE_TILE_DECODE has to report it here too (a tile that takes this path
++        // samples TMEM directly and its decoded content is the shader's job).
++        if (getenv("OGRE_TILE_DECODE") != nullptr) {
++            fprintf(stderr, "[dec] rawTMEM hash=%016llX offset=%u count=%u %ux%u tlut=%u\n",
++                    (unsigned long long)hash, (unsigned)byteOffset, (unsigned)byteCount, (unsigned)width, (unsigned)height, (unsigned)tlut);
++            fflush(stderr);
++        }
+         if (hashSet.find(hash) == hashSet.end()) {
+             hashSet.insert(hash);
+             textureCache->queueGPUUploadTMEM(hash, creationFrame, TMEM, RDP_TMEM_BYTES, width, height, 0, LoadTile(), false);
+@@ -52,6 +120,25 @@ namespace RT64 {
+     uint64_t TextureManager::uploadTexture(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint32_t tlut) {
+         const uint8_t *TMEM = reinterpret_cast<const uint8_t *>(state->rdp->TMEM);
+         uint64_t hash = TMEMHasher::hash(TMEM, loadTile, width, height, tlut, TMEMHasher::CurrentHashVersion);
++        // OGRE diagnostic (see the header comment of ogreDecodeTMEM).
++        static const bool tileDecodeTrace = (getenv("OGRE_TILE_DECODE") != nullptr);
++        static std::set<uint64_t> decodedHashes;
++        if (tileDecodeTrace && (decodedHashes.size() < 60000) && (width > 0) && (height > 0) && (width <= 64) && (height <= 64)
++            && (decodedHashes.insert(hash).second)) {
++            uint32_t nonZero = 0;
++            double mean = 0.0;
++            uint32_t px[4][3] = {};
++            ogreDecodeTMEM(TMEM, loadTile, width, height, tlut, nonZero, mean, px);
++            const bool cached = (hashSet.find(hash) != hashSet.end());
++            fprintf(stderr,
++                    "[dec] hash=%016llX fmt=%u siz=%u line=%u tmem=%u %ux%u cached=%d nz=%u/%u mean=%.1f "
++                    "px00=%02X%02X%02X pxmid=%02X%02X%02X pxlast=%02X%02X%02X\n",
++                    (unsigned long long)hash, (unsigned)loadTile.fmt, (unsigned)loadTile.siz,
++                    (unsigned)loadTile.line, (unsigned)loadTile.tmem, (unsigned)width, (unsigned)height,
++                    (int)cached, nonZero, (unsigned)(width * height * 3), mean,
++                    px[0][0], px[0][1], px[0][2], px[1][0], px[1][1], px[1][2], px[2][0], px[2][1], px[2][2]);
++            fflush(stderr);
++        }
+         if (hashSet.find(hash) == hashSet.end()) {
+             hashSet.insert(hash);
+             textureCache->queueGPUUploadTMEM(hash, creationFrame, TMEM, RDP_TMEM_BYTES, width, height, tlut, loadTile, true);
 diff --git a/src/hle/rt64_rsp.h b/src/hle/rt64_rsp.h
 index 61bb3b1..3402883 100644
 --- a/src/hle/rt64_rsp.h
@@ -1297,7 +1552,7 @@ index 61bb3b1..3402883 100644
  
          struct {
 diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
-index 2970e71..98972d5 100644
+index 2970e71..f9cc3da 100644
 --- a/src/hle/rt64_state.cpp
 +++ b/src/hle/rt64_state.cpp
 @@ -5,7 +5,9 @@
@@ -1438,7 +1693,44 @@ index 2970e71..98972d5 100644
      void State::checkRDRAM() {
          if (!rdramCheckPending) {
              return;
-@@ -1177,7 +1291,7 @@ namespace RT64 {
+@@ -753,6 +867,36 @@ namespace RT64 {
+                     callTile.tmemHashOrID = newTileId;
+                 }
+             }
++            // OGRE diagnostic: OGRE_SPRITE_TRACE=1 prints one line per game call
++            // whose tiles are small, with the state that decides how much of each
++            // tile the sampler gets: the cycle type, the combiner, PRIM/ENV, the
++            // tile count and, per tile, its descriptor, sample size, whether it is
++            // taken from a tile copy and the hash it will be looked up by.
++            // `docs/HANDOFF-2026-10-11-session133.md` §14 left the head's colour
++            // tile with correct RDRAM and correct descriptors; this line says
++            // which tile index the draw resolves to and whether that tile is a
++            // texture upload or a framebuffer copy.
++            static const bool spriteTrace = (getenv("OGRE_SPRITE_TRACE") != nullptr);
++            if (spriteTrace && (drawCall.tileCount == 2) && (callTile.sampleWidth <= 64) && (callTile.sampleHeight <= 64)) {
++                static uint32_t spriteTraceCount = 0;
++                if (++spriteTraceCount <= 40000) {
++                    const interop::RDPTile &rdpTile = workload.drawData.rdpTiles[rdpTileIndex];
++                    fprintf(stderr, "[spr] call=%u tile=%u/%u cycle=%u combine=%08X/%08X prim=%08X env=%08X "
++                            "fmt=%u siz=%u line=%u tmem=%u sample=%ux%u tileCopy=%d raw=%d hash=%016llX tlut=%u "
++                            "rdp(addr=%d stride=%d pal=%d masks=%d maskt=%d uls=%.0f lrs=%.0f cmt=%d cms=%d native=%u)\n",
++                            (unsigned)drawCall.callIndex, (unsigned)(rdpTileIndex - drawCall.tileIndex),
++                            (unsigned)drawCall.tileCount, (unsigned)drawCall.otherMode.cycleType(),
++                            (unsigned)drawCall.colorCombiner.L, (unsigned)drawCall.colorCombiner.H,
++                            (unsigned)(drawCall.rdpParams.primColor.x * 255.0f), (unsigned)(drawCall.rdpParams.envColor.x * 255.0f),
++                            (unsigned)callTile.loadTile.fmt, (unsigned)callTile.loadTile.siz, (unsigned)callTile.loadTile.line,
++                            (unsigned)callTile.loadTile.tmem, (unsigned)callTile.sampleWidth, (unsigned)callTile.sampleHeight,
++                            (int)callTile.tileCopyUsed, (int)callTile.rawTMEM, (unsigned long long)callTile.tmemHashOrID,
++                            (unsigned)callTile.tlut,
++                            (int)rdpTile.address, (int)rdpTile.stride, (int)rdpTile.palette, (int)rdpTile.masks, (int)rdpTile.maskt,
++                            rdpTile.uls, rdpTile.lrs, (int)rdpTile.cmt, (int)rdpTile.cms, (unsigned)rdpTile.nativeSampler);
++                    fflush(stderr);
++                }
++            }
+         };
+ 
+         for (uint32_t p = 0; p < fbPair.projectionCount; p++) {
+@@ -1177,7 +1321,7 @@ namespace RT64 {
                  if (!fbPair.drawColorRect.isEmpty()) {
                      const auto &colorImg = fbPair.colorImage;
                      const auto &depthImg = fbPair.depthImage;
@@ -1447,7 +1739,7 @@ index 2970e71..98972d5 100644
                      colorWriteWidth = (colorHeight > 1) ? colorImg.width : std::min(fbPair.drawColorRect.right(true), int32_t(colorImg.width));
                      depthWriteWidth = 0;
                      colorFb = &framebufferManager.get(colorImg.address, colorImg.siz, colorImg.width, colorHeight);
-@@ -1200,6 +1314,37 @@ namespace RT64 {
+@@ -1200,6 +1344,37 @@ namespace RT64 {
                          depthRowEnd = fbPair.drawDepthRect.bottom(true);
                      }
  
@@ -1485,7 +1777,7 @@ index 2970e71..98972d5 100644
                      return true;
                  }
                  else {
-@@ -1476,6 +1621,21 @@ namespace RT64 {
+@@ -1476,6 +1651,21 @@ namespace RT64 {
                  pairCursor = framebufferPairCursor;
                  while (pairCursor < maxFramebufferPair) {
                      if (getFramebufferPairs(pairCursor)) {
@@ -1507,7 +1799,7 @@ index 2970e71..98972d5 100644
                          colorFb->copyNativeToRAM(&RDRAM[colorFb->addressStart], colorWriteWidth, colorRowStart, std::min(colorRowEnd, colorFb->height));
  
                          if (depthWriteWidth > 0) {
-@@ -1944,9 +2104,42 @@ namespace RT64 {
+@@ -1944,9 +2134,42 @@ namespace RT64 {
                  uint64_t newScreenHash = XXH3_64bits(present.storage.data(), screenFbBytes);
                  screenChangesMade = (newScreenHash != lastScreenHash);
                  lastScreenHash = newScreenHash;
@@ -1602,38 +1894,97 @@ index 5a331aa..8ba25d4 100644
                      // When the target is much bigger than the reference height, we reduce the resolution scaling (but clamped to 1.0).
                      const uint32_t heightThreshold = (workload.viFbSize[1] > 0) ? ((workload.viFbSize[1] * 3) / 2) : 360;
 diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
-index 9fae0d4..d510d49 100644
+index 9fae0d4..230b5b9 100644
 --- a/src/render/rt64_framebuffer_renderer.cpp
 +++ b/src/render/rt64_framebuffer_renderer.cpp
-@@ -260,6 +260,27 @@ namespace RT64 {
+@@ -235,6 +235,23 @@ namespace RT64 {
+             interop::GPUTile &gpuTile = dstGPUTiles[i];
+             if (callTile.tileCopyUsed) {
+                 const auto &it = fbManager->tileCopies.find(callTile.tmemHashOrID);
++                // OGRE diagnostic: a tile that is used as a framebuffer copy never
++                // reaches the texture cache, so OGRE_TILE_TRACE_ALL prints nothing
++                // for it. A copy that is not found leaves the GPU tile zeroed, i.e.
++                // textureIndex 0 and a zero texture size, and the draw then samples
++                // whatever texture 0 is. Print that case.
++                static const bool tileTraceCopy = (getenv("OGRE_TILE_TRACE_ALL") != nullptr) && (getenv("OGRE_TILE_TRACE_COPY") != nullptr);
++                if (tileTraceCopy) {
++                    static uint32_t tileTraceCopyCount = 0;
++                    if (++tileTraceCopyCount <= 2000) {
++                        fprintf(stderr, "[gpu-tile] copy=1 n=%u id=%016llX found=%d sample=%ux%u fmt=%u siz=%u line=%u tmem=%u\n",
++                                tileTraceCopyCount, (unsigned long long)callTile.tmemHashOrID, (int)(it != fbManager->tileCopies.end()),
++                                (unsigned)callTile.sampleWidth, (unsigned)callTile.sampleHeight,
++                                (unsigned)callTile.loadTile.fmt, (unsigned)callTile.loadTile.siz,
++                                (unsigned)callTile.loadTile.line, (unsigned)callTile.loadTile.tmem);
++                        fflush(stderr);
++                    }
++                }
+                 if (it != fbManager->tileCopies.end()) {
+                     const FramebufferManager::TileCopy &tileCopy = it->second;
+                     gpuTile.tcScale.x = static_cast<float>(tileCopy.usedWidth) / static_cast<float>(callTile.tileCopyWidth);
+@@ -258,7 +275,61 @@ namespace RT64 {
+                 bool textureReplaced = false;
+                 bool hasMipmaps = false;
                  bool shiftedByHalf = false;
-                 textureCache->useTexture(callTile.tmemHashOrID, submissionFrame, textureIndex, gpuTile.tcScale, gpuTile.textureDimensions, textureReplaced, hasMipmaps, shiftedByHalf);
- 
+-                textureCache->useTexture(callTile.tmemHashOrID, submissionFrame, textureIndex, gpuTile.tcScale, gpuTile.textureDimensions, textureReplaced, hasMipmaps, shiftedByHalf);
++                const bool textureFound = textureCache->useTexture(callTile.tmemHashOrID, submissionFrame, textureIndex, gpuTile.tcScale, gpuTile.textureDimensions, textureReplaced, hasMipmaps, shiftedByHalf);
++
 +                // OGRE diagnostic: OGRE_TILE_TRACE=1 reports every tile whose
 +                // sampling rectangle is degenerate (a zero-height tile such as
 +                // `ult == lrt`), together with the texture the cache handed back
-+                // and how the sampler will scale it. textureIndex 0 means the
-+                // hash was not in the cache and the draw samples the fallback.
-+                if ((getenv("OGRE_TILE_TRACE") != nullptr) && (callTile.sampleHeight <= 1)) {
++                // and how the sampler will scale it. `found=0` is the case where
++                // the hash was not in the cache and the draw samples the fallback;
++                // `found=1` with `idx=0` is a real cached texture (session 133
++                // measured 2500 of 2500 found on the title scene).
++                //
++                // OGRE_TILE_TRACE_ALL=1 reports the same line for every tile, with
++                // the tile's own format/line/TMEM, so a tile that samples the
++                // blank fallback can be told from one that is uploaded
++                // (docs/HANDOFF-2026-10-11-session133.md).
++                // OGRE_TILE_TRACE_MAX=<n> raises the line cap, so one run can
++                // cover a whole scene's worth of tiles.
++                // OGRE_TILE_TRACE_MAXH=<n> prints only tiles whose sample is at
++                // most n by n, so a scene's full-width layers (320-wide njpeg
++                // strips) do not consume the cap before the sprites are drawn.
++                const bool tileTraceAll = (getenv("OGRE_TILE_TRACE_ALL") != nullptr);
++                static const uint32_t tileTraceMax = [] {
++                    const char* v = getenv("OGRE_TILE_TRACE_MAX");
++                    return (v != nullptr) ? (uint32_t)strtoul(v, nullptr, 0) : 400u;
++                }();
++                static const uint32_t tileTraceMaxH = [] {
++                    const char* v = getenv("OGRE_TILE_TRACE_MAXH");
++                    return (v != nullptr) ? (uint32_t)strtoul(v, nullptr, 0) : 0xFFFFu;
++                }();
++                // OGRE_TILE_TRACE_MISS=1 prints only the tiles whose texture-cache
++                // lookup failed, i.e. the tiles that sample the fallback texture.
++                // One run then answers "does any draw sample a texture that was
++                // never uploaded" with a line, or with an empty log.
++                static const bool tileTraceMiss = (getenv("OGRE_TILE_TRACE_MISS") != nullptr);
++                const bool tileTraceThis = (callTile.sampleWidth <= tileTraceMaxH) &&
++                                           (callTile.sampleHeight <= tileTraceMaxH) &&
++                                           (!tileTraceMiss || !textureFound);
++                if (tileTraceThis && (tileTraceAll || ((getenv("OGRE_TILE_TRACE") != nullptr) && (callTile.sampleHeight <= 1)))) {
 +                    static uint32_t tileTrace = 0;
-+                    if (++tileTrace <= 40) {
++                    if (++tileTrace <= (tileTraceAll ? tileTraceMax : 40u)) {
 +                        fprintf(stderr,
 +                                "[gpu-tile] n=%u hash=%016llX tmemHash=%016llX idx=%u dims=%.0fx%.0f "
-+                                "tcScale=%.4f,%.4f sample=%ux%u rawTMEM=%d copy=%d valid=%d replaced=%d\n",
++                                "tcScale=%.4f,%.4f sample=%ux%u rawTMEM=%d copy=%d valid=%d replaced=%d "
++                                "fmt=%u siz=%u tmem=%u line=%u found=%d\n",
 +                                tileTrace, (unsigned long long)callTile.tmemHashOrID,
 +                                (unsigned long long)callTile.tmemHashOrID, textureIndex,
 +                                gpuTile.textureDimensions.x, gpuTile.textureDimensions.y,
 +                                gpuTile.tcScale.x, gpuTile.tcScale.y, (unsigned)callTile.sampleWidth,
 +                                (unsigned)callTile.sampleHeight, (int)callTile.rawTMEM,
-+                                (int)callTile.tileCopyUsed, (int)callTile.valid, (int)textureReplaced);
++                                (int)callTile.tileCopyUsed, (int)callTile.valid, (int)textureReplaced,
++                                (unsigned)callTile.loadTile.fmt, (unsigned)callTile.loadTile.siz,
++                                (unsigned)callTile.loadTile.tmem, (unsigned)callTile.loadTile.line,
++                                (int)textureFound);
 +                        fflush(stderr);
 +                    }
 +                }
-+
+ 
                  // Describe the GPU tile for a regular texture.
                  gpuTile.ulScale.x = gpuTile.tcScale.x;
-                 gpuTile.ulScale.y = gpuTile.tcScale.y;
-@@ -1318,6 +1339,16 @@ namespace RT64 {
+@@ -1318,6 +1389,16 @@ namespace RT64 {
  
      void FramebufferRenderer::addFramebuffer(const DrawParams &p) {
          assert(p.fbStorage != nullptr);
@@ -1650,7 +2001,7 @@ index 9fae0d4..d510d49 100644
          
          // Setup framebuffer pair data and descriptor set.
          const FramebufferPair &fbPair = p.curWorkload->fbPairs[p.fbPairIndex];
-@@ -1452,6 +1483,15 @@ namespace RT64 {
+@@ -1452,6 +1533,15 @@ namespace RT64 {
          RenderViewport viewportClip;
          for (uint32_t pr = 0; (pr < fbPair.projectionCount) && (globalCallIndex < p.maxGameCall); pr++) {
              const Projection &proj = fbPair.projections[pr];
@@ -1666,7 +2017,7 @@ index 9fae0d4..d510d49 100644
              if (proj.scissorRect.isNull()) {
                  continue;
              }
-@@ -1508,6 +1548,17 @@ namespace RT64 {
+@@ -1508,6 +1598,17 @@ namespace RT64 {
  
              for (uint32_t d = 0; (d < proj.gameCallCount) && (globalCallIndex < p.maxGameCall); d++) {
                  const GameCall &call = proj.gameCalls[d];
@@ -1684,7 +2035,7 @@ index 9fae0d4..d510d49 100644
                  renderIndices.instanceIndex = call.callDesc.callIndex;
                  renderIndices.faceIndicesStart = call.meshDesc.faceIndicesStart;
                  renderIndices.rdpTileIndex = call.callDesc.tileIndex;
-@@ -1517,6 +1568,17 @@ namespace RT64 {
+@@ -1517,6 +1618,17 @@ namespace RT64 {
  
                  uint32_t cycleType = call.callDesc.otherMode.cycleType();
                  if (cycleType == G_CYC_FILL) {

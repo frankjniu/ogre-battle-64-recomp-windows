@@ -28,6 +28,7 @@
 
 #include "renderer.hpp"
 #include "gbi.hpp"
+#include "ram_key.hpp"
 #include "sdl_platform.hpp"
 #include "widescreen.hpp"
 
@@ -488,6 +489,9 @@ struct State {
     uint32_t tlut_addr = 0, tlut_count = 0;
     bool tlut_seen = false;
     bool trace_all_images = false;   // report every SETTIMG, not only TEXRECT sources
+    // OGRE_RAM_KEY_ON_BLACK: dump the whole RDRAM image on the first black draw,
+    // so a per-pose fault is captured without a key press.
+    bool dump_on_black = false;
     uint32_t index = 0;        // every rectangle of the run
     uint32_t reported = 0;
     bool truncated = false;
@@ -819,6 +823,17 @@ struct State {
                                  dl, index, x0, y0, x1, y1, timg, timg_fmt, tile_line,
                                  tlut_seen ? "yes" : "no", tex_w, tex_h, opaque, mean);
                     std::fflush(stderr);
+                }
+                // OGRE_RAM_KEY_ON_BLACK=1: take a whole-RDRAM image on the
+                // first black draw, with no key press. A per-pose fault cannot
+                // be bracketed by hand -- three captures taken that way missed
+                // the frame -- and this fires on the renderer thread while the
+                // game thread is parked on the RSP task, so the image is
+                // coherent. `session 132` numbers the files.
+                if (black && dump_on_black) {
+                    static int auto_serial = 0;
+                    ++auto_serial;
+                    ram_key_dump_full(rdram, auto_serial);
                 }
             }
         }
@@ -1426,6 +1441,21 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         if (const char* texdir = getenv("OGRE_DUMP_TEX")) {
             app_->state->dumpingTexturesDirectory = texdir;
         }
+        // OGRE_FB_GPU_COPY=0: turn off RT64's GPU framebuffer copies. A texture
+        // load whose RDRAM source is covered by a framebuffer RT64 has on record
+        // can be served from that framebuffer's GPU copy instead of the texture's
+        // own bytes. OB64 reuses heap that a depth framebuffer still covers for
+        // the map unit's CPU-built sprite bitmaps, so that copy is stale (the
+        // black head sprite: `[fbcopy] ... fbFmt=5` in
+        // docs/HANDOFF-2026-10-11-session133.md's follow-up run). The RT64-side
+        // fix refuses a copy whose framebuffer is out of sync with RDRAM; this
+        // knob is the fallback that removes the path entirely, for an A/B.
+        if (const char* v = getenv("OGRE_FB_GPU_COPY")) {
+            app_->emulatorConfig.framebuffer.copyWithGPU = (v[0] != '0');
+            fprintf(stderr, "[renderer] framebuffer.copyWithGPU = %d%s\n",
+                    app_->emulatorConfig.framebuffer.copyWithGPU ? 1 : 0,
+                    app_->emulatorConfig.framebuffer.copyWithGPU ? "" : " (OGRE_FB_GPU_COPY=0)");
+        }
         // stderr, not stdout: stdout is block-buffered when the app is piped and
         // this line was being lost, which made a successful RT64 setup look like
         // a silent failure.
@@ -1641,6 +1671,7 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
                 st.min_px = minPx;
                 st.trace_all_images = (getenv("OGRE_TEX_TRACE_IMAGES") != nullptr);
                 st.colour = (getenv("OGRE_TEX_TRACE_COLOUR") != nullptr);
+                st.dump_on_black = (getenv("OGRE_RAM_KEY_ON_BLACK") != nullptr);
                 st.colour_blackness = colourBlackness;
                 st.dl = dl_count_;
                 st.walk(task->t.data_ptr & 0x1FFFFFFF, 1);

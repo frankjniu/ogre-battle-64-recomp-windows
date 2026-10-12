@@ -12,11 +12,20 @@ block. A full 8 MiB image can:
 
 The runtime stores every 32-bit word byte-reversed, so with `d` the image:
 
-    guest word at address a  = struct.unpack_from('<I', d, a & 0x1FFFFFFF)
-    logical byte at address a = d[(a & 0x1FFFFFFF) ^ 3]
+    logical byte at address a = d[a & 0x1FFFFFFF]
+    guest word at address a   = int.from_bytes(d[a & 0x1FFFFFFF : +4], 'big')
 
-`tools/rdram.py` implements the same rules for the same files; this tool adds
-the two questions a full image answers and a window cannot.
+**The image is stored in ROM order.** A word the game holds as `0x80269640`
+is the four file bytes `80 26 96 40`. An LE read of those bytes returns
+`0x40962680`, which is the byte-reversed value and not the guest word. Session
+131 read this file with the LE/XOR-3 rules above and every cell it rendered was
+transposed inside each word; the cache's own layout globals (`D_8018FC88`,
+`D_80190F70`, `D_8018FC90`, `D_80190F94`, `D_80190F74`) come out at
+`+0`, `+0x8000`, `+0x8200`, `+0x82A8`, `+0x8350` only when the file is read in
+ROM order, which is the check that settles it.
+
+`tools/rdram.py` reads the same files with the LE convention; this tool uses ROM
+order, so do not compare a `word` from the two directly.
 
 `find-ptr` reports every word in the image equal to the address, because the
 display list that draws a sprite part holds the part's image address as
@@ -24,9 +33,10 @@ display list that draws a sprite part holds the part's image address as
 the structure that chose the address.
 
 `cell` prints a sprite part slot as the game's own format when its size is
-known. The default 0x100-byte slot is the CI4 image plus palette pair the
-scene-`0x0D` cutscene binds: `G_SETTIMG` fmt 2 at slot+0x00 and fmt 0 at
-slot+0x80 (session 131). Use `--slot` for another layout.
+known. A cache slot is `0x80` bytes and its image starts at `+0x08` (the list
+links are at `+0x70`/`+0x74`), so the default `--slot 0x80` prints one slot's
+payload. Use `--slot 0x100` for a draw whose bound address is the slot base and
+whose image begins `0x10` later.
 
 Output is text; `--png` writes a picture of the slot for a visual check.
 """
@@ -47,17 +57,20 @@ class Image:
             print(f"warning: {path} is {len(self.data)} bytes, expected 0x800000", file=sys.stderr)
 
     def word(self, addr: int) -> int:
-        return struct.unpack_from("<I", self.data, addr & 0x1FFFFFFF)[0]
+        # The image is in ROM order: the four file bytes at the address, read
+        # big-endian, are the guest word. An LE read returns the byte-reversed
+        # value (session 132).
+        return int.from_bytes(self.data[addr & 0x1FFFFFFF:(addr & 0x1FFFFFFF) + 4], "big")
 
     def half(self, addr: int) -> int:
-        return struct.unpack_from("<H", self.data, addr & 0x1FFFFFFE)[0]
+        return int.from_bytes(self.data[addr & 0x1FFFFFFE:(addr & 0x1FFFFFFE) + 2], "big")
 
     def byte(self, addr: int) -> int:
-        return self.data[(addr & 0x1FFFFFFF) ^ 3]
+        return self.data[addr & 0x1FFFFFFF]
 
     def region(self, addr: int, length: int) -> bytes:
         off = addr & 0x1FFFFFFF
-        return bytes(self.data[(off + i) ^ 3] for i in range(length))
+        return bytes(self.data[off:off + length])
 
 
 def in_rdram(addr: int, length: int = 1) -> bool:
@@ -68,7 +81,7 @@ def cmd_find_ptr(img: Image, addr: int, limit: int) -> int:
     print(f"words equal to 0x{addr:08X} in {img.path}:")
     found = 0
     for off in range(0, len(img.data) - 4, 4):
-        if struct.unpack_from("<I", img.data, off)[0] == addr:
+        if int.from_bytes(img.data[off:off + 4], "big") == addr:
             guest = 0x80000000 + off
             around = [img.word(guest + 4 * k) for k in range(-2, 3)]
             print(f"  0x{guest:08X}  nearby: " + " ".join(f"{v:08X}" for v in around))

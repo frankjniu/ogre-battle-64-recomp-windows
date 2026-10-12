@@ -876,6 +876,10 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_EMPTY_TILE_TRACE=1` | name every rectangle skipped because its tile covers no texels |
 | `OGRE_RECT_STATE=<y0>-<y1>` | per-rectangle render state for rectangles contained in rows `[y0,y1)`: cycle type, both combiner cycles (decoded by RT64's own `ColorCombiner::cycleColorText`/`cycleAlphaText`), the blender inputs, the primitive colour and the tile descriptor it samples |
 | `OGRE_TILE_TRACE=1` | every tile whose sampling rectangle is degenerate (`sampleHeight <= 1`), with the texture the cache returned (`hash`, index, dimensions, `tcScale`, `rawTMEM`) |
+| `OGRE_TILE_TRACE_ALL=1` (`_MAX`, `_MAXH`, `_MISS`, `_COPY`) | the same `[gpu-tile]` line for every tile (`_MAXH=<n>` keeps only tiles whose sample is at most n by n, so a scene's 320-wide layers do not consume the cap; `_MISS=1` prints only tiles whose texture-cache lookup failed; `_COPY=1` also prints the tiles served by a framebuffer tile copy, which otherwise print nothing) |
+| `OGRE_SPRITE_TRACE=1` | one `[spr]` line per tile of a two-texture draw, printed **after** the upload decision: the draw's `call` index, the tile's position and its count, the cycle type, the combiner, PRIM and ENV, the tile descriptor (`fmt`/`siz`/`line`/`tmem`), the sample size, `tileCopy`, `rawTMEM`, the hash it resolved to, and the RDP tile's `address`/`stride`/masks/`nativeSampler`. This is the line that says which path a tile took; `[dec]` below says what that path read (session 134) |
+| `OGRE_TILE_DECODE=1` | for every tile the texture cache hashes, the RGBA the renderer would decode out of the TMEM snapshot it is hashing, computed with the same rules as `TextureDecodeCS.hlsl` (`nz`, `mean`, three sample pixels, once per hash); the raw-TMEM path, which never reaches `uploadTexture`, prints its own line; and `[fbcopy]`/`[fbcopy-stale]`/`[fbcopy-depth]`/`[fbcopy-outside]` name every tile served by a framebuffer copy and every copy that was refused (session 134) |
+| `OGRE_FB_GPU_COPY=0` | turn RT64's `emulatorConfig.framebuffer.copyWithGPU` off for one run, which removes the framebuffer tile-copy path entirely and makes every texture load read RDRAM. The A/B for the black-head fix; `1` restores RT64's default |
 | `OGRE_DUMP_TEX=<dir>` | write RT64's decoded-texture dump (a 4 KiB `.tmem` plus `.tile.json` per texture) into `<dir>` instead of opening its file dialog |
 
 ```sh
@@ -977,11 +981,19 @@ blanking list at `0x800C6500`.
 
 ### Reading a dump
 
-The runtime byte-reverses RDRAM (see `recomp.h`): the 32-bit word at game address
-`a` is a **little-endian** word at file offset `a - 0x80000000`, and the logical
-byte at `a` is at `(a ^ 3) - 0x80000000`. So a Python read is
-`struct.unpack_from('<I', data, a & 0x1FFFFFFF)[0]` for words and
-`data[(a & 0x1FFFFFFF) ^ 3]` for logical bytes.
+**The image is stored in ROM order** (verified session 132): the four file bytes
+at offset `a & 0x1FFFFFFF`, read **big-endian**, are the guest word, and the file
+byte at that offset is the logical byte the game holds at guest `a`. So a Python
+read is `int.from_bytes(data[a & 0x1FFFFFFF : +4], 'big')` for words and
+`data[a & 0x1FFFFFFF]` for logical bytes.
+
+The check that settles it: the part cache's own layout words. `D_8018FC88` must
+read `0x80269640`-style (a KSEG0 heap pointer) and `D_80190F70` must be eight
+bytes past it plus `0x8000`. An earlier reading used
+`struct.unpack_from('<I', ...)` and `data[off ^ 3]`, which returns the
+byte-reversed value (`0x40962680`) and transposes every multi-byte field; that
+reading produced session 131's withdrawn "12x16 cell with a palette at `+0x60`".
+`tools/rdram.py` and `tools/ogre_ram.py` read ROM order now.
 
 `tools/rdram.py` does all of that for you (`word`/`half`/`byte`/`string`/
 `hexdump`/`find`/`ptr`), and one mode answers the question mis-binding walls turn

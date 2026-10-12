@@ -29,6 +29,37 @@ std::string config_output_dir() {
 
 }  // namespace
 
+bool ram_key_dump_full(uint8_t* rdram, int serial) {
+    if (rdram == nullptr) {
+        return false;
+    }
+    const std::string dir = config_output_dir();
+    char path[512];
+    std::snprintf(path, sizeof(path), "%s/ram-%d-full.bin", dir.c_str(), serial);
+    // A whole-image dump is taken while the game thread is parked on the RSP
+    // task, so nothing mutates RDRAM underneath it (the same argument the
+    // `save` checkpoint console command relies on).
+    size_t written = 0;
+    FILE* f = std::fopen(path, "wb");
+    if (f == nullptr) {
+        fprintf(stderr, "[ramkey] cannot write %s\n", path);
+        std::fflush(stderr);
+        return false;
+    }
+    for (uint32_t i = 0; i < 0x800000u; ++i) {
+        const uint8_t b = logical_byte(rdram, i);
+        if (std::fwrite(&b, 1, 1, f) != 1) {
+            break;
+        }
+        ++written;
+    }
+    std::fclose(f);
+    fprintf(stderr, "[ramkey] auto-dump %d: wrote %s (%zu bytes, whole image)\n", serial, path,
+            written);
+    std::fflush(stderr);
+    return written == 0x800000u;
+}
+
 void ram_key_tick(uint8_t* rdram) {
     static const int key = [] {
         const char* v = std::getenv("OGRE_RAM_KEY");
