@@ -19,9 +19,11 @@ namespace ogre {
 namespace {
 
 // The GAME SPEED radio group. The values are a subset of what the port's guides
-// use for `OGRE_SPEED`; 6 and 8 were dropped because the game's own cursor
-// aiming cannot keep up at those speeds.
-const int kGameSpeeds[kGameSpeedCount] = {1, 2, 4};
+// use for `OGRE_SPEED`. 6 and 8 were dropped in session 93 because the game's
+// own cursor aiming cannot keep up at those speeds; 8 is back at the
+// developer's request (session 137), and the speed hotkeys
+// (`step_game_speed`) walk this same list.
+const int kGameSpeeds[kGameSpeedCount] = {1, 2, 4, 8};
 
 // The config directory the file is written to; empty until load_settings runs,
 // in which case a change still applies to the runtime but is not persisted.
@@ -353,7 +355,7 @@ void write_settings() {
     const std::string text =
         "# Ogre Battle 64: Recomp settings.\n"
         "# Edited from the launcher's SETTINGS tab, or the in-game Esc overlay.\n"
-        "# game_speed: the emulated clock's multiplier (1, 2 or 4).\n"
+        "# game_speed: the emulated clock's multiplier (1, 2, 4 or 8).\n"
         "game_speed = " + std::to_string(g_game_speed) + "\n"
         "# widescreen: off or on.\n"
         "widescreen = " + lowercase(widescreen_mode_label(static_cast<int>(g_widescreen))) + "\n"
@@ -421,7 +423,69 @@ void set_game_speed(int multiplier) {
     }
     g_game_speed = multiplier;
     ultramodern::set_speed_multiplier(static_cast<uint32_t>(multiplier));
+    // One line per change, so a run's log says what the keys and the panel did.
+    std::fprintf(stderr, "[settings] game speed x%d\n", multiplier);
+    fflush(stderr);
     write_settings();
+}
+
+bool step_game_speed(int direction) {
+    if (direction == 0) {
+        return false;
+    }
+    // The next offered value in that direction, compared numerically rather
+    // than by index: `OGRE_SPEED` can start a run on a value the row does not
+    // offer (3, 6, 64), and stepping from one of those must still reach the
+    // neighbouring offered value.
+    int next = g_game_speed;
+    if (direction > 0) {
+        for (int i = 0; i < kGameSpeedCount; i++) {
+            if (kGameSpeeds[i] > g_game_speed) {
+                next = kGameSpeeds[i];
+                break;
+            }
+        }
+    }
+    else {
+        for (int i = kGameSpeedCount - 1; i >= 0; i--) {
+            if (kGameSpeeds[i] < g_game_speed) {
+                next = kGameSpeeds[i];
+                break;
+            }
+        }
+    }
+    if (next == g_game_speed) {
+        // Already at the end of the list; the key does nothing there.
+        return false;
+    }
+    set_game_speed(next);
+    return true;
+}
+
+bool cycle_game_speed() {
+    // The pad's one button (R3) has no direction, so it walks the table and
+    // wraps: 1 -> 2 -> 4 -> 8 -> 1. A run started on a value the table does not
+    // offer joins at the first offered value above it (6 -> 8), or at 1 when
+    // there is none (64 -> 1).
+    const int index = game_speed_index(g_game_speed);
+    int next = kGameSpeeds[0];
+    if (index >= 0) {
+        next = kGameSpeeds[(index + 1) % kGameSpeedCount];
+    }
+    else {
+        for (int i = 0; i < kGameSpeedCount; i++) {
+            if (kGameSpeeds[i] > g_game_speed) {
+                next = kGameSpeeds[i];
+                break;
+            }
+        }
+    }
+    if (next == g_game_speed) {
+        // Only reachable if the table were a single value.
+        return false;
+    }
+    set_game_speed(next);
+    return true;
 }
 
 const char* widescreen_mode_label(int index) {

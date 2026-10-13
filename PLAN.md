@@ -110,7 +110,10 @@ Organize Screen, the credits, the ending and the attract loop.
   applied live by `RT64Renderer::update_config` and persisted in `settings.cfg`.
   A fullscreen window's geometry belongs to the renderer, so the port's
   WIDESCREEN fit is skipped while fullscreen and re-run once the renderer has
-  restored the window. RESOLUTION (`native` / `2x` / `auto`) and MSAA
+  restored the window. GAME SPEED offers **1, 2, 4 and 8** (8 is back at the
+  developer's request, session 137), `=` and `-` step it while the game runs, the
+  pad's **R3** cycles it, and a two-second badge draws `2x`/`4x`/`8x` in the game
+  window's lower-right corner on any change. RESOLUTION (`native` / `2x` / `auto`) and MSAA
   (`off` … `8x`) are implemented on the same path but ship **behind
   `OGRE_DISPLAY_EXPERIMENTS=1`**: a player run with them produced visual
   artifacts (developer, session 121), so their rows are absent and their values
@@ -586,6 +589,18 @@ holds the evidence.
     follows another run. If it returns, capture the save at the crash and read
     `D_800AF028`, the resolved descriptor and its hook words from the frame
     before. See `docs/notes-tutorial-crash.md` §5.
+18. **The speed badge is not drawn in fullscreen, and it hides itself when the
+    pointer is over it (session 137).** The badge is a small borderless
+    always-on-top SDL window over the corner of the game window, because RT64
+    owns the game's swap chain and has no UI pass. Fullscreen is a display space
+    of its own, so the window has nowhere to draw; the speed still changes and
+    only the readout is missing. The window also takes the mouse focus while the
+    pointer is inside its 56x47 rect, because SDL2's `SDL_HitTestResult` has no
+    click-through value (the bundled headers have `NORMAL`, `DRAGGABLE` and the
+    resize edges, and cocoa implements only `DRAGGABLE`), so the badge hides on
+    mouse focus rather than swallowing a click or holding the map and mission
+    cursors' motion events. A badge that survives both needs a draw inside RT64's
+    frame, or a texture and display list the port submits itself.
 
 Parked, not defects:
 

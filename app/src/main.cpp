@@ -42,6 +42,7 @@
 #include "input_map.hpp"
 #include "overlay.hpp"
 #include "settings.hpp"
+#include "speed_badge.hpp"
 #include "widescreen.hpp"
 #include "sdl_platform.hpp"
 #include "renderer.hpp"
@@ -121,6 +122,10 @@ static void update_gfx(void*) {
     // The Esc overlay owns a window of its own; drawing it here keeps it on the
     // main thread, where SDL's Cocoa backend requires window calls to happen.
     ogre::overlay_render();
+    // The game-speed badge ("2x", "4x", ...) is a second window over the game
+    // window's corner, on the same main thread, shown for a couple of seconds
+    // after the multiplier changes.
+    ogre::speed_badge_tick();
     // The overlay's MAIN tab carries EXIT GAME. It records the request instead
     // of ending the run itself, so this one exit path prints the dumps below and
     // calls ultramodern::quit for both the close button and the panel. The
@@ -516,6 +521,10 @@ int main(int argc, char** argv) {
     // The Esc panel is a borderless window placed over the game window, so it is
     // set up once the window exists and before any frame is presented.
     ogre::overlay_init(ogre::g_platform, pref_dir, std::string(ogre::MOD_GAME_ID));
+    // The speed badge is positioned over the game window, so it is initialized
+    // beside the overlay. It creates no window of its own until the speed
+    // changes.
+    ogre::speed_badge_init(ogre::g_platform.window);
 
     // --- OGRE_SAVE: start from a save file as the battery ----------------------
     // The runtime loads `<config>/saves/<game id>.bin` on the game's first SRAM
@@ -572,6 +581,7 @@ int main(int argc, char** argv) {
 
     game_starter.join();
     ogre::overlay_shutdown();
+    ogre::speed_badge_shutdown();
     ogre::shutdown_sdl(ogre::g_platform);
     // The runtime does not join the game's own threads, so they are still
     // running recompiled code here. Running the C++ static destructors (what

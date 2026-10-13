@@ -43,9 +43,11 @@
 namespace ogre {
 
 // The offered multipliers, in display order. This is the GAME SPEED row's radio
-// group; index 0 is the default. 6 and 8 were offered first and were dropped:
-// at those speeds the game's own cursor aims are too fast to control.
-constexpr int kGameSpeedCount = 3;
+// group; index 0 is the default. 6 and 8 were offered first and were dropped in
+// session 93: at those speeds the game's own cursor aims are too fast to
+// control. 8 is offered again at the developer's request (session 137), which
+// also added the speed hotkeys below; 6 stays out.
+constexpr int kGameSpeedCount = 4;
 
 // The multiplier at `index`, or 1 for an out-of-range index.
 int game_speed_value(int index);
@@ -60,8 +62,24 @@ int nearest_game_speed(int value);
 int game_speed();
 
 // Applies `multiplier` to the runtime and writes `<config>/settings.cfg`.
-// Clamped to the runtime's range (1..64). Called from the UI.
+// Clamped to the runtime's range (1..64). Called from the UI and the speed
+// hotkeys. Logs `[settings] game speed x<n>` on every change.
 void set_game_speed(int multiplier);
+
+// The GAME SPEED hotkeys' step: `direction` negative moves to the next lower
+// offered value, positive to the next higher one. The value it lands on is the
+// nearest offered one in that direction, so a run started on `OGRE_SPEED=6`
+// steps 6 -> 8 up and 6 -> 4 down. Returns whether the multiplier changed: at
+// 1x a down press and at 8x an up press change nothing. Called from
+// `sdl_platform.cpp`'s event pump.
+bool step_game_speed(int direction);
+
+// The pad's speed button (R3, see `sdl_platform.cpp`): the next offered value,
+// **wrapping** 8 -> 1, because one button has no direction. A run started on a
+// value the row does not offer joins at the first offered value above it (6 ->
+// 8), or at 1 when there is none (64 -> 1). Returns whether the multiplier
+// changed.
+bool cycle_game_speed();
 
 // The WIDESCREEN row: a toggle. RT64's Expand aspect ratio widens the view: its
 // `ProjectionProcessor` counter-scales the projection matrices, so a 3D scene

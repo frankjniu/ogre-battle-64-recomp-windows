@@ -8,6 +8,7 @@
 #include "mission_cursor.hpp"
 #include "overlay.hpp"
 #include "settings.hpp"
+#include "speed_badge.hpp"
 #include "widescreen.hpp"
 
 #include <algorithm>
@@ -656,6 +657,53 @@ void set_game_cursor_hidden(bool hidden, const char* why) {
     }
 }
 
+// The GAME SPEED hotkeys: `=` (and the keypad `+`) steps the multiplier up, `-`
+// (and the keypad `-`) steps it down, through the offered table in
+// settings.cpp (1, 2, 4, 8), stopping at the ends. Read from the event rather
+// than from the keyboard state because a step is an edge, not a hold.
+//
+// Any window may report the press: SDL's `SDL_ShowWindow` makes the speed
+// badge's own window the key window on macOS, so a handler that required the
+// game window's id would drop the press after the first step. The caller
+// restricts this to the frames where the game window exists and the Esc panel
+// is closed.
+static void handle_speed_key(SDL_Keycode key) {
+    int direction = 0;
+    if (key == SDLK_EQUALS || key == SDLK_PLUS || key == SDLK_KP_PLUS) {
+        direction = 1;
+    }
+    else if (key == SDLK_MINUS || key == SDLK_KP_MINUS) {
+        direction = -1;
+    }
+    if (direction == 0) {
+        return;
+    }
+    if (ogre::step_game_speed(direction)) {
+        fprintf(stderr, "[SDL] speed key -> x%d\n", ogre::game_speed());
+        fflush(stderr);
+    }
+}
+
+// The pad's GAME SPEED button: R3, the right stick's click, cycles the offered
+// table (1 -> 2 -> 4 -> 8 -> 1). R3 is what the default map leaves free (Z is
+// L3 and BACK opens the Esc panel), so the press does not also press an N64
+// button. Handled from the button-down event rather than by polling the state,
+// because a cycle is a press and not a hold; the event path is also what
+// `OGRE_SPEED_PAD` drives for a scripted run.
+//
+// A button the player binds to R3 still reaches the game: the game's own
+// `gamecontroller_buttons` reads the same state, and this handler only observes
+// the event.
+static void handle_speed_pad(Uint8 button) {
+    if (button != SDL_CONTROLLER_BUTTON_RIGHTSTICK) {
+        return;
+    }
+    if (ogre::cycle_game_speed()) {
+        fprintf(stderr, "[SDL] speed pad (R3) -> x%d\n", ogre::game_speed());
+        fflush(stderr);
+    }
+}
+
 void pump_sdl_events(Platform& platform, bool* quit) {
     // Enumerate once: SDL reports already-connected controllers with
     // SDL_CONTROLLERDEVICEADDED events pushed at SDL_InitSubSystem time, and the
@@ -818,6 +866,20 @@ void pump_sdl_events(Platform& platform, bool* quit) {
         // close) and, while it is up, the keyboard and mouse.
         ogre::overlay_handle_event(event);
 
+        // The GAME SPEED hotkeys (`=` up, `-` down). Only while the game window
+        // exists and the panel is closed: the panel owns the keyboard while it
+        // is up and has its own GAME SPEED row, and a press before the game
+        // window exists belongs to the launcher.
+        if (event.type == SDL_KEYDOWN && !event.key.repeat && platform.window != nullptr &&
+            !overlay_visible()) {
+            handle_speed_key(event.key.keysym.sym);
+        }
+        // The same rule for the pad's R3, which cycles the table.
+        else if (event.type == SDL_CONTROLLERBUTTONDOWN && platform.window != nullptr &&
+                 !overlay_visible()) {
+            handle_speed_pad(event.cbutton.button);
+        }
+
         // The pointer drives the cursor of every screen the mouse owns: the
         // world map (scene 0x05) and the mission field (scene 0x03). A left
         // click confirms what the cursor is on. The overlay owns the mouse while
@@ -851,9 +913,13 @@ void pump_sdl_events(Platform& platform, bool* quit) {
             // window. The overlay is its own SDL window, so the window under
             // the pointer tells the two apart, and the overlay's own state is
             // checked as well because a panel that opens while the pointer is
-            // already inside this window produces no new event for it.
+            // already inside this window produces no new event for it. The
+            // speed badge is a second small window over the same picture and
+            // counts as the game window for the same reason.
             const SDL_Window* pointer_window = SDL_GetMouseFocus();
-            set_game_cursor_hidden(pointer_window == platform.window && !overlay_visible(),
+            const bool over_game = pointer_window == platform.window ||
+                                   pointer_window == ogre::speed_badge_window();
+            set_game_cursor_hidden(over_game && !overlay_visible(),
                                    "pointer over the game window");
             // A left click confirms what the pointer is on, through the game's
             // own `A`. The click does not move the cursor: the pointer already

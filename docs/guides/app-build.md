@@ -789,6 +789,9 @@ captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
 | `OGRE_OVERLAY_OPACITY=<0.2..1.0>` | the overlay window's opacity (default 0.90) |
 | `OGRE_WINDOW_CLOSE_AT_MS=<n>` | push one `SDL_WINDOWEVENT_CLOSE` for the game window `n` ms after the platform was configured, so the window's close path can be exercised without a human clicking the button. Pair it with `OGRE_OVERLAY_AT_MS` and `OGRE_OVERLAY_KEYS="Escape"` to have the overlay's second SDL window open and close first, which is the state the close button used to stop working in |
 | `OGRE_CAPTURE_OVERLAY=<path>` | write the overlay's renderer as a PPM once, after its first frame. `OGRE_OVERLAY_SHOT_MS=<n>` delays it, so the capture can show what `OGRE_OVERLAY_KEYS` changed |
+| `OGRE_SPEED_KEYS=<up\|down>,…` | push one synthetic `=` or `-` keydown per 150 ms, through the same SDL event path a real press takes, so a scripted run exercises the GAME SPEED hotkeys. `OGRE_SPEED_KEYS_AT_MS=<n>` is the delay before the first press (default 1000). `up`/`+`/`=` and `down`/`-` are the names |
+| `OGRE_SPEED_PAD=<tag>,…` | the same for the pad's R3 speed button, as synthetic `SDL_CONTROLLERBUTTONDOWN` events. Tags are the CONTROLS tab's (`r3`/`rstick` for the right stick's click). `OGRE_SPEED_PAD_AT_MS=<n>` is the delay before the first press (default 1000); both scripts use one clock, and a frame delivers the key script first when both are due |
+| `OGRE_CAPTURE_BADGE=<path>` | write the speed badge's window as a PPM, one file per show, so the file holds the last badge the run put up (session 137) |
 | `OGRE_SAVE=<name\|path>` | start the run from that save as the cartridge battery (session 78). A bare name is looked up as the path, then `<rom dir>/saves/<name>[.n64\|.bin]`, then `assets/saves/<name>[.n64\|.bin]`, so `OGRE_SAVE=prologue` finds `assets/saves/prologue.n64`. Accepts the port's 32 KiB image, an emulator wrapper of it (in either byte order, at any offset), a **DexDrive `.N64` Controller Pak dump** — converted through its notes' battery slots, checksums reseeded — or a bare pak. The result is written to `<config>/saves/<game id>.bin`, never back into the source |
 | `OGRE_SAVE_RESET=1` | re-import even when the battery in the config dir is newer than the source. Without it a run **keeps** that battery, so progress the game wrote back survives a re-run, and swapping a save file in re-imports it (its mtime is newer) |
 | `OGRE_SAVE_ALL=1` | with `OGRE_SAVE`, also take the stale records a deleted Controller Pak note leaves behind (still capped at the battery's two save slots) |
@@ -1832,6 +1835,10 @@ mapping the port used before the tab existed:
 The left stick is always the N64 analog stick, and the right stick presses the C
 buttons on top of whatever the map binds to them. Both are fixed, and the
 CONTROLS tab says so. `ESC` is reserved for the overlay and cannot be bound.
+`=` and `-` step the game speed while the game runs, and the pad's **R3** cycles
+it (see "Game speed" below); none of the three is part of this map. Binding one of
+them to an N64 button would still work, but the press would change the speed as
+well.
 
 The file is line-oriented (`<n64 tag>.<key|pad> = <value>`); `-` and `none` are
 unbound, and a missing file leaves the defaults. Key names are SDL's
@@ -1884,19 +1891,21 @@ cannot auto-repeat; a rebind capture owns the pad while it is armed.
 the live map binds nothing to it (`pad_button_is_bound`), so opening the menu
 cannot also press an N64 button in the game. While the overlay is visible the
 game already receives an idle pad (`get_input` in `app/src/sdl_platform.cpp`), so
-navigating the panel does not move the game's own cursor.
+navigating the panel does not move the game's own cursor. The pad's **R3** is the
+game speed's own button and is likewise ignored while the overlay is visible; see
+"Game speed" below.
 
 ### Game speed (the SETTINGS tab)
 
 GAME SPEED is the runtime's emulated-clock multiplier, the same quantity
 `OGRE_SPEED` sets: `1` is real time, and `n` runs the emulated CPU counter and
 the VI retrace schedule `n` times faster, so a timed sequence completes in `1/n`
-of the wall time. The tab offers **1, 2 and 4**; 6 and 8 were offered first and
-were dropped because at those speeds the game's own cursor aiming is too fast to
-control.
+of the wall time. The tab offers **1, 2, 4 and 8**; 8 was dropped when the row was
+added because the game's own cursor aiming is fast at that speed, and it is
+offered again at the developer's request (session 137). 6 stays out.
 
 ```
-GAME SPEED   [ ] 1 [ ] 2 [x] 4
+GAME SPEED   [ ] 1 [ ] 2 [ ] 4 [x] 8
 ```
 
 `LEFT`/`RIGHT` (or `SPACE`) step the group, and a mouse click on a marker sets
@@ -1905,14 +1914,50 @@ in-game `ESC` overlay while the game runs; the handoff's timing evidence shows
 the guest clock stays continuous across a change. It is saved as plain text at
 `<config>/settings.cfg` (`game_speed = <n>`, written by `app/src/settings.cpp`),
 read at startup by `load_settings()` before the game boots. `OGRE_SPEED` overrides
-the file for one run and does not write it; a file that names a value the tab no
-longer offers is loaded as the closest offered one, so a stale `8` becomes `4`.
+the file for one run and does not write it; a file that names a value the tab does
+not offer is loaded as the closest offered one, so a stale `6` becomes `4`.
 
 The runtime's setter is `ultramodern::set_speed_multiplier()` (`timer.cpp`). The
 clock is piecewise linear: `speed_start_us`/`speed_start_ticks` anchor where the
 current multiplier took effect, and the three values are published under a
 seqlock, because the game, VI and timer threads read them while the app's main
 thread changes them.
+
+**The speed hotkeys.** `=` steps the multiplier up and `-` steps it down (the
+keypad `+` and `-` too), through the same four values and stopping at the ends:
+1 → 2 → 4 → 8 and back, with no press doing anything at 8 while stepping up or at
+1 while stepping down. They are read from the SDL event in `pump_sdl_events`
+(`app/src/sdl_platform.cpp`), so they work while the game has the keyboard, and
+they are ignored while the `ESC` panel is up, because the panel owns the keyboard
+and has its own GAME SPEED row. A run whose starting value is not one the row
+offers steps from that value, so `OGRE_SPEED=6` goes to 8 up and 4 down.
+`OGRE_SPEED_KEYS` exercises them from a script.
+
+**The pad's speed button.** Pressing **R3** (the right stick's click) cycles the
+same table with one button, so it wraps: 1 → 2 → 4 → 8 → 1. R3 is what the
+default pad map leaves free (`Z` is L3 and `BACK` opens the `ESC` panel), so the
+press does not also press an N64 button; a player who binds R3 to an N64 button
+still gets that button, because this handler only observes the event. It is read
+from `SDL_CONTROLLERBUTTONDOWN` in `pump_sdl_events`, on the same rule as the
+keys: ignored while the `ESC` panel is open and before the game window exists.
+A run whose starting value is not in the table joins at the first offered value
+above it, so `OGRE_SPEED=6` cycles to 8 and then wraps to 1. `OGRE_SPEED_PAD`
+exercises it from a script.
+
+**The speed badge.** `app/src/speed_badge.cpp` shows `2x`, `4x` and so on in the
+game window's lower-right corner for two seconds whenever the multiplier changes,
+from the panel, the hotkeys or the row's own value at startup being replaced.
+"1x" is drawn too, so stepping back down to normal speed is visible. The game's
+picture is drawn by RT64 straight to its own swap chain and the renderer has no
+UI pass, so the badge is a small borderless always-on-top SDL window placed over
+the corner of the game window, drawn with the same bitmap font as the panel and
+0.85 uniform window opacity (SDL2 has no per-pixel window alpha). No window is
+created until the first change. Two limits, both from that design: the badge is
+not drawn while the WINDOW row is `fullscreen`, because fullscreen is a display
+space of its own, and it hides itself when the pointer moves over it, because
+SDL2's window hit test has no click-through result and a click there would
+otherwise be swallowed instead of reaching the game.
+
 
 ### Widescreen (the SETTINGS tab)
 
