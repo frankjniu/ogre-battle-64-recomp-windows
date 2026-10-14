@@ -666,6 +666,28 @@ inline ViSize vi_framebuffer_size(const ultramodern::renderer::ViRegs& r) {
     return out;
 }
 
+// RT64 `VIRenderer::visibleFramebufferSize` (`src/render/rt64_vi_renderer.cpp`):
+// the area of the framebuffer the presenter samples is the VI's `fbSize` minus
+// an overscan crop (the game's scissor and clear stop one pixel short on the
+// right and the bottom, so those pixels hold leftovers from an earlier scene).
+// `OGRE_OVERSCAN=<0..8>` overrides it, the same knob the native renderer reads.
+inline int overscan_crop() {
+    static const int crop = [] {
+        const char* v = getenv("OGRE_OVERSCAN");
+        const int value = (v != nullptr) ? atoi(v) : 1;
+        return std::clamp(value, 0, 8);
+    }();
+    return crop;
+}
+
+inline ViSize visible_framebuffer_size(const ViSize& fb_size) {
+    const int crop = overscan_crop();
+    ViSize out;
+    out.width = (fb_size.width > crop) ? (fb_size.width - crop) : fb_size.width;
+    out.height = (fb_size.height > crop) ? (fb_size.height - crop) : fb_size.height;
+    return out;
+}
+
 // ============================================================================
 // Which GBI does this task use?
 // ============================================================================
@@ -1764,8 +1786,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     }
 
     // Draws `tex` over the whole canvas with the COPY combiner (TEXEL0 straight
-    // through), which is the present path.
-    void blit_to_canvas(GLuint tex) {
+    // through), which is the present path. `u_max`/`v_min` bound the texture
+    // region the VI scans out: RT64's present shader maps
+    // `videoResolution / textureResolution` over the window
+    // (`src/shaders/VideoInterfacePS.hlsl`), so a framebuffer taller than the VI's
+    // `fbSize` is cropped rather than squashed with the rows past the colour
+    // image. Texture v = 1 is guest row 0 (`upload_framebuffer` flips), so the
+    // visible rows are the *high* end of v.
+    void blit_to_canvas(GLuint tex, float u_max = 1.0f, float v_min = 0.0f) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, canvas_width_, canvas_height_);
         glDisable(GL_SCISSOR_TEST);
@@ -1786,12 +1814,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         glBindTexture(GL_TEXTURE_2D, tex);
         // (x, y, u, v, rgba) per vertex; two triangles covering the canvas.
         const float quad[6 * 8] = {
-            -1, -1, 0, 0, 1, 1, 1, 1,
-             1, -1, 1, 0, 1, 1, 1, 1,
-             1,  1, 1, 1, 1, 1, 1, 1,
-            -1, -1, 0, 0, 1, 1, 1, 1,
-             1,  1, 1, 1, 1, 1, 1, 1,
-            -1,  1, 0, 1, 1, 1, 1, 1,
+            -1, -1, 0,     v_min, 1, 1, 1, 1,
+             1, -1, u_max, v_min, 1, 1, 1, 1,
+             1,  1, u_max, 1,     1, 1, 1, 1,
+            -1, -1, 0,     v_min, 1, 1, 1, 1,
+             1,  1, u_max, 1,     1, 1, 1, 1,
+            -1,  1, 0,     1,     1, 1, 1, 1,
         };
         glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_DYNAMIC_DRAW);
         glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -1841,20 +1869,39 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             it = (key != 0) ? gl_framebuffers_.find(key) : gl_framebuffers_.end();
         }
         const bool have_fbo = (it != gl_framebuffers_.end() && it->second.tex != 0);
+        const ViSize visible = visible_framebuffer_size(vi);
         if (present_requests_ <= 12 || (present_requests_ % 300) == 0) {
             ++presents_logged_;
             OGRE_MILESTONE("GFX-PRESENT",
                            "VI scanout 0x%06X -> fb 0x%06X: fbo=%d size=%dx%d siz=%u "
-                           "nonBlack=%u canvasDirty=%d fbs=%zu status=0x%08X (present %u)",
+                           "visible=%dx%d nonBlack=%u canvasDirty=%d fbs=%zu status=0x%08X "
+                           "(present %u)",
                            address, have_fbo ? key : 0u, have_fbo ? 1 : 0,
                            have_fbo ? it->second.width : 0, have_fbo ? it->second.height : 0,
                            have_fbo ? (unsigned)it->second.siz : 0u,
+                           have_fbo ? visible.width : 0, have_fbo ? visible.height : 0,
                            have_fbo ? it->second.last_nonblack : 0u,
                            canvas_dirty_ ? 1 : 0, gl_framebuffers_.size(), vi_status_,
                            present_requests_);
         }
         if (have_fbo) {
-            blit_to_canvas(it->second.tex);
+            // The GL framebuffer is the RDP colour image at the tallest height
+            // `ensure_framebuffer` has ever been asked for, so it can be taller
+            // than the VI's scanout (a 320x240 image that grew to 320x476 across
+            // the publishers' hi-res mode). Present only the visible area, the way
+            // RT64 does; the rows past the colour image hold the next one.
+            const bool have_visible = (visible.width > 0 && visible.height > 0);
+            const float u_max = (have_visible && it->second.width > 0)
+                                    ? std::min(1.0f, static_cast<float>(visible.width) /
+                                                         static_cast<float>(it->second.width))
+                                    : 1.0f;
+            // Texture v = 1 is guest row 0, so the visible rows are the top of the
+            // image and the crop takes the high end of v.
+            const float v_min = (have_visible && it->second.height > 0)
+                                    ? std::max(0.0f, 1.0f - static_cast<float>(visible.height) /
+                                                               static_cast<float>(it->second.height))
+                                    : 0.0f;
+            blit_to_canvas(it->second.tex, u_max, v_min);
             canvas_dirty_ = false;
             return;
         }

@@ -54,7 +54,21 @@ recorded in
 renderer. `docs/WEB-PORT-DEPLOYMENT.md` describes the current package;
 `docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md` describe the 2026-08-29
 feasibility work and not the current state. The current state is this file and
-`docs/HANDOFF-2026-10-14-session141.md`.
+`docs/HANDOFF-2026-10-14-session143.md`.
+
+Session 143 fixed the browser's presentation of a frame. The presenter drew the
+whole GL framebuffer texture over the canvas, and that texture is the RDP colour
+image at the tallest height it has ever been asked for (RT64's
+`Framebuffer::maxHeight`), so the title's 320x240 frame was drawn into the top
+240/476 = 50.4% of the canvas with the next guest image's rows below it as noise
+or black - session 142's "the attract story is only partly drawn".
+`visible_framebuffer_size()` ports RT64's `visibleFramebufferSize` (the VI's
+`fbSize` minus `OGRE_OVERSCAN`, default 1) and `blit_to_canvas` samples only that
+area. The title logo and the attract story's pages now fill the frame
+(`docs/proofs/web-title-640-after-texrect-fix.png`,
+`docs/proofs/web-attract-story-full-frame.png`). Two gaps stay open: the
+browser's title and story frames are hue-shifted against RT64's target for the
+same text, and CI8 tiles decode black in display lists that load no palette.
 
 Session 141 continued the renderer. The render targets and the canvas are now
 sized from the VI's scanout size (a port of RT64's `VI::fbSize`, updated only by
@@ -451,9 +465,10 @@ holds the evidence.
    is forty 640x12 texrects. (c) `K4`/`K5` are combiner colour inputs now
    (`convertK[4] / 255`, RT64 `RasterPS.hlsl`) instead of returning 0.
    Still open in the browser renderer: framebuffer-as-texture (a `G_LOADTILE`
-   whose source is a rendered colour image reads RDRAM), presentation ignores the
-   VI's own view rectangle, and the attract story (scene `0x0B`) is only partly
-   drawn.
+   whose source is a rendered colour image reads RDRAM), presentation resolves
+   the VI's origin by containment instead of applying its own view rectangle, and
+   the browser's title and story frames are hue-shifted against RT64's target for
+   the same text (cloud band `(128,86,84)` against `(156,134,77)`, sky matching).
    Session 142 closed the title-screen fault and the geometry behind it.
    `draw_texrect` treated the RDP's lower-right corner as inclusive (`xh + 1`,
    `yh + 1`, and a `xh - xl + 1` texel span). The RDP covers `[ul, lr)` for a
@@ -477,7 +492,22 @@ holds the evidence.
    `ogre::ram_key_tick()` (`OGRE_RAM_KEY_AT_MS`), and `debug/probes/rdram.cjs`
    reads the dump out of the wasm filesystem so browser RDRAM is analysed with
    `tools/rdram.py` like a native image. New bounded diagnostic `[GFX-EDGE]`.
-   See `docs/HANDOFF-2026-10-14-session142.md`,
+   Session 143 closed session 142's "the attract story is only partly drawn": the
+   presenter drew the whole framebuffer texture over the canvas, and that texture
+   is the colour image at the tallest height `ensure_framebuffer` has been asked
+   for (RT64's `Framebuffer::maxHeight`), so the title's 320x240 frame was drawn
+   into the top 240/476 = 50.4% of the canvas with the next guest image's rows
+   below it as noise or black. `visible_framebuffer_size()` ports RT64's
+   `visibleFramebufferSize` (the VI's `fbSize` minus `OGRE_OVERSCAN`, default 1)
+   and `blit_to_canvas(tex, u_max, v_min)` samples only that area, taking the
+   high end of `v` because `upload_framebuffer` flips the image; `[GFX-PRESENT]`
+   prints `visible=WxH`. The title's logo and the story's parchment page now fill
+   the frame (`docs/proofs/web-title-640-after-texrect-fix.png`,
+   `docs/proofs/web-attract-story-full-frame.png`), the 640x476 world-map mode is
+   unchanged, and the frames were checked against RT64's own render target for
+   the same screen.
+   See `docs/HANDOFF-2026-10-14-session143.md`,
+   `docs/HANDOFF-2026-10-14-session142.md`,
    `docs/HANDOFF-2026-10-14-session141.md`, `docs/HANDOFF-2026-10-14-session139.md`
    and `docs/DECISIONS.md`.
    Session 140 added the static package and the deployment path: `make web-dist`
