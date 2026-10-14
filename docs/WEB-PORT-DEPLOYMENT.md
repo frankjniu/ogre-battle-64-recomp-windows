@@ -105,10 +105,13 @@ One repository setting is required and the workflow cannot set it: **Settings �
 Pages → Build and deployment → Source = GitHub Actions**. Until it is set, the
 deploy job fails with `Get Pages site failed`. It is set on this repository
 (`gh api repos/lfarroco/ogre-battle-64-recomp/pages` reports
-`"build_type": "workflow"`, set on 2026-10-14), so the next push to `main` that
-the build job accepts publishes the site.
+`"build_type": "workflow"`, set on 2026-10-14), and the site is published: the
+workflow runs green on a push to `main`, and
+`https://lfarroco.github.io/ogre-battle-64-recomp/` serves the package.
 
-The published URL is `https://lfarroco.github.io/ogre-battle-64-recomp/`.
+`debug/probes/isolate.cjs --url https://lfarroco.github.io/ogre-battle-64-recomp/`
+checks the deployed page, and `debug/probes/boot.cjs` with the same `--url`
+renders it.
 
 nginx and other hosts that can set headers do not need the service worker:
 

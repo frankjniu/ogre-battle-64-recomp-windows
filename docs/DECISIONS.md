@@ -206,9 +206,12 @@ On a plain `python3 -m http.server --directory dist-web` (no COOP/COEP):
 worker) reports `nonBlack 239425 / colorful 19688` and `service worker supported,
 not controlling`, which is the check that the development flow installs no
 worker; the identical `nonBlack` count on the two paths is the A/B, and the 388
-differing colourful pixels are the title's fade advancing between the runs. A
-GitHub-Pages-like
-subpath (`/ogre-battle-64-recomp/`) isolates at 650 ms and reaches `wasm ready`,
+differing colourful pixels are the title's fade advancing between the runs. The
+deployed site (`https://lfarroco.github.io/ogre-battle-64-recomp/`, workflow runs
+`38576916888` and `38576918066`) reports `nonBlack 239425 / colorful 20076`,
+`isolated true (first seen at 1131 ms)` and `wasm ready true`, so all three
+servers draw the same frame. A GitHub-Pages-like subpath
+(`/ogre-battle-64-recomp/`) isolates at 650 ms and reaches `wasm ready`,
 and a server that gzip-encodes `.html`/`.js`/`.wasm` also reaches `wasm ready`,
 which rules out the `Content-Encoding` mismatch a header-copying service worker
 can introduce.

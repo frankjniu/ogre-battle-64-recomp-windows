@@ -160,6 +160,7 @@ node debug/probes/isolate.cjs --url http://127.0.0.1:8942/
 `wasm ready true` means the 21 MB module was fetched, decompressed and
 instantiated through the worker.
 
+
 ### 6. The wasm exports are published after `onRuntimeInitialized`
 
 Polling `typeof Module._ogre_start_boot` every 500 ms from the runtime's own log
@@ -197,6 +198,22 @@ auto-start. `initAudio()` stays before it, so the `AudioContext` is still create
 inside the user gesture. `debug/probes/isolate.cjs` and `boot.cjs` were re-run
 after the fix; `debug/lib/harness.cjs`'s `gotoPage` now waits for the export as
 well, because it otherwise hands the ROM to the page inside the same window.
+
+### 7. The deployed site renders the same frame as the local ones
+
+Three servers, the same probe, `--attempts 2 --secs 90`, all `sawRealDl=true`:
+
+| server | nonBlack | colorful |
+|---|---|---|
+| `python3 -m http.server --directory dist-web 8940` (service worker) | 239425 | 20076 |
+| `python3 debug/server.py` (COOP/COEP, no worker) | 239425 | 19688 |
+| `https://lfarroco.github.io/ogre-battle-64-recomp/` (deployed) | 239425 | 20076 |
+
+The identical `nonBlack` count is the result: the deployed build, the local
+package and the development server are the same picture, and the differing
+`colorful` counts are the title's fade advancing between the runs.
+`debug/probes/isolate.cjs` reports the deployed URL `isolated true (first seen at
+1131 ms)`, `service worker controlling`, `wasm ready true`.
 
 ## What the package is
 
@@ -244,10 +261,11 @@ dist-web/.nojekyll              for a branch-based Pages deploy
   (`https://lfarroco.github.io/ogre-battle-64-recomp/`, isolated at 1131 ms,
   `wasm ready true`).
 - `debug/probes/boot.cjs` — the plain server (`sawRealDl=true`, `nonBlack
-  239425`) and `debug/server.py` (`nonBlack 239425 / colorful 19688`), plus one
-  run against the deployed site.
-- The Pages workflow ran: run `38574439694`, build 4m30s and deploy 1m19s, both
-  success; `curl` on the deployed files shows `application/wasm` with
+  239425 / colorful 20076`), `debug/server.py` (`239425 / 19688`) and the
+  deployed site (`239425 / 20076`), three attempts of two, 90 s each.
+- The Pages workflow ran twice for the second push (runs `38576916888` and
+  `38576918066`, both success, `WebAssembly` `38576917934` success), and
+  `curl` on the deployed files shows `application/wasm` with
   `Content-Encoding: gzip` and no COOP/COEP, which is the configuration §5
   covers.
 - No native build was run. No renderer source changed, so the session-139
@@ -262,11 +280,12 @@ one throwaway directory (`/tmp/pages-sim/`) were used for the checks in §4 and
 
 ## Open
 
-1. **The deployed site has been exercised, but only headless.** Run `38574439694`
-   built and deployed it, `isolate.cjs` reports it cross-origin isolated, and the
-   boot probe reaches the game there. A full hand-played pass on the deployed URL
-   has not been done, and the two Emscripten versions (CI `latest` against this
-   machine's `6.0.8-git`) are a difference the local runs cannot cover.
+1. **The deployed site has been exercised, but only headless.** The workflow ran
+   green twice for the second push, `isolate.cjs` reports the deployed URL
+   cross-origin isolated at 1131 ms, and `boot.cjs` on it renders the same frame
+   as the two local servers (§7). A hand-played pass on the deployed URL has not
+   been done, and the two Emscripten versions (CI `latest` against this machine's
+   `6.0.8-git`) are a difference the local runs cannot cover.
 2. **The first load fetches the whole 21 MB wasm before the visitor picks a
    ROM.** `index.html` loads the glue at page load, which is what every local
    probe assumes. Loading it when the ROM picker is used would cut a visit that

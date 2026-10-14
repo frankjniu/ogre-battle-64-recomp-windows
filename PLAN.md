@@ -438,8 +438,10 @@ holds the evidence.
    build served by `debug/server.py` (`nonBlack 239425 / colorful 19688`, the
    server's own COOP/COEP headers and no worker); a GitHub-Pages-like
    subpath and a gzip-encoded server both isolate and instantiate the wasm; and
-   the deployed site (`https://lfarroco.github.io/ogre-battle-64-recomp/`, run
-   `38574439694`) isolates at 1131 ms and boots. Session 140 also found that the
+   the deployed site (`https://lfarroco.github.io/ogre-battle-64-recomp/`, runs
+   `38576916888`/`38576918066`) isolates at 1131 ms and `boot.cjs` renders the
+   same frame there as on the two local servers (`nonBlack 239425` on all
+   three). Session 140 also found that the
    glue publishes `Module._ogre_*` after `onRuntimeInitialized` fires (measured
    509 ms on the local package and 2015 ms on the CI-built one), which made a ROM
    handed to the page inside that window fail with `TypeError: func is not a
