@@ -41,12 +41,20 @@ framebuffer indirection: every `G_SETCIMG` target gets a GL framebuffer object
 keyed by its guest address, the pixels are written back into RDRAM in the RDP's
 RGBA5551 layout before the game reads them, and the VI presents that target, so
 the assembled cathedral backdrop now appears in the browser
-(`docs/proofs/web-newgame-cathedral-assembled.png`). The route is recorded in
+(`docs/proofs/web-newgame-cathedral-assembled.png`). Session 140 made the build
+deployable as a static site: `make web-dist` writes `dist-web/`, one directory a
+plain static host serves as-is, and `.github/workflows/pages.yml` publishes it to
+GitHub Pages. The pthread build needs `SharedArrayBuffer`, which exists only on a
+cross-origin-isolated page, and a static host cannot send the two response
+headers that provide it, so the package carries
+`app/web/coi-serviceworker.js` (coi-serviceworker v0.1.7, MIT, vendored verbatim)
+as a service worker that adds them and reloads the page once. The route is
+recorded in
 `docs/DECISIONS.md`; the native port is the primary target and RT64 remains its
-renderer. `docs/WEB-PORT.md`, `docs/WEB-PORT-REPORT.md` and
-`docs/WEB-PORT-DEPLOYMENT.md` describe the 2026-08-29 feasibility work and not
-the current state; the current state is this file and
-`docs/HANDOFF-2026-10-14-session139.md`.
+renderer. `docs/WEB-PORT-DEPLOYMENT.md` describes the current package;
+`docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md` describe the 2026-08-29
+feasibility work and not the current state. The current state is this file and
+`docs/HANDOFF-2026-10-14-session140.md`.
 
 ## Status
 
@@ -417,6 +425,23 @@ holds the evidence.
    not yet sampleable as textures (framebuffer-as-texture, the same gap as the
    native renderer's tile copy); and `K4`/`K5` as combiner inputs still return 0.
    See `docs/HANDOFF-2026-10-14-session139.md` and `docs/DECISIONS.md`.
+   Session 140 added the static package and the deployment path: `make web-dist`
+   writes `dist-web/` (page, shell, Emscripten output, `coi-serviceworker.js`,
+   `.nojekyll`), `.github/workflows/pages.yml` uploads it as the Pages artifact
+   and deploys it, and `app/web/ogre-web-config.js` lets one page serve both the
+   repository layout (`../../build-wasm/`) and the flat package (`"./"`). The
+   service worker is what makes a header-less host work: it adds COOP/COEP and
+   reloads the page once. Measured on a plain `python3 -m http.server` serving
+   `dist-web` (no COOP/COEP): the page is cross-origin isolated at 811 ms and the
+   glue reaches `WASM runtime initialized`; `boot.cjs` reports `RENDERED`
+   (`nonBlack 24508`) against the same build served by `debug/server.py`
+   (`24840`, the session-139 baseline); a GitHub-Pages-like subpath and a
+   gzip-encoded server both isolate and instantiate the wasm. Open: the Pages
+   workflow has not run (GitHub Pages is enabled for the repository with the
+   Actions source, and the data-bundle variable and secret are already set, so
+   the next push to `main` triggers it), and the first load downloads the whole
+   21 MB wasm before the visitor has picked a ROM. See
+   `docs/HANDOFF-2026-10-14-session140.md` and `docs/WEB-PORT-DEPLOYMENT.md`.
 9. **The published v0.4.0 archives ship an empty `mods/`, and the bundle that
    feeds the release did not carry one.** Fixed on main (session 108):
    `make dist`, `tools/release-build.sh`, the workflow's unpack step and

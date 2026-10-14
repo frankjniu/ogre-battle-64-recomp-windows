@@ -27,6 +27,20 @@
   }
   .muted { color: #6b7280; }
 </style>
+<!--
+  The Emscripten build uses pthreads, so the page must be cross-origin
+  isolated for `SharedArrayBuffer` to exist. `coi-serviceworker.js` supplies
+  the two headers when the host cannot (GitHub Pages and any other static
+  host); it is a no-op where the server already sends them (debug/server.py).
+  It must be a `<script src>` tag: the worker registers
+  `document.currentScript.src`.
+
+  `ogre-web-config.js` publishes `window.OGRE_WASM_DIR`, the directory the
+  Emscripten glue is loaded from. It is a separate file so one page serves both
+  layouts; see the comments in it.
+-->
+<script src="ogre-web-config.js"></script>
+<script src="coi-serviceworker.js"></script>
 </head>
 <body>
 <h1>Ogre Battle 64: Person of Lordly Caliber — Recompilation (WebAssembly)</h1>
@@ -66,12 +80,12 @@
 <pre id="gfxstats" class="muted" style="white-space:pre-wrap; font-size:12px; line-height:1.5; margin:0 0 16px;">(no display lists submitted yet)</pre>
 
 <!--
-  Path to the Emscripten build output. Override before this script by setting
-  OGRE_WASM_DIR. Default: the repo build-wasm directory when serving the repo
-  root (see docs/WEB-PORT-DEPLOYMENT.md).
+  Path to the Emscripten build output. `ogre-web-config.js` (loaded in the
+  head) sets it; the fallback below is the repository layout served by
+  `python3 debug/server.py` (see docs/WEB-PORT-DEPLOYMENT.md).
 -->
 <script>
-  var OGRE_WASM_DIR = OGRE_WASM_DIR || "../../build-wasm/";
+  var OGRE_WASM_DIR = window.OGRE_WASM_DIR || "../../build-wasm/";
   // The vendored runtime's scheduler/message-queue/VI/drainer debug traces are
   // unconditional and extremely chatty; keep them out of the log by default so
   // it stays useful. Debugging override: set window.OGRE_STATUS_FILTER before
@@ -233,7 +247,23 @@
     }
   };
   // Load the emscripten glue (it references Module defined above).
-  document.write('<script src="' + OGRE_WASM_DIR + 'ogrebattle64.js"><\/script>');
+  //
+  // The pthread runtime cannot start without `SharedArrayBuffer`, and every
+  // browser exposes it only on a cross-origin-isolated page. When it is
+  // missing this states the cause instead of letting the glue abort with a
+  // bare exception. The usual cause on a first load of a static host is that
+  // `coi-serviceworker.js` has registered but has not reloaded the page yet;
+  // that reload follows within a moment.
+  if (typeof SharedArrayBuffer === "undefined") {
+    window.ogreLog.append(
+      "[web] SharedArrayBuffer is unavailable, so the pthread build cannot start. " +
+      "This page must be served over HTTPS (or localhost) and be cross-origin " +
+      "isolated: coi-serviceworker.js adds the COOP/COEP headers on hosts that " +
+      "cannot send them and then reloads once. Reload the page if this persists."
+    );
+  } else {
+    document.write('<script src="' + OGRE_WASM_DIR + 'ogrebattle64.js"><\/script>');
+  }
 </script>
 <script src="web.js"></script>
 </body>

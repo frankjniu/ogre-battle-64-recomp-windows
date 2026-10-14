@@ -1,0 +1,129 @@
+# Build the browser (WebAssembly/Emscripten) target and publish it to GitHub
+# Pages.
+#
+# The published site is the static package `make web-dist` writes: the page, the
+# shell, the Emscripten output, and `coi-serviceworker.js`, which adds the
+# COOP/COEP response headers GitHub Pages cannot send. Without those headers the
+# page has no `SharedArrayBuffer` and the pthread build cannot start
+# (docs/WEB-PORT-DEPLOYMENT.md).
+#
+# The package contains no ROM data. The page reads the visitor's own dump
+# through the File API; nothing is uploaded anywhere.
+#
+# The setup steps (data bundle, third-party trees, Emscripten) are the same as
+# `.github/workflows/wasm.yml`, which only compiles the target. They are
+# duplicated here rather than shared, so a change to this workflow cannot break
+# the compile check. The job needs the recompiler's output, which is generated
+# from a ROM and deliberately not in this repository: it comes from the private
+# data bundle the release workflow uses, so set the repository variable
+# OGRE_DATA_REPO and the secret OGRE_DATA_TOKEN (a fine-grained token with
+# Contents: Read on that repository). Without OGRE_DATA_REPO the job is skipped
+# rather than failed, so a fork and a fresh clone do not show a red check for a
+# missing secret.
+#
+# One repository setting is required and this workflow cannot set it: Settings ->
+# Pages -> Build and deployment -> Source must be "GitHub Actions". It is set on
+# this repository (`"build_type": "workflow"`, 2026-10-14), and until it is set
+# the deploy job fails with "Get Pages site failed".
+name: Deploy the browser build to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and never cancel one that is in flight: a cancelled
+# deploy can leave the site on the previous artifact.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the static package
+    if: vars.OGRE_DATA_REPO != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Fetch the generated game code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.OGRE_DATA_REPO }}
+          token: ${{ secrets.OGRE_DATA_TOKEN }}
+          path: ogre-data
+
+      - name: Unpack the generated game code
+        shell: bash
+        run: |
+          set -e
+          tar xzf ogre-data/files.tar.gz -C .
+          find . -name '._*' -delete
+          find . -name '.DS_Store' -delete
+          for p in RecompiledFuncs app/src/bank_funcs.inc RspFuncs; do
+            test -e "$p" || { echo "::error::$p is missing from files.tar.gz"; exit 1; }
+          done
+          banks=$( (ls -d Bank*Funcs 2>/dev/null || true) | wc -l | tr -d ' ')
+          [ "$banks" -gt 0 ] || { echo "::error::Bank*Funcs/ is missing from files.tar.gz"; exit 1; }
+          echo "Bank units: $banks"
+
+      # tools/N64ModernRuntime is gitignored, so a hosted runner has none.
+      # Same pinned commit and patches as the release workflow.
+      - name: Prepare third-party trees
+        shell: bash
+        run: |
+          set -e
+          N64MODERNRUNTIME_COMMIT=589bbf018a3e6d3646ddf7de1e7919f1b7e99bb1
+          if [ ! -d tools/N64ModernRuntime ]; then
+            git clone https://github.com/N64Recomp/N64ModernRuntime.git tools/N64ModernRuntime
+            git -C tools/N64ModernRuntime checkout "$N64MODERNRUNTIME_COMMIT"
+            git -C tools/N64ModernRuntime submodule update --init --recursive
+            ( cd tools/N64ModernRuntime && git apply ../../patches/n64modernruntime-ob64.patch )
+            ( cd tools/N64ModernRuntime/N64Recomp && git apply ../../../patches/n64modernruntime-n64recomp.patch )
+          fi
+
+      # The browser build does not compile RT64 (app/CMakeLists.txt forces
+      # OGRE_USE_RT64 off under Emscripten), so no GPU or SDL2 package is needed.
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+
+      - name: Build the static package
+        shell: bash
+        run: make web-dist
+
+      - name: Report the package
+        shell: bash
+        run: |
+          set -e
+          du -sh dist-web
+          ls -l dist-web
+
+      - name: Upload the Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist-web
+          # The package carries `.nojekyll`, and the action excludes dotfiles by
+          # default. It is not needed on this path (an Actions deployment is not
+          # run through Jekyll), but the artifact should be the package.
+          include-hidden-files: true
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v5

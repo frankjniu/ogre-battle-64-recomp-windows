@@ -28,7 +28,7 @@ machine-specific Playwright install removed.
 ## Serve the build
 
 The wasm pthreads need `SharedArrayBuffer`, which needs a cross-origin-isolated
-page, so a plain static server is not enough:
+page, so a plain static server is not enough for the repository layout:
 
 ```sh
 python3 debug/server.py          # http://127.0.0.1:8931, COOP/COEP + no-store
@@ -40,8 +40,21 @@ python3 debug/server.py --port 9000 --bind 0.0.0.0 --verbose
 `Cache-Control: no-store` so a rebuild only needs a page reload. It is threaded,
 because the pthread workers fetch several files at once.
 
+The static package (`make web-dist`) works on a server that sends no COOP/COEP at
+all, which is the deployed configuration:
+
+```sh
+make web-dist
+python3 -m http.server --bind 127.0.0.1 --directory dist-web 8940
+# http://127.0.0.1:8940/ , and the page is isolated about 0.8 s in
+```
+
+`app/web/coi-serviceworker.js` registers, reloads the page once and serves the two
+headers itself. A probe reaches a URL on that server with `--url`; it must tolerate
+the one self-reload.
+
 See [WEB-PORT-DEPLOYMENT.md](../WEB-PORT-DEPLOYMENT.md) for the same headers on
-nginx and other hosts.
+nginx and other hosts, and for the package layout.
 
 ## Run a probe
 
@@ -57,9 +70,10 @@ node debug/probes/logmode.cjs                        # page-log contract smoke t
 node debug/probes/testdraw.cjs                       # synthetic-draw GL isolation
 node debug/probes/textures.cjs --attempts 3 --secs 60 # decoded tile images
 node debug/probes/spritecheck.cjs --out sprite        # one sprite vs its textures
+node debug/probes/isolate.cjs --url URL              # cross-origin isolation
 ```
 
-`npm run boot|progress|shots|fps|vi|stats|diag|logmode|testdraw|textures|spritecheck` and
+`npm run boot|progress|shots|fps|vi|stats|diag|logmode|testdraw|textures|spritecheck|isolate` and
 `npm run serve` work from inside `debug/`.
 
 | Probe | Measures | Exit 0 means |
@@ -76,6 +90,7 @@ node debug/probes/spritecheck.cjs --out sprite        # one sprite vs its textur
 | `testdraw.cjs` | `Module._ogre_gfx_test_draw()` on the canvas | the synthetic draw rendered |
 | `textures.cjs` | the last 24 decoded tile images (RGB + alpha) and each `colour x mask` composite | the images decoded |
 | `spritecheck.cjs` | one rendered sprite vs that composite, side by side | the rendered sprite matches its textures |
+| `isolate.cjs` | `crossOriginIsolated`, `SharedArrayBuffer`, whether a service worker controls the page, `WASM runtime initialized` | the page is isolated, so the pthread build can start |
 
 ### Reading the pixel counts
 

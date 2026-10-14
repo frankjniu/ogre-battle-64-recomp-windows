@@ -155,6 +155,12 @@ finishing a change to any file in `app/CMakeLists.txt`'s Emscripten source list.
 `EM_CACHE` holds the Emscripten sysroot (`~/.cache/emscripten-ogre` by default)
 so a rebuild does not re-download it.
 
+`make web-dist` runs `make web` and then writes `dist-web/`: one self-contained
+directory a plain static host can serve (the page, the shell, the Emscripten
+output, and `coi-serviceworker.js`, which supplies the COOP/COEP headers a static
+host cannot send). It is what `.github/workflows/pages.yml` publishes to GitHub
+Pages. No ROM data is in it. See `docs/WEB-PORT-DEPLOYMENT.md`.
+
 ### The browser build reads the same environment knobs
 
 The browser build takes the native environment knobs from the page's query

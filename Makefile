@@ -619,6 +619,47 @@ web:
 	@EM_CACHE=$(EM_CACHE) cmake --build build-wasm -j
 	@echo "web: build-wasm/ogrebattle64.wasm is ready; serve it with python3 debug/server.py"
 
+# --- Static web build (GitHub Pages) ------------------------------------------
+#
+# One self-contained directory a plain static host can serve: the page, the
+# shell, the Emscripten output, and the service worker that supplies the
+# COOP/COEP headers a static host cannot send (app/web/coi-serviceworker.js).
+# The page and the build share one directory, so the generated
+# `ogre-web-config.js` points OGRE_WASM_DIR at `./`; that one file is the whole
+# difference from the repository layout. `.nojekyll` keeps GitHub Pages from
+# running the files through Jekyll.
+#
+# No ROM data is in it. The page reads the user's own dump through the File API
+# and nothing is uploaded; see docs/WEB-PORT-DEPLOYMENT.md.
+#
+# `make web-dist` first, then serve the directory with any static server that
+# does NOT add COOP/COEP, which is the configuration the service worker exists
+# for: python3 -m http.server -d dist-web 8940
+#
+# The recipe ends with `chmod -R a+rX`: the source files carry the checkout's own
+# mode, and a strict umask leaves the package 0600, which a static host reading
+# the files as another user cannot serve.
+WEB_DIST ?= dist-web
+
+.PHONY: web-dist
+web-dist: web
+	rm -rf "$(WEB_DIST)"
+	mkdir -p "$(WEB_DIST)"
+	cp app/web/index.html app/web/web.js app/web/audio-worklet.js \
+	   app/web/coi-serviceworker.js "$(WEB_DIST)/"
+	cp build-wasm/ogrebattle64.js build-wasm/ogrebattle64.wasm "$(WEB_DIST)/"
+	printf 'window.OGRE_WASM_DIR = "./";\n' > "$(WEB_DIST)/ogre-web-config.js"
+	: > "$(WEB_DIST)/.nojekyll"
+	@chmod -R a+rX "$(WEB_DIST)"
+	@for f in index.html web.js audio-worklet.js coi-serviceworker.js \
+	          ogre-web-config.js ogrebattle64.js ogrebattle64.wasm .nojekyll; do \
+	  test -f "$(WEB_DIST)/$$f" || { echo "web-dist: $$f is missing from $(WEB_DIST)"; exit 1; }; \
+	done
+	@missing=$$(for f in build-wasm/ogrebattle64.*; do \
+	    test -f "$(WEB_DIST)/$$(basename $$f)" || echo "$$f"; done); \
+	  test -z "$$missing" || { echo "web-dist: the package lacks build artifacts: $$missing"; exit 1; }
+	@echo "web-dist: $(WEB_DIST) ($$(du -sh "$(WEB_DIST)" | cut -f1)) is ready to serve as-is"
+
 # The package must carry the example mods the README lists. `make dist` cannot
 # build them itself: `make example-mods` needs the linked ELF and a MIPS cross
 # compiler or Docker, and the hosted release runner has neither. The mods arrive

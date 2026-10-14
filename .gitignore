@@ -11,6 +11,8 @@ build-null/
 build-wasm/
 build-dist/
 dist/
+# `make web-dist`: the static (GitHub Pages) browser package.
+dist-web/
 RecompiledFuncs/
 # Streamed-overlay bank units (Phase 4): N64Recomp output for
 # config/banks/config-bank<U>.toml, plus the table tools/gen_bank_funcs.py
