@@ -452,13 +452,33 @@ holds the evidence.
    (`convertK[4] / 255`, RT64 `RasterPS.hlsl`) instead of returning 0.
    Still open in the browser renderer: framebuffer-as-texture (a `G_LOADTILE`
    whose source is a rendered colour image reads RDRAM), presentation ignores the
-   VI's own view rectangle, and **the browser build faults (`divide by zero`) the
-   first time the game renders its hi-res title screen** - both the session-140
-   package and the session-141 build freeze at task 277 with the same wasm stack
-   (`func_801989AC` <- `func_80198ECC` <- `func_801A29B8` <- `func_801A40EC` <-
-   `func_80177EC0` <- `func_80072398` <- `func_8008AFE0`), so it is not a
-   renderer regression but the title screen is unreachable in the browser.
-   See `docs/HANDOFF-2026-10-14-session141.md`, `docs/HANDOFF-2026-10-14-session139.md`
+   VI's own view rectangle, and the attract story (scene `0x0B`) is only partly
+   drawn.
+   Session 142 closed the title-screen fault and the geometry behind it.
+   `draw_texrect` treated the RDP's lower-right corner as inclusive (`xh + 1`,
+   `yh + 1`, and a `xh - xl + 1` texel span). The RDP covers `[ul, lr)` for a
+   texrect (`RDP::drawRect` takes the 1/4-pixel corners without snapping; the
+   `lrx |= 3; lry |= 3` snap belongs to `RDP::fillRect`), so every texrect was
+   one pixel wider and one row taller than hardware. The title screen's backdrop
+   is forty 640x12 strips over a 640x480 colour image, and the strip that ends
+   at row 480 (the last of the forty) therefore drew row 480, one row past the
+   end of the image.
+   `readback_framebuffer` copies every row a draw touched, so it wrote 1280 bytes
+   at `image_end` - the next heap block's block header. The game's allocator
+   `func_800712C4` then read image pixels as a block size and called
+   `func_80071950`, whose body trapped (`memory access out of bounds`); session
+   141's `divide by zero` in `func_801989AC` is the same corruption on a
+   descriptor's width field. The texrect corner is exclusive now and the browser
+   runs the publishers -> title (`0x04`) -> attract story (`0x0B`) with no page
+   error (`docs/proofs/web-title-640-after-texrect-fix.png` replaces session
+   141's banded before-frame). The browser build also got the per-frame
+   diagnostics it never had: `ogre_gfx_flush()` calls `ogre::poll_scene()`
+   (`OGRE_SCENE` forcing, `OGRE_SCENE_LOG`, `OGRE_SCENE_TRACE`) and
+   `ogre::ram_key_tick()` (`OGRE_RAM_KEY_AT_MS`), and `debug/probes/rdram.cjs`
+   reads the dump out of the wasm filesystem so browser RDRAM is analysed with
+   `tools/rdram.py` like a native image. New bounded diagnostic `[GFX-EDGE]`.
+   See `docs/HANDOFF-2026-10-14-session142.md`,
+   `docs/HANDOFF-2026-10-14-session141.md`, `docs/HANDOFF-2026-10-14-session139.md`
    and `docs/DECISIONS.md`.
    Session 140 added the static package and the deployment path: `make web-dist`
    writes `dist-web/` (page, shell, Emscripten output, `coi-serviceworker.js`,

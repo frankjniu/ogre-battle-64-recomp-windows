@@ -17,6 +17,7 @@
     "testdraw": "node probes/testdraw.cjs",
     "textures": "node probes/textures.cjs",
     "spritecheck": "node probes/spritecheck.cjs",
+    "rdram": "node probes/rdram.cjs",
     "isolate": "node probes/isolate.cjs"
   },
   "devDependencies": {

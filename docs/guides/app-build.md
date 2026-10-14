@@ -180,6 +180,28 @@ are JS-side; they drive the same `ogre_input_set` the keyboard does.
 captures a canvas series around it, which is how a scene that lasts about a
 second is photographed (`--wait 'GFX-S2D'`, for example).
 
+The per-frame work that hangs off the native `update_gfx` callback runs in the
+browser from `ogre_gfx_flush()` (`app/src/web_renderer.cpp`), which the page
+calls every animation frame: `ogre::poll_scene()` (`OGRE_SCENE` forcing,
+`OGRE_SCENE_LOG`, `OGRE_SCENE_TRACE`) and `ogre::ram_key_tick()`
+(`OGRE_RAM_KEY_AT_MS`). Until session 142 the browser build had no such call, so
+those knobs read as no-ops there.
+
+A guest-RDRAM image is therefore available in the browser as well, and only the
+transfer out of the wasm filesystem is new: `ram_key_tick` writes
+`<OGRE_RAM_KEY_OUT>/ram-<n>-full.bin` (`OGRE_RAM_KEY_FULL=1`) into the page's own
+filesystem, and `debug/probes/rdram.cjs` reads it back through `Module.FS` and
+writes it next to the page log, ready for `tools/rdram.py`:
+
+```sh
+node debug/probes/rdram.cjs --secs 120 --out /tmp/browser \
+  --query 'OGRE_RAM_KEY_AT_MS=52000&OGRE_RAM_KEY_FULL=1&OGRE_RAM_KEY_OUT=/tmp&OGRE_SCENE_LOG=1'
+python3 tools/rdram.py /tmp/browser-rdram.bin word 0x802507F8
+```
+
+`OGRE_RAM_KEY_AT_MS` takes one dump per run, so a dump has to bracket the
+fault: a trap ends the wasm instance and nothing can be read from it afterwards.
+
 ## Running
 
 ```sh

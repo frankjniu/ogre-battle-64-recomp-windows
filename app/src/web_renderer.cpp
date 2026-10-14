@@ -61,6 +61,8 @@
 
 #include "gbi.hpp"
 #include "milestones.hpp"
+#include "bank_overlays.hpp"
+#include "ram_key.hpp"
 
 namespace ogre {
 
@@ -1482,11 +1484,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         //
         // The step spreads the whole 2x2 tile over the rectangle, which is what
         // makes this a usable self-check: `u2 - u1 = dsdx * rectWidth / 1024`
-        // (see draw_texrect), so 2 texels over 64 pixels is `2 * 1024 / 64 = 32`,
-        // and 2 texels over 48 rows is `2 * 1024 / 48 = 42.67 -> 43`. The values
-        // were `1, 1` before session 141, when the S/T step was only `dsdx / 32`
-        // of the rectangle's width and the pair therefore sampled a 1/16-texel
-        // sliver of the tile.
+        // (see draw_texrect), so 2 texels over the rectangle's 63 pixels is
+        // `2 * 1024 / 63 = 32` and 2 texels over its 47 rows is
+        // `2 * 1024 / 47 = 43`. The pair was `1, 1` before session 141, when the
+        // S/T step was only `dsdx / 32` of the rectangle's width and the pair
+        // therefore sampled a 1/16-texel sliver of the tile.
         put32(o, 0xE4000000 | (63 << 2) << 12 | (47 << 2)); put32(o + 4, 0); o += 8;
         put32(o, 0xE1000000); put32(o + 4, 0x00000000); o += 8;
         put32(o, 0xF1000000); put32(o + 4, 0x0020002B); o += 8;
@@ -2193,6 +2195,26 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 for (int i = 0; i < count; ++i) {
                     const int wy = static_cast<int>((cmd.pos[i * 2 + 1] + 1.0f) * 0.5f *
                                                     static_cast<float>(target_height));
+                    // A vertex on the target's outermost row is a draw one pixel
+                    // taller than the row count the target was sized for. The
+                    // writeback copies every row the draw touched, so a draw that
+                    // reaches past the guest's colour image writes into whatever
+                    // follows it in RDRAM. That is how the 640x480 publisher
+                    // stills corrupted the next heap block (session 142), and it
+                    // is invisible without this line. Bounded: only targets
+                    // taller than 300 rows, 24 lines.
+                    if (target_height > 300 && (wy <= 0 || wy >= target_height - 1)) {
+                        static int edge_logged = 0;
+                        if (edge_logged < 24) {
+                            ++edge_logged;
+                            OGRE_MILESTONE("GFX-EDGE",
+                                           "draw kind=%d row=%d target=%dx%d fb=0x%06X siz=%u "
+                                           "vertices=%d first=(%.3f,%.3f)",
+                                           cmd.kind, wy, bound_fb->width, target_height,
+                                           cmd.fb_address, (unsigned)cmd.fb_siz, count,
+                                           cmd.pos[0], cmd.pos[1]);
+                        }
+                    }
                     bound_fb->min_row = std::min(bound_fb->min_row, std::max(wy, 0));
                     bound_fb->max_row = std::max(bound_fb->max_row, std::min(wy, target_height - 1));
                 }
@@ -4242,7 +4264,20 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         st.active_tile = texrect_tile_ & (kMaxTiles - 1);
         const int xl = texrect_geom_[0], yl = texrect_geom_[1];
         const int xh = texrect_geom_[2], yh = texrect_geom_[3];
-        if (xh < xl || yh < yl) {
+        // A TEXRECT's lower-right corner is exclusive: the RDP covers
+        // `[ul, lr)` in 1/4-pixel units and does not snap the corner up the way
+        // G_CYC_FILL/G_CYC_COPY fill rects do (`RDP::fillRect` does `lrx |= 3;
+        // lry |= 3`, `RDP::drawRect` for a texrect does not). So a rectangle
+        // from (0,0) to (640,480) - how the game draws its 640x480 publisher
+        // stills - covers rows 0..479 of a 640x480 colour image. Covering
+        // `xh`/`yh` inclusive instead made every TEXRECT one pixel wider and
+        // taller than the hardware's, and on the 640-wide targets the extra row
+        // landed past the end of the colour image: the writeback copied it into
+        // the next heap block's allocator metadata, and the game's allocator
+        // then panicked (see docs/HANDOFF-2026-10-14-session142.md).
+        // `FixedRect::isEmpty` (`tools/RT64/src/common/rt64_common.cpp:34`) is
+        // `lrx == ulx || lry == uly`, so an equal corner draws nothing.
+        if (xh <= xl || yh <= yl) {
             st.active_tile = saved_tile;
             return;  // empty rectangle: the RDP draws nothing (see draw_fill_rect)
         }
@@ -4337,8 +4372,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // or the S2DEX2 object rectangle, and neither goes through this path.
         const float du = dsdx / 1024.0f;
         const float dv = dtdy / 1024.0f;
-        const float w = static_cast<float>(xh - xl + 1);
-        const float h = static_cast<float>(yh - yl + 1);
+        // The rectangle's own size in pixels. `lrx`/`lry` are exclusive, so the
+        // destination is `xh - xl` by `yh - yl` pixels - the same count the S/T
+        // step spans (`u2 - u1 = dsdx * rectWidth / 1024`), which is why the
+        // title screen's 640x12 strips are 12 rows and not 13.
+        const float w = static_cast<float>(xh - xl);
+        const float h = static_cast<float>(yh - yl);
 
         // UV at the four corners. TEXRECTFLIP swaps the S/T axes.
         float uv[4][2];
@@ -4354,8 +4393,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             uv[3][0] = us + du * w;     uv[3][1] = vs + dv * h;              // (xh, yh)
         }
 
-        const float x0 = ndc_x(xl, st), x1 = ndc_x(xh + 1, st);
-        const float y0 = ndc_y(yl, st), y1 = ndc_y(yh + 1, st);
+        const float x0 = ndc_x(xl, st), x1 = ndc_x(xh, st);
+        const float y0 = ndc_y(yl, st), y1 = ndc_y(yh, st);
         const float px[4] = {x0, x1, x0, x1};
         const float py[4] = {y0, y0, y1, y1};
 
@@ -4680,6 +4719,18 @@ const char* ogre_gfx_stats() {
 // Drains the queued draw/texture commands and issues the GL calls. Called
 // periodically from web.js on the browser main thread (never from a pthread).
 int ogre_gfx_flush() {
+    // The browser build has no `sdl_platform.cpp`, so the per-frame work that
+    // hangs off the native `update_gfx` callback runs here instead: the scene
+    // poll (`OGRE_SCENE` forcing, `OGRE_SCENE_LOG`, `OGRE_SCENE_TRACE`) and the
+    // timed RDRAM dump (`OGRE_RAM_KEY_AT_MS` with `OGRE_RAM_KEY_FULL=1`). Both
+    // only read guest state or write a file in the wasm filesystem, and RDRAM is
+    // shared memory, so the main thread can call them. Without this the browser
+    // run had no scene log and no way to write guest memory to disk (session 141
+    // left the `OGRE_RAM_KEY_AT_MS` path unverified in the browser).
+    if (uint8_t* rdram = ultramodern::get_rdram_base(); rdram != nullptr) {
+        ogre::poll_scene();
+        ogre::ram_key_tick(rdram);
+    }
     if (ogre::g_active_renderer != nullptr) {
         ogre::g_active_renderer->flush_commands();
         return 1;

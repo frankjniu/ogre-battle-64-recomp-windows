@@ -74,6 +74,7 @@ node debug/probes/logmode.cjs                        # page-log contract smoke t
 node debug/probes/testdraw.cjs                       # synthetic-draw GL isolation
 node debug/probes/textures.cjs --attempts 3 --secs 60 # decoded tile images
 node debug/probes/spritecheck.cjs --out sprite        # one sprite vs its textures
+node debug/probes/rdram.cjs --query 'OGRE_RAM_KEY_AT_MS=52000&OGRE_RAM_KEY_FULL=1'  # guest RDRAM out of the wasm FS
 node debug/probes/isolate.cjs --url URL              # cross-origin isolation
 ```
 
@@ -94,6 +95,7 @@ node debug/probes/isolate.cjs --url URL              # cross-origin isolation
 | `testdraw.cjs` | `Module._ogre_gfx_test_draw()` on the canvas | the synthetic draw rendered |
 | `textures.cjs` | the last 24 decoded tile images (RGB + alpha) and each `colour x mask` composite | the images decoded |
 | `spritecheck.cjs` | one rendered sprite vs that composite, side by side | the rendered sprite matches its textures |
+| `rdram.cjs` | a guest-RDRAM image (`OGRE_RAM_KEY_AT_MS` + `OGRE_RAM_KEY_FULL=1`), read out of `Module.FS` and written next to the page log for `tools/rdram.py` | the dump appeared and held 8 MiB |
 | `isolate.cjs` | `crossOriginIsolated`, `SharedArrayBuffer`, whether a service worker controls the page, `WASM runtime initialized` | the page is isolated, so the pthread build can start |
 
 ### Reading the pixel counts
