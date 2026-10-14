@@ -735,3 +735,17 @@ start from here.
   every `j` target by the difference, and the recompiled microcode silently walks
   the wrong blocks (session 47: `0x8009ED80` → one `0x300`-byte block per task
   instead of `mbs`; the same applies to any future ucode recompilation).
+- **The VI's scanout address is not the RDP's colour-image address.** An
+  `OSViMode`'s `fldRegs[].origin` is `0x280` for the standard NTSC modes, and
+  `events.cpp` `update_vi()` sets `VI_ORIGIN_REG = osVirtualToPhysical(framebuffer)
+  + origin`, so the VI scans out from `framebuffer + 0x280` (one 640-byte row of a
+  320x240 16-bit image) while the RDP renders at `framebuffer`. Resolve a scanout
+  buffer by containment, not by equality; RT64 does it with
+  `FramebufferManager::findMostRecentContaining` and the browser renderer with
+  `GlFramebuffer`'s guest range. The game's own framebuffers are `0x000400`,
+  `0x025C00` and `0x04B400` (320x240 RGBA5551, pitch 640), and the world map adds
+  three 640-wide targets in the heap (`0x1BA780`, `0x250800`, `0x2E6840`, VI
+  `fbSizeX=640 fbSizeY=476 fbSiz=2`). The row pitch is RT64's `imageRowBytes`,
+  `width << siz >> 1`. A rendered 16-bit framebuffer written back to RDRAM puts
+  the value `V` at `off ^ 2` (low byte) and `off ^ 2 + 1` (high byte), because
+  `MEM_H` reads the halfword at logical `off` as `rd16(p + (off ^ 2))`.

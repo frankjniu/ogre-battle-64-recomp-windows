@@ -36,14 +36,17 @@ battles, cutscenes, audio, Controller Pak saves) with a modding framework.
 The project also has a **WebAssembly / browser build**: the recompiled game plus
 `N64ModernRuntime` under Emscripten. It compiles and runs the game again
 (session 109). Its renderer is the WebGL2 prototype. Session 138 added S2DEX2 and
-YUV16 to it, so the New Game njpeg backdrop decodes and draws in the browser
-(`docs/proofs/web-newgame-cathedral-njpeg.png`); the piece still missing is RDRAM
-framebuffer indirection, which is why the game's own next scene draws over that
-backdrop. The route is recorded in `docs/DECISIONS.md`; the native port is the
-primary target and RT64 remains its renderer. `docs/WEB-PORT.md`,
-`docs/WEB-PORT-REPORT.md` and `docs/WEB-PORT-DEPLOYMENT.md` describe the
-2026-08-29 feasibility work and not the current state; the current state is this
-file and `docs/HANDOFF-2026-10-14-session138.md`.
+YUV16 to it, so the New Game njpeg backdrop decodes. Session 139 added RDRAM
+framebuffer indirection: every `G_SETCIMG` target gets a GL framebuffer object
+keyed by its guest address, the pixels are written back into RDRAM in the RDP's
+RGBA5551 layout before the game reads them, and the VI presents that target, so
+the assembled cathedral backdrop now appears in the browser
+(`docs/proofs/web-newgame-cathedral-assembled.png`). The route is recorded in
+`docs/DECISIONS.md`; the native port is the primary target and RT64 remains its
+renderer. `docs/WEB-PORT.md`, `docs/WEB-PORT-REPORT.md` and
+`docs/WEB-PORT-DEPLOYMENT.md` describe the 2026-08-29 feasibility work and not
+the current state; the current state is this file and
+`docs/HANDOFF-2026-10-14-session139.md`.
 
 ## Status
 
@@ -397,14 +400,23 @@ holds the evidence.
    Session 138 repaired the same class a second time — `app/src/ram_key.cpp`
    included the same native-only header — and added `make web` so the target has
    a supported local build, plus `.github/workflows/wasm.yml` so CI compiles it.
-   The title renders (`docs/proofs/web-title.png`). The renderer is the WebGL2
-   prototype; session 138 added S2DEX2 and YUV16, so the New Game njpeg backdrop
-   decodes and draws (`docs/proofs/web-newgame-cathedral-njpeg.png`). The
-   remaining renderer gap is RDRAM framebuffer indirection: the game's 2x2
-   backdrop assembly reads its own framebuffer out of RDRAM, which the prototype
-   never writes, so the dialogue scene draws an empty image over the backdrop
-   (`docs/proofs/web-newgame-cathedral-covered.png`). See
-   `docs/HANDOFF-2026-10-14-session138.md` and `docs/DECISIONS.md`.
+   The title renders (`docs/proofs/web-title.png`), and session 138 added S2DEX2
+   and YUV16 so the New Game njpeg backdrop decodes. Session 139 landed the last
+   of the three named renderer gaps, **RDRAM framebuffer indirection**:
+   `app/src/web_renderer.cpp` keeps a GL framebuffer object per `G_SETCIMG`
+   target, `ogre_sync_framebuffers()` is a handshake that makes the browser main
+   thread render the queue and write the target back to RDRAM in the RDP's
+   RGBA5551 layout, and `update_screen()` presents the target the VI scans out.
+   The assembled cathedral backdrop now appears
+   (`docs/proofs/web-newgame-cathedral-assembled.png`); session 138's
+   `web-newgame-cathedral-covered.png` is the state this replaces.
+   Not verified in a browser: CI, and the `OGRE_RAM_KEY_AT_MS` path. Open: the
+   canvas is fixed at 320x240 while the VI scans out 640x476 in the world map, so
+   that mode is rendered into a 640x480 target and downscaled to the canvas
+   (`[GFX-FB]` and `[GFX-PRESENT]` report the sizes); the RDP's framebuffers are
+   not yet sampleable as textures (framebuffer-as-texture, the same gap as the
+   native renderer's tile copy); and `K4`/`K5` as combiner inputs still return 0.
+   See `docs/HANDOFF-2026-10-14-session139.md` and `docs/DECISIONS.md`.
 9. **The published v0.4.0 archives ship an empty `mods/`, and the bundle that
    feeds the release did not carry one.** Fixed on main (session 108):
    `make dist`, `tools/release-build.sh`, the workflow's unpack step and

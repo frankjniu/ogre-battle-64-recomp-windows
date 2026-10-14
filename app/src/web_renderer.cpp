@@ -37,6 +37,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <emscripten/emscripten.h>
@@ -515,6 +516,21 @@ struct RenderState {
         int stride = 0;
         bool valid = false;
     } pending_load;
+
+    // G_SETCIMG: the RDP colour image, i.e. the render target for every draw
+    // that follows it. It is not a texture: the RDP writes pixels into this
+    // guest buffer, and the game reads them back with the CPU (the njpeg
+    // backdrop assembly copies the framebuffer into its own image). The main
+    // thread keeps a GL framebuffer object per guest address, and
+    // ogre_sync_framebuffers() writes the rendered pixels back into RDRAM.
+    //
+    // A zero address means no colour image has been set yet; those draws go to
+    // the canvas, which is how this prototype drew everything before.
+    uint32_t cimg_address = 0;
+    uint32_t cimg_row_bytes = 0;   // the image's row pitch: width << siz >> 1
+    uint16_t cimg_width = 0;       // the image's width in texels (320 or 640)
+    uint8_t cimg_siz = 0;          // 2 = 16b RGBA5551, 3 = 32b RGBA8888
+    uint8_t cimg_fmt = 0;          // G_IM_FMT_RGBA for every image OB64 sets
 };
 
 // Reads a 32-bit word from rdram with the runtime's byte-reversed storage.
@@ -1245,6 +1261,41 @@ struct DrawCmd {
     bool blend = false;
     bool scissor_on = false;
     int sx0 = 0, sy0 = 0, sx1 = 0, sy1 = 0;
+    // The RDP colour image this draw renders into (RenderState::cimg_*). The
+    // main thread renders it into the GL framebuffer object for that guest
+    // address, so the pixels exist in RDRAM when the game reads them back.
+    uint32_t fb_address = 0;
+    uint32_t fb_row_bytes = 0;
+    // The render target's size in pixels: the colour image's width and the
+    // screen height the viewport defines (they are 320x240 for most of the
+    // game, 640x480 for the world map).
+    uint16_t fb_width_px = 0, fb_height_px = 0;
+    uint8_t fb_siz = 0, fb_fmt = 0;
+};
+
+// A GL framebuffer object standing in for one RDP colour image. The guest
+// address is the key: everything the game draws into that address renders here,
+// and sync_framebuffers() writes the pixels back into RDRAM in the RDP's own
+// pixel layout. Only touched on the browser main thread.
+struct GlFramebuffer {
+    GLuint fbo = 0;
+    GLuint tex = 0;
+    int width = 0, height = 0;
+    uint32_t row_bytes = 0;   // the guest row pitch (width << siz >> 1)
+    uint8_t siz = 0, fmt = 0;
+    bool inited = false;      // the RDRAM content has been uploaded
+    // Rows (window coordinates, 0 = bottom) that have been drawn into since the
+    // last writeback. The readback copies only this band: rows the RDP never
+    // touched still hold what RDRAM held when the target was created.
+    int min_row = 1 << 30;
+    int max_row = -1;
+    // Monotonic stamp of the last draw into this target. Presentation picks the
+    // most recently written framebuffer when the VI origin is contained in more
+    // than one (RT64 uses its own lastWriteTimestamp the same way).
+    uint32_t last_write_seq = 0;
+    // Non-black pixel count from the most recent writeback, so presentation can
+    // report how much colour the target it is about to show actually holds.
+    uint32_t last_nonblack = 0;
 };
 
 class WebGLRenderer final : public ultramodern::renderer::RendererContext {
@@ -1362,6 +1413,330 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         fprintf(stderr, "[web-renderer] test_draw: %u bytes of DL recorded\n", o - kDlOff);
     }
 
+    // ----- guest framebuffers (browser main thread only) -------------------------
+    //
+    // The RDP renders into a guest colour image rather than into the canvas. The
+    // game reads that image back out of RDRAM with the CPU (the njpeg backdrop
+    // assembly), so the pixels have to reach RDRAM in the RDP's own layout:
+    // 16-bit RGBA5551 words stored the way the runtime's MEM_H/MEM_W expect.
+
+    // Reads one colour-image texel from RDRAM as RGBA8. Mirrors RT64's
+    // RGBA16ToFloat4 / RGBA32ToFloat4.
+    static void fb_texel_to_rgba8(const uint8_t* p, uint32_t off, uint8_t siz, uint8_t out[4]) {
+        if (siz == gbi::IM_SIZ_32b) {
+            out[0] = n64b(p, static_cast<int>(off) + 0);
+            out[1] = n64b(p, static_cast<int>(off) + 1);
+            out[2] = n64b(p, static_cast<int>(off) + 2);
+            out[3] = n64b(p, static_cast<int>(off) + 3);
+        } else {
+            rgba16_to_rgba8(n64h(p, static_cast<int>(off)), out);
+        }
+    }
+
+    // GL texture row 0 is window row 0, which is the *bottom* of the image, so
+    // the upload flips: guest row gy lands in texture row height-1-gy. All the
+    // draws and the present blit use the same convention (NDC y = +1 is the
+    // image's row 0), and the readback flips back.
+    void upload_framebuffer(GlFramebuffer& fb, uint32_t address) {
+        if (rdram_ == nullptr || address == 0) {
+            return;
+        }
+        const int w = fb.width, h = fb.height;
+        const uint32_t pitch = fb.row_bytes;
+        if (pitch == 0 ||
+            static_cast<uint64_t>(address) + static_cast<uint64_t>(pitch) * h > gbi::kRdramSize) {
+            return;   // not a buffer this renderer can address
+        }
+        std::vector<uint8_t> px(static_cast<size_t>(w) * h * 4, 0);
+        const uint8_t bpt = static_cast<uint8_t>(bytes_per_texel(fb.siz));
+        for (int gy = 0; gy < h; ++gy) {
+            const uint8_t* src = rdram_ + address + static_cast<uint32_t>(gy) * pitch;
+            uint8_t* dst = px.data() + static_cast<size_t>(h - 1 - gy) * w * 4;
+            for (int x = 0; x < w; ++x) {
+                fb_texel_to_rgba8(src, static_cast<uint32_t>(x) * bpt, fb.siz, dst + x * 4);
+            }
+        }
+        glBindTexture(GL_TEXTURE_2D, fb.tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    }
+
+    // Creates the GL framebuffer for a draw's colour image if it does not exist
+    // yet, and uploads what RDRAM already holds so a partial frame keeps the
+    // bytes the game wrote there with the CPU.
+    GlFramebuffer& ensure_framebuffer(const DrawCmd& cmd) {
+        GlFramebuffer& fb = gl_framebuffers_[cmd.fb_address];
+        // The colour image's own width is the guest truth (320 or 640); the
+        // height comes from the viewport, because the RDP command carries no
+        // height and the draw area is what the framebuffer has to hold.
+        const int width = (cmd.fb_width_px >= 1 && cmd.fb_width_px <= kMaxFramebufferSide)
+                              ? cmd.fb_width_px
+                              : canvas_width_;
+        const int height = (cmd.fb_height_px >= 1 && cmd.fb_height_px <= kMaxFramebufferSide)
+                               ? cmd.fb_height_px
+                               : canvas_height_;
+        const uint32_t row_bytes = cmd.fb_row_bytes != 0
+                                       ? cmd.fb_row_bytes
+                                       : static_cast<uint32_t>(width << cmd.fb_siz >> 1);
+        if (fb.fbo != 0 &&
+            (fb.width != width || fb.height != height || fb.siz != cmd.fb_siz ||
+             fb.row_bytes != row_bytes)) {
+            glDeleteFramebuffers(1, &fb.fbo);
+            glDeleteTextures(1, &fb.tex);
+            fb = GlFramebuffer{};
+        }
+        if (fb.fbo == 0) {
+            fb.width = width;
+            fb.height = height;
+            fb.siz = cmd.fb_siz;
+            fb.fmt = cmd.fb_fmt;
+            fb.row_bytes = row_bytes;
+            glGenTextures(1, &fb.tex);
+            glBindTexture(GL_TEXTURE_2D, fb.tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glGenFramebuffers(1, &fb.fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, fb.fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                   fb.tex, 0);
+            const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            if (status != GL_FRAMEBUFFER_COMPLETE) {
+                OGRE_MILESTONE("GFX-FB", "framebuffer 0x%06X incomplete (status 0x%04X)",
+                               cmd.fb_address, static_cast<unsigned>(status));
+                glDeleteFramebuffers(1, &fb.fbo);
+                glDeleteTextures(1, &fb.tex);
+                fb.fbo = 0;
+                fb.tex = 0;
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                return fb;
+            }
+            if (framebuffers_logged_ < 16) {
+                ++framebuffers_logged_;
+                OGRE_MILESTONE("GFX-FB",
+                               "framebuffer 0x%06X: %dx%d siz=%u fmt=%u pitch=%u",
+                               cmd.fb_address, width, height, (unsigned)cmd.fb_siz,
+                               (unsigned)cmd.fb_fmt, row_bytes);
+            }
+            fb.inited = false;
+            fb.min_row = 1 << 30;
+            fb.max_row = -1;
+        }
+        if (!fb.inited) {
+            upload_framebuffer(fb, cmd.fb_address);
+            fb.inited = true;
+        }
+        return fb;
+    }
+
+    // Writes a framebuffer's rendered rows back into RDRAM in the RDP's layout:
+    // a 16-bit RGBA5551 value V at logical byte offset `off` is read by the
+    // runtime as `rd16(p + (off ^ 2))`, so V's low byte goes to `off ^ 2` and its
+    // high byte to `off ^ 2 + 1` (RT64 does the same with a word swap of the
+    // whole native buffer).
+    // Returns true when rows were actually written, with the guest row range in
+    // `first_row`/`last_row` (for the diagnostic).
+    bool readback_framebuffer(GlFramebuffer& fb, uint32_t address, int* first_row,
+                              int* last_row) {
+        if (rdram_ == nullptr || address == 0 || fb.fbo == 0) {
+            return false;
+        }
+        if (fb.max_row < fb.min_row) {
+            return false;   // nothing drawn since the last writeback
+        }
+        const int w = fb.width, h = fb.height;
+        const uint32_t pitch = fb.row_bytes;
+        const int wy0 = std::max(0, fb.min_row);
+        const int wy1 = std::min(h - 1, fb.max_row);
+        fb.min_row = 1 << 30;
+        fb.max_row = -1;
+        if (wy1 < wy0 || pitch == 0 ||
+            static_cast<uint64_t>(address) + static_cast<uint64_t>(pitch) * h > gbi::kRdramSize) {
+            return false;
+        }
+        const int rows = wy1 - wy0 + 1;
+        static std::vector<uint8_t> px;
+        px.resize(static_cast<size_t>(w) * rows * 4);
+        glBindFramebuffer(GL_FRAMEBUFFER, fb.fbo);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, wy0, w, rows, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+
+        const uint8_t bpt = static_cast<uint8_t>(bytes_per_texel(fb.siz));
+        for (int i = 0; i < rows; ++i) {
+            // glReadPixels returns row wy0 first; window row wy is guest row
+            // height-1-wy (see upload_framebuffer).
+            const int gy = h - 1 - (wy0 + i);
+            uint8_t* dst = rdram_ + address + static_cast<uint32_t>(gy) * pitch;
+            const uint8_t* src = px.data() + static_cast<size_t>(i) * w * 4;
+            for (int x = 0; x < w; ++x) {
+                const uint8_t* t = src + x * 4;
+                const uint32_t off = static_cast<uint32_t>(x) * bpt;
+                if (fb.siz == gbi::IM_SIZ_32b) {
+                    dst[(off + 0) ^ 3] = t[0];
+                    dst[(off + 1) ^ 3] = t[1];
+                    dst[(off + 2) ^ 3] = t[2];
+                    dst[(off + 3) ^ 3] = t[3];
+                } else {
+                    // RT64 Float4ToRGBA16 with the dither value 0; the alpha bit
+                    // is the coverage test `(round(a*255) % 8) & 4`.
+                    const uint16_t v = static_cast<uint16_t>(
+                        ((t[0] >> 3) << 11) | ((t[1] >> 3) << 6) | ((t[2] >> 3) << 1) |
+                        (((t[3] % 8) & 4) ? 1 : 0));
+                    dst[off ^ 2] = static_cast<uint8_t>(v & 0xFF);
+                    dst[(off ^ 2) + 1] = static_cast<uint8_t>(v >> 8);
+                }
+            }
+        }
+        ++framebuffer_readbacks_;
+        if (first_row != nullptr) *first_row = h - 1 - wy1;
+        if (last_row != nullptr) *last_row = h - 1 - wy0;
+        // How much colour the target actually holds. A framebuffer the game
+        // draws into but that reads back empty is the "nothing reached RDRAM"
+        // case, and it is invisible without this count.
+        size_t nz = 0;
+        uint64_t sum = 0;
+        for (size_t i = 0; i + 3 < px.size(); i += 4) {
+            const unsigned v = px[i] + px[i + 1] + px[i + 2];
+            if (v) { ++nz; sum += v; }
+        }
+        fb.last_nonblack = static_cast<uint32_t>(nz);
+        if (framebuffer_readbacks_ <= 8 || (framebuffer_readbacks_ % 500) == 0) {
+            OGRE_MILESTONE("GFX-FBREAD",
+                           "fb 0x%06X rows=[%d,%d] nonBlack=%zu/%d meanRGB=%llu",
+                           address, h - 1 - wy1, h - 1 - wy0, nz, w * rows,
+                           (unsigned long long)(nz ? sum / nz : 0));
+        }
+        return true;
+    }
+
+    void readback_all_framebuffers() {
+        for (auto& [addr, fb] : gl_framebuffers_) {
+            int first_row = 0, last_row = 0;
+            if (readback_framebuffer(fb, addr, &first_row, &last_row) && sync_logged_ < 6) {
+                ++sync_logged_;
+                OGRE_MILESTONE("GFX-FBSYNC",
+                               "wrote back 0x%06X %dx%d siz=%u pitch=%u guestRows=[%d,%d]",
+                               addr, fb.width, fb.height, (unsigned)fb.siz, fb.row_bytes,
+                               first_row, last_row);
+            }
+        }
+        fb_writeback_pending_ = 0;
+    }
+
+    // Draws `tex` over the whole canvas with the COPY combiner (TEXEL0 straight
+    // through), which is the present path.
+    void blit_to_canvas(GLuint tex) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, canvas_width_, canvas_height_);
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_BLEND);
+        glUseProgram(program_);
+        glBindVertexArray(vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        auto seti = [this](const char* name, int v) {
+            glUniform1i(glGetUniformLocation(program_, name), v);
+        };
+        seti("u_cycle", 0);
+        seti("u_debug_mode", 0);
+        seti("u_tex0", 0);
+        seti("u_use_tex", 1);
+        glUniform2f(glGetUniformLocation(program_, "u_uv_scale"), 1.0f, 1.0f);
+        glUniform2f(glGetUniformLocation(program_, "u_uv_origin"), 0.0f, 0.0f);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        // (x, y, u, v, rgba) per vertex; two triangles covering the canvas.
+        const float quad[6 * 8] = {
+            -1, -1, 0, 0, 1, 1, 1, 1,
+             1, -1, 1, 0, 1, 1, 1, 1,
+             1,  1, 1, 1, 1, 1, 1, 1,
+            -1, -1, 0, 0, 1, 1, 1, 1,
+             1,  1, 1, 1, 1, 1, 1, 1,
+            -1,  1, 0, 1, 1, 1, 1, 1,
+        };
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_DYNAMIC_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+
+    // The key of the framebuffer whose guest range contains `address`, or 0 when
+    // none does. The VI origin is not the RDP colour-image address: the standard
+    // NTSC mode's `fldRegs[].origin` is 0x280 (one 320-pixel 16-bit row), so the
+    // VI scans out from `framebuffer + 0x280` while the RDP renders at
+    // `framebuffer`. RT64 resolves it by containment the same way
+    // (FramebufferManager::findMostRecentContaining).
+    uint32_t framebuffer_containing(uint32_t address) const {
+        uint32_t best = 0;
+        uint32_t best_seq = 0;
+        for (const auto& [addr, fb] : gl_framebuffers_) {
+            if (fb.tex == 0 || fb.row_bytes == 0) {
+                continue;
+            }
+            const uint64_t end = static_cast<uint64_t>(addr) +
+                                 static_cast<uint64_t>(fb.row_bytes) * fb.height;
+            if (address >= addr && address < end && fb.last_write_seq >= best_seq) {
+                best = addr;
+                best_seq = fb.last_write_seq;
+            }
+        }
+        return best;
+    }
+
+    // Presentation. The VI scans out a guest buffer: show the GL framebuffer the
+    // RDP rendered into when there is one, otherwise the bytes RDRAM holds. When
+    // the draws went straight to the canvas (no colour image was ever set), the
+    // canvas already holds the frame and nothing is blitted over it.
+    void present_framebuffer(uint32_t address) {
+        uint32_t key = address;
+        auto it = gl_framebuffers_.find(key);
+        if (it == gl_framebuffers_.end() || it->second.tex == 0) {
+            key = framebuffer_containing(address);
+            it = (key != 0) ? gl_framebuffers_.find(key) : gl_framebuffers_.end();
+        }
+        const bool have_fbo = (it != gl_framebuffers_.end() && it->second.tex != 0);
+        if (present_requests_ <= 12 || (present_requests_ % 300) == 0) {
+            ++presents_logged_;
+            OGRE_MILESTONE("GFX-PRESENT",
+                           "VI scanout 0x%06X -> fb 0x%06X: fbo=%d size=%dx%d siz=%u "
+                           "nonBlack=%u canvasDirty=%d fbs=%zu status=0x%08X (present %u)",
+                           address, have_fbo ? key : 0u, have_fbo ? 1 : 0,
+                           have_fbo ? it->second.width : 0, have_fbo ? it->second.height : 0,
+                           have_fbo ? (unsigned)it->second.siz : 0u,
+                           have_fbo ? it->second.last_nonblack : 0u,
+                           canvas_dirty_ ? 1 : 0, gl_framebuffers_.size(), vi_status_,
+                           present_requests_);
+        }
+        if (have_fbo) {
+            blit_to_canvas(it->second.tex);
+            canvas_dirty_ = false;
+            return;
+        }
+        if (canvas_dirty_ || rdram_ == nullptr) {
+            canvas_dirty_ = false;
+            return;
+        }
+        const uint8_t siz = ((vi_status_ & 3) == 3) ? gbi::IM_SIZ_32b : gbi::IM_SIZ_16b;
+        if (present_tex_ == 0) {
+            glGenTextures(1, &present_tex_);
+            glBindTexture(GL_TEXTURE_2D, present_tex_);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, canvas_width_, canvas_height_, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+        GlFramebuffer tmp;
+        tmp.tex = present_tex_;
+        tmp.width = canvas_width_;
+        tmp.height = canvas_height_;
+        tmp.siz = siz;
+        tmp.row_bytes = static_cast<uint32_t>(canvas_width_) << siz >> 1;
+        upload_framebuffer(tmp, address);
+        blit_to_canvas(present_tex_);
+    }
+
     // ----- main-thread flush (ogre_gfx_flush) ------------------------------------
 
     // Runs on the browser main thread: uploads queued textures, then executes
@@ -1432,6 +1807,13 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         {
             cmds.swap(draw_queue_);
         }
+        // Presentation and framebuffer-sync requests travel with the queue, so
+        // the main thread renders everything submitted before them.
+        const bool present = present_pending_;
+        const uint32_t present_address = present_address_;
+        present_pending_ = false;
+        const uint32_t sync_request = sync_request_.load(std::memory_order_acquire);
+        const bool sync_pending = sync_request > sync_done_.load(std::memory_order_relaxed);
 
         glUseProgram(program_);
         glBindVertexArray(vao_);
@@ -1462,7 +1844,31 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         g_flush_ok.store(flush_count_, std::memory_order_relaxed);
         g_flush_cmds.store(flushed_cmds_, std::memory_order_relaxed);
 
+        // Which GL framebuffer the current draw targets (null = the canvas).
+        uint32_t bound_fb_address = 0;
+        GlFramebuffer* bound_fb = nullptr;
+
         for (const DrawCmd& cmd : cmds) {
+            // Bind the RDP colour image this draw renders into. A zero address
+            // means the game never set one, and the draw goes to the canvas -
+            // the prototype's original path.
+            if (cmd.fb_address != bound_fb_address || bound_fb == nullptr) {
+                if (cmd.fb_address != 0) {
+                    GlFramebuffer& fb = ensure_framebuffer(cmd);
+                    bound_fb = (fb.fbo != 0) ? &fb : nullptr;
+                    bound_fb_address = cmd.fb_address;
+                } else {
+                    bound_fb = nullptr;
+                    bound_fb_address = 0;
+                }
+                glBindFramebuffer(GL_FRAMEBUFFER, bound_fb != nullptr ? bound_fb->fbo : 0);
+                glViewport(0, 0, bound_fb != nullptr ? bound_fb->width : canvas_width_,
+                           bound_fb != nullptr ? bound_fb->height : canvas_height_);
+            }
+            const int target_height = bound_fb != nullptr ? bound_fb->height : canvas_height_;
+            if (bound_fb == nullptr) {
+                canvas_dirty_ = true;
+            }
             if (vert_logged_ < 6) {
                 ++vert_logged_;
                 char vbuf2[640];
@@ -1598,7 +2004,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             // Scissor.
             if (cmd.scissor_on) {
                 const int x = cmd.sx0;
-                const int y = canvas_height_ - cmd.sy1 - 1;
+                const int y = target_height - cmd.sy1 - 1;
                 const int w = cmd.sx1 - cmd.sx0 + 1;
                 const int h = cmd.sy1 - cmd.sy0 + 1;
                 glEnable(GL_SCISSOR_TEST);
@@ -1633,15 +2039,47 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
             glBufferData(GL_ARRAY_BUFFER, count * 8 * sizeof(float), vbuf, GL_DYNAMIC_DRAW);
             glDrawArrays(GL_TRIANGLES, 0, count);
+
+            // Remember which rows this draw touched: the readback copies only
+            // the band that was drawn into. Window row 0 is NDC y = -1, and it
+            // is the *bottom* of the image (see upload_framebuffer).
+            if (bound_fb != nullptr) {
+                for (int i = 0; i < count; ++i) {
+                    const int wy = static_cast<int>((cmd.pos[i * 2 + 1] + 1.0f) * 0.5f *
+                                                    static_cast<float>(target_height));
+                    bound_fb->min_row = std::min(bound_fb->min_row, std::max(wy, 0));
+                    bound_fb->max_row = std::max(bound_fb->max_row, std::min(wy, target_height - 1));
+                }
+                bound_fb->last_write_seq = ++framebuffer_write_seq_;
+            }
+        }
+
+        // Presentation: show the VI's scanout buffer on the canvas.
+        if (present) {
+            present_framebuffer(present_address);
+        }
+
+        // Framebuffer writeback. The game's CPU reads a colour image out of
+        // RDRAM after ogre_sync_framebuffers(), which waits on sync_done_; the
+        // present path also writes back so RDRAM tracks the last frame.
+        if (present || sync_pending) {
+            readback_all_framebuffers();
+        }
+        if (sync_pending) {
+            sync_done_.store(sync_request, std::memory_order_release);
         }
 
         // Read the canvas back right after the batch, so "what the frame looks
         // like once every draw has landed" is measured rather than inferred
-        // from a screenshot that may catch a partially flushed frame.
+        // from a screenshot that may catch a partially flushed frame. The draws
+        // now land in the colour image's framebuffer object, so bind the canvas
+        // first: this reads what the VI presentation put there.
         static unsigned after_logged = 0;
         if (after_logged < 24 && had_rect) {
             static std::vector<uint8_t> px;
             px.resize(static_cast<size_t>(canvas_width_) * canvas_height_ * 4);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, canvas_width_, canvas_height_);
             glPixelStorei(GL_PACK_ALIGNMENT, 1);
             glReadPixels(0, 0, canvas_width_, canvas_height_, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
             size_t nz = 0; uint64_t sum = 0;
@@ -1682,6 +2120,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         st.othermode_l = 0;
         st.othermode_h = 0;
         st.combiner.decode(0, 0);
+        // The RDP keeps its colour image across display lists, so a task that
+        // never sends G_SETCIMG renders into the target the previous task left
+        // (RT64's RDP state is persistent the same way).
+        st.cimg_address = last_cimg_address_;
+        st.cimg_row_bytes = last_cimg_row_bytes_;
+        st.cimg_width = last_cimg_width_;
+        st.cimg_siz = last_cimg_siz_;
+        st.cimg_fmt = last_cimg_fmt_;
         // Which GBI owns this display list. Hashing the ucode text is what
         // decides whether 0xDA/0xDC are G_MTX/G_MOVEMEM (F3DEX2) or the njpeg
         // macroblock draw and its matrix (S2DEX2).
@@ -1705,6 +2151,11 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             for (DrawCmd& d : ctx.draws) {
                 if (draw_queue_.size() >= 16384) {
                     break;
+                }
+                if (d.fb_address != 0) {
+                    // These pixels live in a GL framebuffer object until the
+                    // main thread writes them back (ogre_sync_framebuffers).
+                    fb_writeback_pending_ = 1;
                 }
                 draw_queue_.push_back(std::move(d));
                 ++draws_recorded_;
@@ -1763,13 +2214,97 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     }
 
     void send_dummy_workload(uint32_t fb_address) override {
-        (void)fb_address;
-        // The game's dummy framebuffers are not presented in this prototype.
+        // The runtime clears a scratch framebuffer with the RDP and points the
+        // VI at it while the game is still booting (events.cpp: the VI is black
+        // and the workload only exists so the presenter has something to show).
+        // The pixels are all zero, so presenting that buffer from RDRAM is the
+        // same as the RDP fill the native renderer issues.
+        request_present(fb_address, 2);
     }
 
     void update_screen() override {
-        // Direct-to-canvas rendering: nothing to draw at VI time; the main
-        // thread presents the queued commands via ogre_gfx_flush().
+        // Present the buffer the VI is scanning out. `update_screen_regs` is
+        // written by the gfx thread immediately before this call, so it is the
+        // geometry of the frame that is on screen right now.
+        const ultramodern::renderer::ViRegs* vi = ultramodern::renderer::get_vi_regs();
+        if (vi == nullptr) {
+            return;
+        }
+        request_present(vi->VI_ORIGIN_REG, vi->VI_STATUS_REG);
+    }
+
+    // Asks the browser main thread to show the framebuffer at `guest_address`
+    // on the canvas at the next flush. Called from the gfx thread.
+    void request_present(uint32_t guest_address, unsigned vi_status) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        present_address_ = guest_address & 0x00FFFFFFu;
+        vi_status_ = vi_status;
+        present_pending_ = true;
+        ++present_requests_;
+    }
+
+    // Called from the game's own CPU thread (the recompiled njpeg readback in
+    // bankE) before it copies a framebuffer out of RDRAM. The renderer holds
+    // those pixels in a GL framebuffer object, so the browser main thread has to
+    // render them and write them back first. Returns once that has happened, or
+    // after kSyncTimeoutMs so a renderer that never flushes cannot hang the game
+    // thread forever.
+    void sync_framebuffers() {
+        if (rdram_ == nullptr) {
+            return;
+        }
+        const uint32_t request = sync_request_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        // Fast path: nothing has been drawn into a colour image that RDRAM does
+        // not already hold, so there is nothing for the main thread to write
+        // back. The game reaches this several times per background assembly, and
+        // each wait costs up to one main-thread flush interval otherwise.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (draw_queue_.empty() && !present_pending_ && fb_writeback_pending_ == 0) {
+                sync_done_.store(request, std::memory_order_release);
+                return;
+            }
+        }
+        const auto start = std::chrono::steady_clock::now();
+        while (sync_done_.load(std::memory_order_acquire) < request) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            if (elapsed >= kSyncTimeoutMs) {
+                if (sync_timeouts_.fetch_add(1) == 0) {
+                    OGRE_MILESTONE("GFX-FBSYNC",
+                                   "sync_framebuffers: no main-thread flush within %d ms "
+                                   "(flushes=%u); the CPU reads RDRAM as it is",
+                                   kSyncTimeoutMs,
+                                   g_flush_ok.load(std::memory_order_relaxed));
+                }
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+        // Diagnostic: what the CPU is about to read out of RDRAM. The game
+        // picks one of the three framebuffers; if the copy comes out black,
+        // this says whether RDRAM held the rendered pixels at that moment.
+        if (sync_enter_logged_ < 8) {
+            ++sync_enter_logged_;
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            static const uint32_t kGameFbs[3] = {0x000400, 0x025C00, 0x04B400};
+            char buf[256];
+            int o = 0;
+            for (uint32_t addr : kGameFbs) {
+                size_t nz = 0;
+                for (uint32_t gy = 0; gy < 240; ++gy) {
+                    const uint8_t* row = rdram_ + addr + gy * 640;
+                    for (uint32_t x = 0; x < 320; ++x) {
+                        const uint16_t v = n64h(row, static_cast<int>(x * 2));
+                        if ((v & 0x7FFF) != 0) { ++nz; }
+                    }
+                }
+                o += snprintf(buf + o, sizeof(buf) - o, " 0x%06X=%zu", addr, nz);
+            }
+            OGRE_MILESTONE("GFX-FBSYNC", "sync %u: waited=%lldms ramNonBlack:%s",
+                           request, (long long)ms, buf);
+        }
     }
 
     void shutdown() override {
@@ -1782,6 +2317,15 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 glDeleteTextures(1, &tex);
             }
             gl_textures_.clear();
+            for (auto& [addr, fb] : gl_framebuffers_) {
+                if (fb.fbo != 0) glDeleteFramebuffers(1, &fb.fbo);
+                if (fb.tex != 0) glDeleteTextures(1, &fb.tex);
+            }
+            gl_framebuffers_.clear();
+            if (present_tex_ != 0) {
+                glDeleteTextures(1, &present_tex_);
+                present_tex_ = 0;
+            }
         }
         OGRE_MILESTONE("RENDERER", "webgl2 renderer shut down (%u DLs)", task_count_.load());
     }
@@ -1859,12 +2403,55 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     unsigned rect_logged_ = 0;
     unsigned blit_logged_ = 0;
     unsigned s2d_logged_ = 0;
+    unsigned framebuffers_logged_ = 0;
+    unsigned framebuffer_readbacks_ = 0;
     unsigned flushed_cmds_ = 0;
     unsigned flush_count_ = 0;
     unsigned last_dl_cmds_ = 0;   // commands walked by the last execute_dl
     uint32_t last_task_data_ptr_ = 0;  // raw t.data_ptr of the last task
     unsigned runaway_logged_ = 0;
     std::mutex mutex_;
+
+    // ----- framebuffer indirection (browser main thread) -----------------------
+    //
+    // The RDP renders into a guest colour image, not into the canvas; the game
+    // then reads that buffer out of RDRAM with the CPU (the njpeg backdrop
+    // assembly). Each colour image gets a GL framebuffer object keyed by its
+    // guest address, created lazily on first use.
+    std::map<uint32_t, GlFramebuffer> gl_framebuffers_;
+    // The RDP's colour image, kept across display lists (RenderState::cimg_*).
+    uint32_t last_cimg_address_ = 0;
+    uint32_t last_cimg_row_bytes_ = 0;
+    uint16_t last_cimg_width_ = 0;
+    uint8_t last_cimg_siz_ = 0, last_cimg_fmt_ = 0;
+    std::set<uint64_t> cimg_seen_;   // distinct G_SETCIMG configurations (gfx thread)
+    // Presentation: the VI's scanout buffer, requested by update_screen() on the
+    // gfx thread and consumed by flush_commands() on the main thread.
+    uint32_t present_address_ = 0;
+    bool present_pending_ = false;
+    unsigned vi_status_ = 0;
+    unsigned present_requests_ = 0;
+    bool canvas_dirty_ = false;   // a draw went straight to the canvas
+    GLuint present_tex_ = 0;      // canvas-sized, for a scanout buffer with no FBO
+    unsigned presents_logged_ = 0;
+    unsigned sync_logged_ = 0;
+    uint32_t framebuffer_write_seq_ = 0;
+    unsigned sync_enter_logged_ = 0;
+    // Framebuffer sync handshake. The game thread bumps sync_request_ and waits
+    // for sync_done_ to catch up; the main thread performs the writeback.
+    std::atomic<uint32_t> sync_request_{0};
+    std::atomic<uint32_t> sync_done_{0};
+    std::atomic<unsigned> sync_timeouts_{0};
+    // Draws that landed in a colour image whose pixels are not in RDRAM yet.
+    // Guarded by mutex_: send_dl() sets it when it publishes draws, the main
+    // thread clears it after a writeback, and sync_framebuffers() reads it to
+    // decide whether it has to wait at all.
+    uint32_t fb_writeback_pending_ = 0;
+    static constexpr int kSyncTimeoutMs = 1000;
+    // The largest render target this renderer will allocate a side for. The N64
+    // tops out at 640x480; the cap keeps a corrupt G_SETCIMG from asking for a
+    // gigabyte texture.
+    static constexpr int kMaxFramebufferSide = 1024;
 
     // Command queues: written by the gfx pthread (execute_dl), drained by the
     // browser main thread (ogre_gfx_flush -> flush_commands).
@@ -2410,8 +2997,40 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 }
                 break;
 
-            case gbi::OP_SETCIMG:
-                break;  // framebuffer target; direct-to-canvas ignores it
+            case gbi::OP_SETCIMG: {
+                // RT64 GBI_RDP::setColorImage: fmt bits 21-23, siz bits 19-20,
+                // width = bits 0-11 + 1, and the raw second word masked to the
+                // 24-bit RDRAM window (RDP::maskAddress, `address & 0xFFFFFF`).
+                // The RDP keeps this state across display lists, so the renderer
+                // remembers it and each new task's RenderState starts from it.
+                const uint8_t fmt = static_cast<uint8_t>(p0(w0, 21, 3));
+                const uint8_t siz = static_cast<uint8_t>(p0(w0, 19, 2));
+                const uint32_t width = p0(w0, 0, 12) + 1;
+                const uint32_t address = w1 & 0x00FFFFFFu;
+                st.cimg_address = address;
+                st.cimg_siz = siz;
+                st.cimg_fmt = fmt;
+                st.cimg_width = static_cast<uint16_t>(width);
+                st.cimg_row_bytes = (address != 0) ? (width << siz >> 1) : 0;
+                last_cimg_address_ = address;
+                last_cimg_row_bytes_ = st.cimg_row_bytes;
+                last_cimg_width_ = st.cimg_width;
+                last_cimg_siz_ = siz;
+                last_cimg_fmt_ = fmt;
+                // Log each distinct colour-image configuration once: the
+                // addresses and pitches are what the framebuffer writeback has
+                // to match, and the game uses more than one (the world map and
+                // its 640-pixel-wide targets).
+                const uint64_t cimg_key = (static_cast<uint64_t>(address) << 24) |
+                                          (width << 4) | (siz << 2) | fmt;
+                if (cimg_seen_.size() < 16 && cimg_seen_.insert(cimg_key).second) {
+                    OGRE_MILESTONE("GFX-CIMG",
+                                   "SETCIMG addr=0x%06X fmt=%u siz=%u width=%u rowBytes=%u",
+                                   address, (unsigned)fmt, (unsigned)siz, width,
+                                   st.cimg_row_bytes);
+                }
+                break;
+            }
 
             case gbi::OP_SETZIMG:
                 break;
@@ -2960,6 +3579,14 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             cmd.fog[i] = st.fog_color[i];
             cmd.blend_color[i] = st.blend_color[i];
         }
+        cmd.fb_address = st.cimg_address;
+        cmd.fb_row_bytes = st.cimg_row_bytes;
+        cmd.fb_siz = st.cimg_siz;
+        cmd.fb_fmt = st.cimg_fmt;
+        cmd.fb_width_px = st.cimg_width;
+        const float sh = screen_height(st);
+        cmd.fb_height_px = static_cast<uint16_t>(
+            (sh >= 1.0f && sh <= 1024.0f) ? sh : static_cast<float>(canvas_height_));
     }
 
     // Queues one triangle list (NDC pos + uv + shade per vertex).
@@ -3022,8 +3649,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         if (st.viewport_set) {
             const float scr_x = pos.x * inv_w * st.view_scale[0] + st.view_trans[0];
             const float scr_y = -pos.y * inv_w * st.view_scale[1] + st.view_trans[1];
-            sx = ndc_xf(scr_x);
-            sy = ndc_yf(scr_y);
+            sx = ndc_xf(scr_x, st);
+            sy = ndc_yf(scr_y, st);
         } else {
             // No viewport seen yet: treat the projection output as NDC.
             sx = pos.x * inv_w;   // [-1, 1] (x)
@@ -3145,8 +3772,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // G_FILLRECT in fill mode outputs the fill color directly (the
         // combiner is bypassed). Approximate by driving the combiner with the
         // fill color as PRIMITIVE: rgb = (PRIM - 0) * 1 + 0.
-        const float x0 = ndc_x(xl), x1 = ndc_x(xh + 1);
-        const float y0 = ndc_y(yl), y1 = ndc_y(yh + 1);
+        const float x0 = ndc_x(xl, st), x1 = ndc_x(xh + 1, st);
+        const float y0 = ndc_y(yl, st), y1 = ndc_y(yh + 1, st);
         const float c[4] = {st.fill_color[0], st.fill_color[1], st.fill_color[2], st.fill_color[3]};
         float data[6 * 8];
         for (int i = 0; i < 6; ++i) {
@@ -3354,8 +3981,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         const float vt0 = flipT ? imageH : 0.0f;
         const float vt1 = flipT ? 0.0f : imageH;
 
-        const float nx0 = ndc_xf(x0), nx1 = ndc_xf(x1);
-        const float ny0 = ndc_yf(y0), ny1 = ndc_yf(y1);
+        const float nx0 = ndc_xf(x0, st), nx1 = ndc_xf(x1, st);
+        const float ny0 = ndc_yf(y0, st), ny1 = ndc_yf(y1, st);
         const float px[4] = {nx0, nx1, nx0, nx1};
         const float py[4] = {ny0, ny0, ny1, ny1};
         const float uv[4][2] = {{us0, vt0}, {us1, vt0}, {us0, vt1}, {us1, vt1}};
@@ -3485,8 +4112,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             uv[3][0] = us + du * w;     uv[3][1] = vs + dv * h;              // (xh, yh)
         }
 
-        const float x0 = ndc_x(xl), x1 = ndc_x(xh + 1);
-        const float y0 = ndc_y(yl), y1 = ndc_y(yh + 1);
+        const float x0 = ndc_x(xl, st), x1 = ndc_x(xh + 1, st);
+        const float y0 = ndc_y(yl, st), y1 = ndc_y(yh + 1, st);
         const float px[4] = {x0, x1, x0, x1};
         const float py[4] = {y0, y0, y1, y1};
 
@@ -3525,15 +4152,34 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         st.active_tile = saved_tile;
     }
 
-    // Screen (pixel) -> NDC.
-    float ndc_xf(float x) const {
-        return 2.0f * x / static_cast<float>(canvas_width_) - 1.0f;
+    // Screen (pixel) -> NDC. The denominator is the *screen* size, which the
+    // RSP viewport defines: OB64 submits vscale = [640 480 511 0] for its
+    // 320x240 screen, i.e. vscale.x/4 = width/2, so the screen is twice the
+    // scale. Dividing by the canvas size instead only works while the two
+    // agree, and the game also renders 640x480 (VI fbSizeX=640 in the world
+    // map), where every coordinate past 319 landed outside NDC.
+    float screen_width(const RenderState& st) const {
+        return (st.viewport_set && st.view_scale[0] * 2.0f >= 1.0f)
+                   ? st.view_scale[0] * 2.0f
+                   : static_cast<float>(canvas_width_);
     }
-    float ndc_yf(float y) const {
-        return 1.0f - 2.0f * y / static_cast<float>(canvas_height_);
+    float screen_height(const RenderState& st) const {
+        return (st.viewport_set && st.view_scale[1] * 2.0f >= 1.0f)
+                   ? st.view_scale[1] * 2.0f
+                   : static_cast<float>(canvas_height_);
     }
-    float ndc_x(int x) const { return ndc_xf(static_cast<float>(x)); }
-    float ndc_y(int y) const { return ndc_yf(static_cast<float>(y)); }
+    float ndc_xf(float x, const RenderState& st) const {
+        return 2.0f * x / screen_width(st) - 1.0f;
+    }
+    float ndc_yf(float y, const RenderState& st) const {
+        return 1.0f - 2.0f * y / screen_height(st);
+    }
+    float ndc_x(int x, const RenderState& st) const {
+        return ndc_xf(static_cast<float>(x), st);
+    }
+    float ndc_y(int y, const RenderState& st) const {
+        return ndc_yf(static_cast<float>(y), st);
+    }
 
     // ----- matrix helpers ------------------------------------------------------
 
@@ -3799,9 +4445,14 @@ int ogre_gfx_debug_tex_count() {
 
 // The njpeg readback asks the renderer to make its render targets visible in
 // RDRAM before the CPU copies a framebuffer (see tools/njpeg_readback.py). The
-// web renderer draws with WebGL and does not maintain RDP render targets, so
-// there is nothing to write back; the game's own RDRAM is what the CPU reads.
+// game renders into a guest colour image that this renderer keeps in a GL
+// framebuffer object, so the bytes the CPU is about to read are still on the
+// GPU until the browser main thread writes them back. This blocks the game
+// thread on that handshake; `sync_done_` is set by ogre_gfx_flush().
 void ogre_sync_framebuffers() {
+    if (ogre::g_active_renderer != nullptr) {
+        ogre::g_active_renderer->sync_framebuffers();
+    }
 }
 
 }  // extern "C"
