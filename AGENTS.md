@@ -403,6 +403,31 @@ that depends on the game's audio task is unaffected.
 
 ---
 
+## 15. Build the browser target before finishing a change it touches
+
+`make web` builds `build-wasm` with Emscripten. The browser target is a separate
+build directory that no other command touches, so a source file both builds
+compile and that includes a native-only header fails only here, and the failure
+is invisible until someone tries it. That has happened twice: `bank_overlays.cpp`
+(session 109) and `ram_key.cpp` (session 138), both including `sdl_platform.hpp`
+for `console::`.
+
+- Run `make web` before finishing any change to a file in `app/CMakeLists.txt`'s
+  Emscripten source list, and to `app/src/web_renderer.cpp`,
+  `app/src/web_platform.cpp`, `app/web/*` or `app/src/gbi.cpp`.
+- A shared source must not include a native-only header. Guard the include and
+  its call sites with `#ifndef __EMSCRIPTEN__`, as `bank_overlays.cpp` and
+  `ram_key.cpp` do.
+- `.github/workflows/wasm.yml` compiles the target in CI, guarded by
+  `vars.OGRE_DATA_REPO` (the private bundle supplies the generated code).
+- The browser build takes the environment knobs from the page's query string
+  (`OGRE_SCENE`, `OGRE_TAP_MS`, `OGRE_TAP_BUTTON`, `OGRE_S2D_TRACE`, ...), so a
+  scene is reached with a URL instead of a throwaway Playwright script. See
+  `docs/guides/app-build.md` -> "The browser build reads the same environment
+  knobs".
+
+---
+
 ## Verified facts
 
 These were wrong or missing in earlier sessions. Re-verify if in doubt; otherwise

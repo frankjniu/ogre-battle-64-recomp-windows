@@ -35,14 +35,15 @@ battles, cutscenes, audio, Controller Pak saves) with a modding framework.
 
 The project also has a **WebAssembly / browser build**: the recompiled game plus
 `N64ModernRuntime` under Emscripten. It compiles and runs the game again
-(session 109). Its renderer is the WebGL2 prototype, which draws the title's
-sprite layer and mangles the title's 3D content and the menu screens, because it
-has no S2DEX2, no YUV16 and no RDRAM framebuffer indirection. The route for a
-browser renderer is recorded in `docs/DECISIONS.md`; the native port is the
+(session 109). Its renderer is the WebGL2 prototype. Session 138 added S2DEX2 and
+YUV16 to it, so the New Game njpeg backdrop decodes and draws in the browser
+(`docs/proofs/web-newgame-cathedral-njpeg.png`); the piece still missing is RDRAM
+framebuffer indirection, which is why the game's own next scene draws over that
+backdrop. The route is recorded in `docs/DECISIONS.md`; the native port is the
 primary target and RT64 remains its renderer. `docs/WEB-PORT.md`,
 `docs/WEB-PORT-REPORT.md` and `docs/WEB-PORT-DEPLOYMENT.md` describe the
 2026-08-29 feasibility work and not the current state; the current state is this
-file and `docs/HANDOFF-2026-09-27-session109.md`.
+file and `docs/HANDOFF-2026-10-14-session138.md`.
 
 ## Status
 
@@ -388,20 +389,22 @@ holds the evidence.
    developer's decision is that it is low priority for a PC port. The device half
    (`osPfs*` and a flat 32 KiB `.mpk`) is implemented. See `docs/DECISIONS.md`
    (88b).
-8. **Web build.** The wasm target compiles and runs again (session 109): two
-   defects had blocked it since 2026-09-16. `app/src/bank_overlays.cpp`
-   included the native-only `sdl_platform.hpp` for the live console, which is
-   now `#ifndef __EMSCRIPTEN__`; and `app/src/main_web.cpp` registered
-   `recomp::SaveType::None`, so the game's first SRAM DMA exited the runtime at
-   about 350 ms (`librecomp/src/pi.cpp`), which read as a boot freeze. It now
-   registers `Sram` like `app/src/main.cpp`. The title renders
-   (`docs/proofs/web-title.png`), 40 display lists are submitted with no bad
-   walk, and the audio microcode runs with the layer muted until `?audio`. The
-   renderer is still the WebGL2 prototype: no S2DEX2, no YUV16, no RDRAM
-   framebuffer indirection, so the opening and menu screens are wrong
-   (`docs/proofs/web-opening-broken.png`). The renderer route is decided in
-   `docs/DECISIONS.md`; the build is not in CI, which is why it stayed broken.
-   See `docs/HANDOFF-2026-09-27-session109.md`.
+8. **Web build.** The wasm target compiles and runs (session 109, repaired again
+   in session 138). Session 109's two defects were `app/src/bank_overlays.cpp`
+   including the native-only `sdl_platform.hpp` for the live console, and
+   `app/src/main_web.cpp` registering `recomp::SaveType::None` so the game's
+   first SRAM DMA exited the runtime at about 350 ms (`librecomp/src/pi.cpp`).
+   Session 138 repaired the same class a second time — `app/src/ram_key.cpp`
+   included the same native-only header — and added `make web` so the target has
+   a supported local build, plus `.github/workflows/wasm.yml` so CI compiles it.
+   The title renders (`docs/proofs/web-title.png`). The renderer is the WebGL2
+   prototype; session 138 added S2DEX2 and YUV16, so the New Game njpeg backdrop
+   decodes and draws (`docs/proofs/web-newgame-cathedral-njpeg.png`). The
+   remaining renderer gap is RDRAM framebuffer indirection: the game's 2x2
+   backdrop assembly reads its own framebuffer out of RDRAM, which the prototype
+   never writes, so the dialogue scene draws an empty image over the backdrop
+   (`docs/proofs/web-newgame-cathedral-covered.png`). See
+   `docs/HANDOFF-2026-10-14-session138.md` and `docs/DECISIONS.md`.
 9. **The published v0.4.0 archives ship an empty `mods/`, and the bundle that
    feeds the release did not carry one.** Fixed on main (session 108):
    `make dist`, `tools/release-build.sh`, the workflow's unpack step and

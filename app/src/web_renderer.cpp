@@ -44,6 +44,12 @@
 #include <emscripten/threading.h>
 #include <GLES3/gl3.h>
 
+// XXH3-64, header-only in this one translation unit. The GBI a display list
+// belongs to is decided by hashing the task's ucode text, the way RT64's
+// GBIManager::getGBIForUCode does it; see the constants below.
+#define XXH_INLINE_ALL
+#include "xxHash/xxhash.h"
+
 #include "ultramodern/renderer_context.hpp"
 #include "ultramodern/ultramodern.hpp"
 
@@ -404,6 +410,18 @@ inline const char* blend_a_name(int v) { return (v >= 0 && v <= 3) ? kBlendAName
 inline const char* blend_b_name(int v) { return (v >= 0 && v <= 3) ? kBlendBNames[v] : "?"; }
 
 // Rendering state carried across a display list.
+enum class GbiKind { F3DEX2, S2DEX2 };
+
+// The S2DEX2 opcodes that collide with F3DEX2's, from
+// tools/RT64/src/gbi/rt64_gbi_s2dex2.h. `0xDC`/`0xDA` are F3DEX2's G_MOVEMEM and
+// G_MTX; `0x01`/`0x02` are its G_VTX and G_MODIFYVTX; `0xE4` is its G_TEXRECT
+// and S2DEX2's G_RDPHALF_0.
+constexpr uint8_t S2D_OBJ_RECTANGLE = 0x01;
+constexpr uint8_t S2D_OBJ_SPRITE = 0x02;
+constexpr uint8_t S2D_OBJ_RECTANGLE_R = 0xDA;
+constexpr uint8_t S2D_OBJ_MOVEMEM = 0xDC;
+constexpr uint8_t S2D_RDPHALF_0 = 0xE4;
+
 struct RenderState {
     // Matrices (RSP row-vector convention).
     Mat4 projection = Mat4::identity();
@@ -439,6 +457,23 @@ struct RenderState {
 
     // Combiner.
     Combiner combiner;
+
+    // Which GBI this display list belongs to (see identify_gbi). In an S2DEX2
+    // list 0xDA/0xDC are the object-rectangle and object-matrix commands.
+    GbiKind gbi = GbiKind::F3DEX2;
+
+    // G_SETCONVERT: the YUV -> RGB matrix the RDP uses for YUV16 texels. Raw
+    // 9-bit fields, sign-extended and scaled `2*K+1` at use time.
+    int32_t convert_k[6] = {0, 0, 0, 0, 0, 0};
+
+    // S2DEX2 object transform (G_OBJ_MOVEMEM). RT64 resets it to the identity
+    // at the start of every task, so it lives in the per-DL state.
+    struct ObjMtx {
+        int32_t a = 0x10000, b = 0, c = 0, d = 0x10000;
+        int16_t x = 0, y = 0;
+        uint16_t base_scale_x = 1024, base_scale_y = 1024;
+        bool sub_mtx = false;
+    } obj_mtx;
 
     // Blender / render mode (OTHERMODE_L bits 16-31).
     Blender blender;
@@ -532,6 +567,80 @@ inline uint32_t resolve_address(const uint32_t* segments, uint32_t addr) {
 }
 
 // ============================================================================
+// Which GBI does this task use?
+// ============================================================================
+//
+// The game's tasks carry one of two ucodes, and two of their opcodes mean
+// different things in each: 0xDA is G_MTX under F3DEX2 and G_OBJ_RECTANGLE_R
+// under S2DEX2, and 0xDC is G_MOVEMEM under F3DEX2 and G_OBJ_MOVEMEM under
+// S2DEX2 (docs/HANDOFF-2026-09-15-session51.md §3). Walking an S2DEX2 list as
+// F3DEX2 is what made the njpeg backgrounds decode as one ignored `G_MTX` per
+// macroblock and draw nothing.
+//
+// The choice is made by hashing the ucode text with XXH3-64, not by address:
+// the runtime stores each guest 32-bit word byte-reversed in RDRAM, and RT64's
+// database is keyed on exactly those bytes. Session 51 §2 reproduces these two
+// constants from the ROM (`tools/RT64/src/gbi/rt64_gbi.cpp`'s textSegments):
+//
+//   ROM 0x35510, 0x18C0 -> 0x9300F34F3B438634  S2DEX2_FIFO_2_08
+//   ROM 0x2F940, 0x1390 -> 0xCF55FAE288BFE48D  F3DEX2.FIFO 2.08
+//
+// The digest is over the *whole* text, so the length is part of the entry; the
+// OSTask's own `ucode_size` is 0x1000 (one RSP IMEM load), which is why RT64's
+// `GBIManager::getGBIForUCode` grows the hash segment by segment and compares
+// the running digest at each database length instead of trusting that field.
+struct GbiTextSegment {
+    uint32_t length;
+    uint64_t hash;
+    GbiKind kind;
+};
+constexpr GbiTextSegment kGbiTextSegments[] = {
+    {0x1390, 0xCF55FAE288BFE48Dull, GbiKind::F3DEX2},
+    {0x18C0, 0x9300F34F3B438634ull, GbiKind::S2DEX2},
+};
+
+// Identifies the GBI of `task` from its ucode text. Falls back to the ucode's
+// guest address when the text hashes to no known value, so an unrecognised
+// ucode still renders as something and the fallback is visible in the log.
+GbiKind identify_gbi(const uint8_t* rdram, const OSTask* task) {
+    const uint32_t base = static_cast<uint32_t>(task->t.ucode) & 0x1FFFFFFFu;
+    if (rdram != nullptr) {
+        for (const GbiTextSegment& seg : kGbiTextSegments) {
+            if (base + seg.length > gbi::kRdramSize) {
+                continue;
+            }
+            if (XXH3_64bits(rdram + base, seg.length) == seg.hash) {
+                return seg.kind;
+            }
+        }
+        static uint32_t logged = 0;
+        if (logged < 4) {
+            ++logged;
+            // Print the two running digests, the way RT64's database reports an
+            // unrecognised ucode, so the value can be looked up or added.
+            char hashes[128];
+            int o = 0;
+            for (const GbiTextSegment& seg : kGbiTextSegments) {
+                if (base + seg.length > gbi::kRdramSize || o >= static_cast<int>(sizeof(hashes)) - 40) {
+                    continue;
+                }
+                o += snprintf(hashes + o, sizeof(hashes) - o, "0x%llX/len 0x%X ",
+                              static_cast<unsigned long long>(
+                                  XXH3_64bits(rdram + base, seg.length)),
+                              seg.length);
+            }
+            OGRE_MILESTONE("WEB-GBI",
+                           "unknown ucode 0x%08X (task ucode_size 0x%X) hashes %s; "
+                           "using the address (0x800A5110 = S2DEX2, else F3DEX2)",
+                           static_cast<unsigned>(task->t.ucode),
+                           static_cast<unsigned>(task->t.ucode_size), hashes);
+        }
+    }
+    return (static_cast<uint32_t>(task->t.ucode) == 0x800A5110u) ? GbiKind::S2DEX2
+                                                                : GbiKind::F3DEX2;
+}
+
+// ============================================================================
 // N64 texture decoding (rdram -> RGBA8)
 // ============================================================================
 
@@ -564,6 +673,48 @@ inline void ia16_to_rgba8(uint16_t v, uint8_t out[4]) {
     out[3] = a;
 }
 
+// One YUV16 texel -> RGBA8, using the game's own G_SETCONVERT matrix.
+//
+// The RDP converts a YUV tile to RGB with `G_SETCONVERT`'s six 9-bit fields,
+// sign-extended and scaled `2*K+1` (GLideN64 `gDPSetConvert`, parallel-rdp
+// `set_convert`), then
+//
+//     R = Y + K0*V'   G = Y + K1*U' + K2*V'   B = Y + K3*U'      (U'=U-128, V'=V-128)
+//
+// K1 pairs with U and K2 with V. `tools/RT64/src/shaders/TextureDecoder.hlsli`
+// `sampleTMEMYUV16` is the reference this mirrors, including the fallback to
+// the standard NTSC JPEG matrix (K0=175 K1=469 K2=423 K3=222) when the game has
+// programmed none.
+inline void yuv16_to_rgba8(uint8_t y, uint8_t u, uint8_t v, const int32_t* convert_k,
+                           uint8_t out[4]) {
+    auto sext9 = [](int32_t k) -> float {
+        const int32_t m = k & 0x1FF;
+        return static_cast<float>((m >= 256) ? (m - 512) : m);
+    };
+    // With no matrix programmed the hardware's standard NTSC JPEG coefficients
+    // apply. RT64 tests the raw fields' sum, so match that test and not a
+    // bitwise one.
+    if ((convert_k[0] + convert_k[1] + convert_k[2] + convert_k[3]) == 0) {
+        static const int32_t kJpeg[4] = {175, 469, 423, 222};
+        convert_k = kJpeg;
+    }
+    const float kk0 = 2.0f * sext9(convert_k[0]) + 1.0f;
+    const float kk1 = 2.0f * sext9(convert_k[1]) + 1.0f;
+    const float kk2 = 2.0f * sext9(convert_k[2]) + 1.0f;
+    const float kk3 = 2.0f * sext9(convert_k[3]) + 1.0f;
+    const float yf = static_cast<float>(y);
+    const float uf = static_cast<float>(u) - 128.0f;
+    const float vf = static_cast<float>(v) - 128.0f;
+    auto clamp255 = [](float c) {
+        const float s = (c < 0.0f) ? 0.0f : ((c > 255.0f) ? 255.0f : c);
+        return static_cast<uint8_t>(s + 0.5f);
+    };
+    out[0] = clamp255(yf + (kk0 * vf) / 256.0f);
+    out[1] = clamp255(yf + (kk1 * uf + kk2 * vf) / 256.0f);
+    out[2] = clamp255(yf + (kk3 * uf) / 256.0f);
+    out[3] = 255;
+}
+
 // Decodes a rect [x0,x0+w) x [y0,y0+h) of the current texture image into
 // RGBA8. `tlut` is used for CI formats; `palette` selects the CI4 TLUT bank.
 // `row_bytes` is the source image's row stride in bytes. It is NOT derivable
@@ -574,7 +725,8 @@ inline void ia16_to_rgba8(uint16_t v, uint8_t out[4]) {
 // tile; the caller picks.
 void decode_texture_rect(const uint8_t* rdram, uint32_t timg_address, uint8_t fmt, uint8_t siz,
                          int row_bytes, int x0, int y0, int w, int h, const uint16_t* tlut,
-                         bool tlut_valid, uint8_t palette, std::vector<uint8_t>& out) {
+                         bool tlut_valid, uint8_t palette, const int32_t* convert_k,
+                         std::vector<uint8_t>& out) {
     out.assign(static_cast<size_t>(w) * h * 4, 0);
 
     if (row_bytes <= 0) {
@@ -586,6 +738,30 @@ void decode_texture_rect(const uint8_t* rdram, uint32_t timg_address, uint8_t fm
             const int tx = x0 + x;
             const int ty = y0 + y;
             uint8_t rgba[4] = {0, 0, 0, 255};
+
+            // YUV16 is the one format whose source is not one texel per
+            // `bpp` bytes: two texels share a 32-bit word, and the RDP's
+            // LOADTILE de-interleaves the pair into TMEM's two halves (see
+            // `yuv16_to_rgba8` and RT64's `loadYUVTileToTMEM`). Handle it
+            // before the byte addressing below.
+            if (fmt == gbi::IM_FMT_YUV && siz == gbi::IM_SIZ_16b) {
+                const uint32_t word_addr = timg_address +
+                                           static_cast<uint32_t>(ty * row_bytes + (tx >> 1) * 4);
+                // Guest word bytes are [U, Y(even), V, Y(odd)]; the runtime
+                // stores each 32-bit word byte-reversed, so `n64b` at those
+                // guest offsets is the only correct read.
+                const uint8_t yv = (tx & 1) ? n64b(rdram, static_cast<int>(word_addr) + 3)
+                                            : n64b(rdram, static_cast<int>(word_addr) + 1);
+                const uint8_t uv = n64b(rdram, static_cast<int>(word_addr) + 0);
+                const uint8_t vv = n64b(rdram, static_cast<int>(word_addr) + 2);
+                yuv16_to_rgba8(yv, uv, vv, convert_k, rgba);
+                const size_t yo = (static_cast<size_t>(y) * w + x) * 4;
+                out[yo + 0] = rgba[0];
+                out[yo + 1] = rgba[1];
+                out[yo + 2] = rgba[2];
+                out[yo + 3] = rgba[3];
+                continue;
+            }
 
             if (siz == gbi::IM_SIZ_4b) {
                 // Two texels per byte; byte index = (ty*row_bytes + tx/2).
@@ -1506,6 +1682,10 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         st.othermode_l = 0;
         st.othermode_h = 0;
         st.combiner.decode(0, 0);
+        // Which GBI owns this display list. Hashing the ucode text is what
+        // decides whether 0xDA/0xDC are G_MTX/G_MOVEMEM (F3DEX2) or the njpeg
+        // macroblock draw and its matrix (S2DEX2).
+        st.gbi = identify_gbi(rdram_, task);
 
         // The DL executes on the gfx pthread and only records draw commands;
         // the browser main thread issues the GL in ogre_gfx_flush(). Crucially
@@ -1678,6 +1858,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     unsigned draw_mtx_logged_ = 0;
     unsigned rect_logged_ = 0;
     unsigned blit_logged_ = 0;
+    unsigned s2d_logged_ = 0;
     unsigned flushed_cmds_ = 0;
     unsigned flush_count_ = 0;
     unsigned last_dl_cmds_ = 0;   // commands walked by the last execute_dl
@@ -1983,9 +2164,46 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             }
         }
 
+        // In an S2DEX2 list 0xDC is G_OBJ_MOVEMEM and 0xDA is
+        // G_OBJ_RECTANGLE_R; 0x01/0x02 are G_OBJ_RECTANGLE/G_OBJ_SPRITE. They
+        // must be decoded before the F3DEX2 switch, where the same opcodes mean
+        // G_MOVEMEM, G_MTX and G_VTX.
+        if (st.gbi == GbiKind::S2DEX2) {
+            switch (op) {
+                case S2D_OBJ_MOVEMEM:
+                    set_obj_matrix(ctx, resolve_address(ctx->segments, w1), w0 & 0xFFFFu);
+                    return;
+                case S2D_OBJ_RECTANGLE_R:
+                    draw_obj_rect(ctx, resolve_address(ctx->segments, w1), false);
+                    return;
+                case S2D_OBJ_RECTANGLE:
+                    draw_obj_rect(ctx, resolve_address(ctx->segments, w1), false);
+                    return;
+                case S2D_OBJ_SPRITE:
+                    draw_obj_rect(ctx, resolve_address(ctx->segments, w1), true);
+                    return;
+                case S2D_RDPHALF_0: {
+                    // RT64 pairs this with the next G_RDPHALF_1 and calls the
+                    // RDP texrect path. Ogre Battle 64's njpeg lists use only
+                    // the object commands, so this is reported rather than
+                    // decoded, and only once.
+                    static bool logged = false;
+                    if (!logged) {
+                        logged = true;
+                        OGRE_MILESTONE("GFX-S2D",
+                                       "S2DEX2 G_RDPHALF_0 (0x%02X) texrect encoding seen at "
+                                       "0x%05X and not implemented; only the object commands draw",
+                                       (unsigned)S2D_RDPHALF_0, c.offset);
+                    }
+                    return;
+                }
+                default:
+                    break;
+            }
+        }
+
         switch (op) {
-            case gbi::OP_MTX: {
-                // F3DEX2 stores the PUSH bit *inverted*: the SDK macro XORs
+            case gbi::OP_MTX: {                // F3DEX2 stores the PUSH bit *inverted*: the SDK macro XORs
                 // G_MTX_PUSH into the flags, so a stored 0x00 is
                 // MODELVIEW|MUL|PUSH and a stored 0x01 is MODELVIEW|MUL|NOPUSH.
                 // RT64 does the same (`(*dl)->p0(0, 8) ^ pushMask` in
@@ -2354,6 +2572,20 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 break;
             }
 
+            case gbi::OP_SETCONVERT: {
+                // G_SETCONVERT's six 9-bit fields, three in w0 and three in w1
+                // (RT64 GBI_RDP::setConvert). The sign extension and the
+                // `2*K+1` scaling happen where the matrix is used
+                // (`yuv16_to_rgba8`).
+                st.convert_k[0] = static_cast<int32_t>(p0(w0, 13, 9));
+                st.convert_k[1] = static_cast<int32_t>(p0(w0, 4, 9));
+                st.convert_k[2] = static_cast<int32_t>((p0(w0, 0, 4) << 5) | p0(w1, 27, 5));
+                st.convert_k[3] = static_cast<int32_t>(p0(w1, 18, 9));
+                st.convert_k[4] = static_cast<int32_t>(p0(w1, 9, 9));
+                st.convert_k[5] = static_cast<int32_t>(p0(w1, 0, 9));
+                break;
+            }
+
             case gbi::OP_MOVEMEM: {
                 // F3DEX2 G_MOVEMEM: the index is the low byte of w0 (RT64
                 // GBI_F3DEX2::moveMem), w1 is the address of the payload.
@@ -2387,7 +2619,6 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             case gbi::OP_RDPFULLSYNC:
             case gbi::OP_SETKEYGB:
             case gbi::OP_SETKEYR:
-            case gbi::OP_SETCONVERT:
             case gbi::OP_SETPRIMDEPTH:
             case gbi::OP_DL:
             case gbi::OP_ENDDL:
@@ -2565,7 +2796,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
         std::vector<uint8_t> pixels;
         decode_texture_rect(rdram_, t.image_address, t.fmt, t.siz, row_bytes, x0, y0, w, h,
-                            st.tlut, st.tlut_valid, t.palette, pixels);
+                            st.tlut, st.tlut_valid, t.palette, st.convert_k, pixels);
         g_load_done.fetch_add(1, std::memory_order_relaxed);
 
         // Debug copy for ogre_gfx_debug_tex (probes inspect what was sampled).
@@ -2963,8 +3194,204 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         st.combiner = saved_comb;
     }
 
-    void draw_texrect(ExecCtx* ctx) {
-        if (ctx->order.size() < 200) ctx->order += 'T';
+    // ----- S2DEX2 2D object commands ------------------------------------------
+    //
+    // Ogre Battle 64 draws its njpeg backgrounds entirely with these: per
+    // macroblock the list loads a 16x16 YUV16 block into TMEM and then issues
+    // `G_OBJ_MOVEMEM` (the sub matrix) + `G_OBJ_RECTANGLE_R` (the draw). See
+    // docs/HANDOFF-2026-09-15-session51.md §2 for the recipe and §5-§6 for the
+    // geometry and the YUV16 model. RT64's `GBI_S2DEX::drawObjRectangle` is the
+    // reference these two functions mirror.
+
+    // The 24-byte uObjSprite, decoded field by field. The struct is big-endian
+    // guest data in word-reversed RDRAM, so a struct cast would swap every
+    // 16-bit pair (RT64 `decodeObjSprite`).
+    struct ObjSprite {
+        int32_t objX = 0, objY = 0;      // s10.2
+        uint16_t scaleW = 0, scaleH = 0; // u5.10
+        uint16_t imageW = 0, imageH = 0; // u10.5
+        uint16_t imageStride = 0;        // texture line, in 64-bit words
+        uint16_t imageAdrs = 0;          // TMEM address, in 64-bit words
+        uint8_t imageFmt = 0, imageSiz = 0, imagePal = 0, imageFlags = 0;
+    };
+
+    static ObjSprite decode_obj_sprite(const uint8_t* rdram, uint32_t addr) {
+        const uint8_t* p = rdram + (addr & 0x1FFFFFFFu);
+        const uint32_t w0 = rd32(p + 0);
+        const uint32_t w1 = rd32(p + 4);
+        const uint32_t w2 = rd32(p + 8);
+        const uint32_t w3 = rd32(p + 12);
+        const uint32_t w4 = rd32(p + 16);
+        const uint32_t w5 = rd32(p + 20);
+        ObjSprite s;
+        s.objX = static_cast<int16_t>(w0 >> 16);
+        s.scaleW = static_cast<uint16_t>(w0);
+        s.imageW = static_cast<uint16_t>(w1 >> 16);
+        s.objY = static_cast<int16_t>(w2 >> 16);
+        s.scaleH = static_cast<uint16_t>(w2);
+        s.imageH = static_cast<uint16_t>(w3 >> 16);
+        s.imageStride = static_cast<uint16_t>(w4 >> 16);
+        s.imageAdrs = static_cast<uint16_t>(w4);
+        s.imageFmt = static_cast<uint8_t>(w5 >> 24);
+        s.imageSiz = static_cast<uint8_t>(w5 >> 16);
+        s.imagePal = static_cast<uint8_t>(w5 >> 8);
+        s.imageFlags = static_cast<uint8_t>(w5);
+        return s;
+    }
+
+    // G_OBJ_MOVEMEM: `index` (the low 16 bits of the command word) selects the
+    // object matrix (0, 24 bytes) or the object sub matrix (2, 8 bytes).
+    void set_obj_matrix(ExecCtx* ctx, uint32_t addr, uint32_t index) {
+        RenderState& st = *ctx->st;
+        const uint8_t* p = rdram_ + (addr & 0x1FFFFFFFu);
+        if (index == 0) {
+            st.obj_mtx.a = static_cast<int32_t>(rd32(p + 0));
+            st.obj_mtx.b = static_cast<int32_t>(rd32(p + 4));
+            st.obj_mtx.c = static_cast<int32_t>(rd32(p + 8));
+            st.obj_mtx.d = static_cast<int32_t>(rd32(p + 12));
+            const uint32_t w4 = rd32(p + 16);
+            const uint32_t w5 = rd32(p + 20);
+            st.obj_mtx.x = static_cast<int16_t>(w4 >> 16);
+            st.obj_mtx.y = static_cast<int16_t>(w4);
+            st.obj_mtx.base_scale_x = static_cast<uint16_t>(w5 >> 16);
+            st.obj_mtx.base_scale_y = static_cast<uint16_t>(w5);
+            st.obj_mtx.sub_mtx = false;
+        } else if (index == 2) {
+            const uint32_t w0 = rd32(p + 0);
+            const uint32_t w1 = rd32(p + 4);
+            st.obj_mtx.a = 0x10000;
+            st.obj_mtx.b = 0;
+            st.obj_mtx.c = 0;
+            st.obj_mtx.d = 0x10000;
+            st.obj_mtx.x = static_cast<int16_t>(w0 >> 16);
+            st.obj_mtx.y = static_cast<int16_t>(w0);
+            st.obj_mtx.base_scale_x = static_cast<uint16_t>(w1 >> 16);
+            st.obj_mtx.base_scale_y = static_cast<uint16_t>(w1);
+            st.obj_mtx.sub_mtx = true;
+        }
+    }
+
+    // G_OBJ_RECTANGLE_R / G_OBJ_RECTANGLE (full_matrix = false) and
+    // G_OBJ_SPRITE (full_matrix = true): one axis-aligned texture rectangle.
+    void draw_obj_rect(ExecCtx* ctx, uint32_t sprite_addr, bool full_matrix) {
+        RenderState& st = *ctx->st;
+        const ObjSprite s = decode_obj_sprite(rdram_, sprite_addr);
+        const RenderState::ObjMtx& m = st.obj_mtx;
+
+        const float imageW = s.imageW / 32.0f;   // u10.5 -> texels
+        const float imageH = s.imageH / 32.0f;
+        const float scaleW = static_cast<float>(std::max<uint16_t>(s.scaleW, 1)) / 1024.0f;
+        const float scaleH = static_cast<float>(std::max<uint16_t>(s.scaleH, 1)) / 1024.0f;
+        const float objX = s.objX / 4.0f;        // s10.2 -> pixels
+        const float objY = s.objY / 4.0f;
+        const float objW = imageW / scaleW + objX;
+        const float objH = imageH / scaleH + objY;
+
+        const float mtxX = m.x / 4.0f;
+        const float mtxY = m.y / 4.0f;
+        const float bsX = static_cast<float>(std::max<uint16_t>(m.base_scale_x, 1)) / 1024.0f;
+        const float bsY = static_cast<float>(std::max<uint16_t>(m.base_scale_y, 1)) / 1024.0f;
+
+        float x0, y0, x1, y1;
+        if (full_matrix && !m.sub_mtx) {
+            const float a = m.a / 65536.0f, b = m.b / 65536.0f;
+            const float c = m.c / 65536.0f, d = m.d / 65536.0f;
+            x0 = a * objX + b * objY + mtxX;
+            y0 = c * objX + d * objY + mtxY;
+            x1 = a * objW + b * objH + mtxX;
+            y1 = c * objW + d * objH + mtxY;
+        } else {
+            x0 = mtxX + objX / bsX;
+            y0 = mtxY + objY / bsY;
+            x1 = mtxX + objW / bsX;
+            y1 = mtxY + objH / bsY;
+        }
+
+        // The render tile comes from the sprite: the microcode programs it with
+        // the object's own texture description (RT64 `drawObjRectangle`).
+        const int tile = 0;
+        TileState& t = st.tiles[tile];
+        t.fmt = s.imageFmt;
+        t.siz = s.imageSiz;
+        t.line = s.imageStride;
+        t.tmem = s.imageAdrs;
+        t.palette = s.imagePal;
+        t.cms = 0;                     // G_TX_WRAP | G_TX_NOMIRROR
+        t.cmt = 0;
+        t.masks = 0;                   // G_TX_NOMASK
+        t.maskt = 0;
+        t.shifts = 0;                  // G_TX_NOLOD
+        t.shiftt = 0;
+        t.uls = 0;
+        t.ult = 0;
+        // imageW/imageH are u10.5 and the RDP tile size is 1/4-texel with an
+        // inclusive lrs/lrt, so 16 texels is `16*4 - 4 = 60`.
+        t.lrs = static_cast<uint16_t>(std::max<int32_t>((static_cast<int32_t>(s.imageW) >> 3) - 4, 0));
+        t.lrt = static_cast<uint16_t>(std::max<int32_t>((static_cast<int32_t>(s.imageH) >> 3) - 4, 0));
+        // The image this rectangle samples is the block the preceding LOADTILE
+        // put in TMEM (the list re-SETTIMGs and re-loads before every macroblock).
+        if (st.pending_load.valid) {
+            set_tile_image(st, tile, st.pending_load.address, st.pending_load.stride);
+            st.pending_load.valid = false;
+        }
+
+        const int saved_tile = st.active_tile;
+        st.active_tile = tile;
+        ensure_tile_image(ctx, st, tile, 0);
+        ensure_tile_image(ctx, st, tile + 1, 1);
+        if (!texture_available(st)) {
+            st.active_tile = saved_tile;
+            return;
+        }
+
+        // The rectangle covers the tile's whole image, so the UVs run over the
+        // sprite's texel extent; the shader normalises with the decoded image's
+        // size and origin.
+        const bool flipS = (s.imageFlags & 0x01) != 0;   // G_BG_FLAG_FLIPS
+        const bool flipT = (s.imageFlags & 0x10) != 0;   // G_BG_FLAG_FLIPT
+        const float us0 = flipS ? imageW : 0.0f;
+        const float us1 = flipS ? 0.0f : imageW;
+        const float vt0 = flipT ? imageH : 0.0f;
+        const float vt1 = flipT ? 0.0f : imageH;
+
+        const float nx0 = ndc_xf(x0), nx1 = ndc_xf(x1);
+        const float ny0 = ndc_yf(y0), ny1 = ndc_yf(y1);
+        const float px[4] = {nx0, nx1, nx0, nx1};
+        const float py[4] = {ny0, ny0, ny1, ny1};
+        const float uv[4][2] = {{us0, vt0}, {us1, vt0}, {us0, vt1}, {us1, vt1}};
+
+        float data[6 * 8];
+        const int idx[6] = {0, 1, 3, 0, 3, 2};
+        for (int i = 0; i < 6; ++i) {
+            const int c = idx[i];
+            data[i * 8 + 0] = px[c];
+            data[i * 8 + 1] = py[c];
+            data[i * 8 + 2] = uv[c][0];
+            data[i * 8 + 3] = uv[c][1];
+            data[i * 8 + 4] = 1;
+            data[i * 8 + 5] = 1;
+            data[i * 8 + 6] = 1;
+            data[i * 8 + 7] = 1;
+        }
+
+        DrawCmd cmd;
+        cmd.kind = 2;
+        record_state(cmd, st, texture_available(st));
+        if (s2d_logged_ < 3) {
+            ++s2d_logged_;
+            OGRE_MILESTONE("GFX-S2D",
+                           "obj rect fmt=%u siz=%u img=%.0fx%.0f stride=%u adrs=%u mtx=(%.1f,%.1f,%.4f,%.4f) "
+                           "rect=(%.1f,%.1f)-(%.1f,%.1f) textured=%d key=0x%llX texaddr=0x%08X",
+                           (unsigned)s.imageFmt, (unsigned)s.imageSiz, imageW, imageH,
+                           (unsigned)s.imageStride, (unsigned)s.imageAdrs, mtxX, mtxY, bsX, bsY,
+                           x0, y0, x1, y1, cmd.textured ? 1 : 0,
+                           (unsigned long long)cmd.tex_key, t.image_address);
+        }
+        queue_triangles(ctx, cmd, data, 6);
+        st.active_tile = saved_tile;
+    }
+
+    void draw_texrect(ExecCtx* ctx) {        if (ctx->order.size() < 200) ctx->order += 'T';
         RenderState& st = *ctx->st;
         // A rectangle samples the tile it names, not G_TEXTURE's (RT64
         // RDP::drawTexRect takes the tile as a parameter). Scope the override

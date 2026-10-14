@@ -17,6 +17,41 @@
 (function () {
   "use strict";
 
+  // --- Debug knobs from the query string (OGRE_*) ------------------------------
+  //
+  // The native build reads its debug knobs from the environment: `OGRE_SCENE`,
+  // `OGRE_STEP`, `OGRE_TRACE_DL`, `OGRE_S2D_TRACE`, `OGRE_DUMP_RDRAM`, ...
+  // (docs/guides/app-build.md). Emscripten's `getenv` reads a module-scope `ENV`
+  // object that the glue creates as a page global, so an `OGRE_*` query
+  // parameter can be published there and every shared knob works in the browser
+  // unchanged.
+  //
+  // This must run before the wasm runtime initialises its environment. The glue
+  // is loaded by `document.write` in index.html, so it has executed by the time
+  // this file runs, but its `createWasm()` only *starts* the fetch here; the
+  // C runtime (and the `environ_get` that captures ENV) runs in a later task.
+  (function publishOgreEnv() {
+    if (typeof ENV === "undefined" || ENV === null) {
+      return;
+    }
+    var query = window.location.search.replace(/^\?/, "");
+    if (!query) {
+      return;
+    }
+    query.split("&").forEach(function (pair) {
+      if (!pair) {
+        return;
+      }
+      var eq = pair.indexOf("=");
+      var key = decodeURIComponent(eq < 0 ? pair : pair.slice(0, eq));
+      var value = eq < 0 ? "1" : decodeURIComponent(pair.slice(eq + 1));
+      // Only this port's own knobs, so a query string cannot rewrite PATH/HOME.
+      if (/^OGRE_[A-Z0-9_]*$/.test(key)) {
+        ENV[key] = value;
+      }
+    });
+  })();
+
   var status = document.getElementById("status");
   var input = document.getElementById("rom-input");
   var lastMilestoneLen = 0;
@@ -48,6 +83,13 @@
       return false;
     }
     return true;
+  }
+
+  // The raw value of a query parameter, or null when it is absent. Used for the
+  // knobs that are not switches (`OGRE_TAP_MS`, `OGRE_TAP_BUTTON`).
+  function urlParam(name) {
+    var m = new RegExp("(^|[?&])" + name + "=([^&]*)(&|$)").exec(window.location.search);
+    return m ? decodeURIComponent(m[2]) : null;
   }
   var audioEnabled = urlFlag("audio") === true;
 
@@ -152,6 +194,50 @@
   };
 
   var pressedKeys = new Set();
+
+  // --- Scripted controller 0 (OGRE_TAP_MS / OGRE_TAP_BUTTON) -------------------
+  //
+  // The native build drives a run with a synthetic pad: `OGRE_TAP_MS=<n>` makes
+  // controller 0 press one button from `OGRE_TAP_BUTTON`'s schedule for 150 ms
+  // out of every n ms (docs/guides/app-build.md). The browser had no equivalent,
+  // so reaching a scene needed a throwaway Playwright script per session
+  // (session 109). This is the same knob, in the JS input path that already
+  // owns controller 0.
+  //
+  // The button vocabulary and the press length match the native side. The slot
+  // index advances with wall time, as it does natively.
+  var TAP_NAMES = {
+    start: BTN.START, a: BTN.A, b: BTN.B, z: BTN.Z, l: BTN.L, r: BTN.R,
+    up: BTN.UP, down: BTN.DOWN, left: BTN.LEFT, right: BTN.RIGHT,
+    c_up: BTN.C_UP, c_down: BTN.C_DOWN, c_left: BTN.C_LEFT, c_right: BTN.C_RIGHT,
+    none: 0
+  };
+  var TAP_PRESS_MS = 150;
+  var tapMask = 0;
+  (function initTapSchedule() {
+    var ms = parseInt(urlParam("OGRE_TAP_MS"), 10);
+    if (!isFinite(ms) || ms <= 0) {
+      return;
+    }
+    var names = (urlParam("OGRE_TAP_BUTTON") || "start").split(",").map(function (s) {
+      return s.trim().toLowerCase();
+    });
+    var slot = 0;
+    log("[web:input] OGRE_TAP_MS=" + ms + " OGRE_TAP_BUTTON=" + names.join(","));
+    window.setInterval(function () {
+      var name = names[slot % names.length];
+      slot++;
+      var mask = TAP_NAMES[name];
+      if (mask === undefined) {
+        log("[web:input] OGRE_TAP_BUTTON: unrecognised button '" + name + "'; using start");
+        mask = BTN.START;
+      }
+      tapMask = mask;
+      window.setTimeout(function () {
+        tapMask = 0;
+      }, TAP_PRESS_MS);
+    }, ms);
+  })();
 
   function pushInput(controller, buttons, x, y, connected) {
     if (!moduleReady() || typeof Module._ogre_input_set !== "function") {
@@ -265,7 +351,7 @@
   }
 
   function rafLoop(now) {
-    pushInput(0, keyboardButtons(), 0, 0, 1);
+    pushInput(0, keyboardButtons() | tapMask, 0, 0, 1);
     updateGamepads(now);
     requestAnimationFrame(rafLoop);
   }

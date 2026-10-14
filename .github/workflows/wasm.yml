@@ -1,0 +1,98 @@
+# Build the browser (WebAssembly/Emscripten) target on every push and pull
+# request.
+#
+# Why this exists: the wasm target is a separate build directory that no other
+# job touches, and it has twice been left unbuildable for days by a change that
+# only affects it — a native-only include in a source file both builds compile
+# (session 109's `bank_overlays.cpp`, session 138's `ram_key.cpp`). Nothing else
+# in this repository catches that class, and the browser renderer work depends on
+# the target staying buildable.
+#
+# The job needs the recompiler's output (RecompiledFuncs/, Bank*Funcs/,
+# RspFuncs/, app/src/bank_funcs.inc), which is generated from a ROM and is
+# deliberately not in this repository. It comes from the same private data
+# bundle the release workflow uses: set the repository variable OGRE_DATA_REPO
+# and the secret OGRE_DATA_TOKEN (a fine-grained token with Contents: Read on
+# that repository). Without OGRE_DATA_REPO the job is skipped rather than
+# failed, so a fork and a fresh clone do not show a red check for a missing
+# secret.
+#
+# It builds only; it does not run the game. A browser run needs a ROM and a
+# headless Chromium (debug/probes/, docs/guides/web-probes.md), which the
+# release runners do not have.
+name: WebAssembly
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wasm:
+    name: Build the browser target
+    if: vars.OGRE_DATA_REPO != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Fetch the generated game code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.OGRE_DATA_REPO }}
+          token: ${{ secrets.OGRE_DATA_TOKEN }}
+          path: ogre-data
+
+      - name: Unpack the generated game code
+        shell: bash
+        run: |
+          set -e
+          tar xzf ogre-data/files.tar.gz -C .
+          find . -name '._*' -delete
+          find . -name '.DS_Store' -delete
+          for p in RecompiledFuncs app/src/bank_funcs.inc RspFuncs; do
+            test -e "$p" || { echo "::error::$p is missing from files.tar.gz"; exit 1; }
+          done
+          banks=$( (ls -d Bank*Funcs 2>/dev/null || true) | wc -l | tr -d ' ')
+          [ "$banks" -gt 0 ] || { echo "::error::Bank*Funcs/ is missing from files.tar.gz"; exit 1; }
+          echo "Bank units: $banks"
+
+      # tools/N64ModernRuntime is gitignored, so a hosted runner has none.
+      # Same pinned commit and patches as the release workflow.
+      - name: Prepare third-party trees
+        shell: bash
+        run: |
+          set -e
+          N64MODERNRUNTIME_COMMIT=589bbf018a3e6d3646ddf7de1e7919f1b7e99bb1
+          if [ ! -d tools/N64ModernRuntime ]; then
+            git clone https://github.com/N64Recomp/N64ModernRuntime.git tools/N64ModernRuntime
+            git -C tools/N64ModernRuntime checkout "$N64MODERNRUNTIME_COMMIT"
+            git -C tools/N64ModernRuntime submodule update --init --recursive
+            ( cd tools/N64ModernRuntime && git apply ../../patches/n64modernruntime-ob64.patch )
+            ( cd tools/N64ModernRuntime/N64Recomp && git apply ../../../patches/n64modernruntime-n64recomp.patch )
+          fi
+
+      # The browser build does not compile RT64 (app/CMakeLists.txt forces
+      # OGRE_USE_RT64 off under Emscripten), so no GPU or SDL2 package is needed.
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+
+      - name: Configure and build
+        shell: bash
+        run: make web
+
+      - name: Report the artifacts
+        shell: bash
+        run: |
+          set -e
+          for f in build-wasm/ogrebattle64.wasm build-wasm/ogrebattle64.js; do
+            test -f "$f" || { echo "::error::$f was not produced"; exit 1; }
+            ls -lh "$f"
+          done

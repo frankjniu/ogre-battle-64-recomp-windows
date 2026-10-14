@@ -600,6 +600,25 @@ app:
 	@test -f $(APP_BUILD_DIR)/CMakeCache.txt || cmake -S app -B $(APP_BUILD_DIR) $(CMAKE_ARGS) -DCMAKE_BUILD_TYPE=Release $(APP_CMAKE_SDL)
 	@cmake --build $(APP_BUILD_DIR) --target ogrebattle64 --config Release -j
 
+# --- Web (Emscripten) build ---------------------------------------------------
+#
+# The browser port is a separate build directory that nothing else in this file
+# touches, which is how its build stayed broken for eleven days in September
+# (session 109) and again by October (session 138): a native-only include in a
+# file both builds compile fails only here. Run this before finishing a change
+# that touches a source in app/CMakeLists.txt's EMSCRIPTEN list.
+#
+# `emcmake` comes from the Emscripten SDK (`brew install emscripten`). The
+# sysroot cache is kept in one directory outside the repo so a rebuild does not
+# re-download it; override it with EM_CACHE=<dir>.
+EM_CACHE ?= $(HOME)/.cache/emscripten-ogre
+
+.PHONY: web
+web:
+	@EM_CACHE=$(EM_CACHE) emcmake cmake -S app -B build-wasm -DCMAKE_BUILD_TYPE=Release
+	@EM_CACHE=$(EM_CACHE) cmake --build build-wasm -j
+	@echo "web: build-wasm/ogrebattle64.wasm is ready; serve it with python3 debug/server.py"
+
 # The package must carry the example mods the README lists. `make dist` cannot
 # build them itself: `make example-mods` needs the linked ELF and a MIPS cross
 # compiler or Docker, and the hosted release runner has neither. The mods arrive

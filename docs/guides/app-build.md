@@ -139,14 +139,40 @@ timestamps before interpreting a run.
 |---|---|---|
 | Native + RT64 (default) | `cmake -S app -B build-app -DCMAKE_BUILD_TYPE=Release` | RT64 (Vulkan/Metal/D3D12) |
 | Native + null renderer | `cmake -S app -B build-null -DCMAKE_BUILD_TYPE=Release -DOGRE_USE_RT64=OFF` | `null_renderer.cpp` (no GPU, no RT64) |
-| WebAssembly (Emscripten) | `emcmake cmake -S app -B build-wasm -DCMAKE_BUILD_TYPE=Release` | `web_renderer.cpp` (WebGL2 prototype; `OGRE_USE_RT64` is forced off) |
+| WebAssembly (Emscripten) | `make web` (`emcmake cmake -S app -B build-wasm -DCMAKE_BUILD_TYPE=Release`, then `cmake --build build-wasm -j`) | `web_renderer.cpp` (WebGL2 prototype; `OGRE_USE_RT64` is forced off) |
 
 The null-renderer variant is useful for bring-up/CI on machines without a
 working GPU driver; the Emscripten variant is the browser port
-(`docs/WEB-PORT.md`) — it needs the Emscripten SDK (`brew install emscripten`),
-is built with `cmake --build build-wasm -j`, and is served per
-`docs/WEB-PORT-DEPLOYMENT.md` (cross-origin isolation headers required for
-pthreads).
+(`docs/WEB-PORT.md`) — it needs the Emscripten SDK (`brew install emscripten`)
+and is served per `docs/WEB-PORT-DEPLOYMENT.md` (cross-origin isolation headers
+required for pthreads). CI builds it in `.github/workflows/wasm.yml`.
+
+`make web` exists because the browser target is a separate build directory that
+nothing else touches: a source file both builds compile that includes a
+native-only header (`sdl_platform.hpp`) fails only here, and that has left the
+target unbuildable for days twice (sessions 109 and 138). Run `make web` before
+finishing a change to any file in `app/CMakeLists.txt`'s Emscripten source list.
+`EM_CACHE` holds the Emscripten sysroot (`~/.cache/emscripten-ogre` by default)
+so a rebuild does not re-download it.
+
+### The browser build reads the same environment knobs
+
+The browser build takes the native environment knobs from the page's query
+string: `app/web/web.js` copies every `OGRE_*` parameter into the `ENV` object
+Emscripten's `getenv` reads, before the wasm runtime initialises its
+environment. So `OGRE_SCENE`, `OGRE_STEP`, `OGRE_TRACE_DL`, `OGRE_S2D_TRACE`,
+`OGRE_DUMP_RDRAM` and the rest work unchanged, and one URL reaches a scene:
+
+```
+http://127.0.0.1:8931/app/web/index.html?OGRE_SCENE_LOG=1&OGRE_TAP_MS=1500&OGRE_TAP_BUTTON=start,a,start,a,start,a,a,a,a,a,a,a,a
+```
+
+`OGRE_TAP_MS`/`OGRE_TAP_BUTTON` are implemented in `web.js` for controller 0,
+with the native button vocabulary and the native 150 ms press. Only those two
+are JS-side; they drive the same `ogre_input_set` the keyboard does.
+`debug/probes/atmark.cjs` waits for a regular expression in the page log and
+captures a canvas series around it, which is how a scene that lasts about a
+second is photographed (`--wait 'GFX-S2D'`, for example).
 
 ## Running
 

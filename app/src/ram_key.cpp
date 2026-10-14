@@ -5,7 +5,13 @@
 #include <cstring>
 #include <string>
 
+#if !defined(__EMSCRIPTEN__)
+// The digit-key press that takes a dump is read through the native console's
+// SDL keyboard state. `sdl_platform.cpp` is not in the Emscripten source list,
+// so the include and the key read are native-only. The browser build keeps the
+// timed dump (`OGRE_RAM_KEY_AT_MS`), which needs no key.
 #include "sdl_platform.hpp"
+#endif
 
 #include "ultramodern/ultramodern.hpp"
 
@@ -84,6 +90,7 @@ void ram_key_tick(uint8_t* rdram) {
     // black-part investigation compares one cell before and after an animation
     // step, which is two presses in one run (session 131).
     static bool was_down = false;
+#if !defined(__EMSCRIPTEN__)
     if (key != 0) {
         const bool down = console::key_down(key);
         if (down && !was_down) {
@@ -91,6 +98,9 @@ void ram_key_tick(uint8_t* rdram) {
         }
         was_down = down;
     }
+#else
+    (void)was_down;
+#endif
     if (!take) {
         return;
     }
