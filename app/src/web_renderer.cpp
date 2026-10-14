@@ -163,6 +163,7 @@ struct RawVertex {
 
 struct LoadedImage {
     uint64_t key = 0;                 // GL texture-cache key; 0 = nothing loaded
+    uint64_t palette = 0;             // palette generation a CI decode used
     int width = 0, height = 0;        // loaded rect size in texels
     int origin_s = 0, origin_t = 0;   // tile uls/ult in texels (UV origin)
 };
@@ -187,6 +188,12 @@ struct TileState {
     bool image_source_valid = false;
     LoadedImage image;                // decoded image (filled lazily at draw time)
     bool image_valid = false;         // `image` matches the current rect/format
+    // Mean of the last decoded image, filled only under OGRE_TEX_TRACE. It is
+    // the number `OGRE_TEX_TRACE_COLOUR` prints on the native renderer, so a
+    // browser frame and an RT64 frame of the same screen can be compared line
+    // by line.
+    float trace_mean = 0.0f;
+    unsigned trace_opaque = 0;
 };
 
 // RDP cycle types (OTHERMODE_H bits 20-21).
@@ -501,9 +508,6 @@ struct RenderState {
     // coordinate and smeared the sprites.
     float tex_scale_s = 1.0f, tex_scale_t = 1.0f;
     bool texture_on = false;      // G_TEXTURE "on" field
-    // Palette loaded by G_LOADTLUT (16-bit entries).
-    uint16_t tlut[256]{};
-    bool tlut_valid = false;
 
     // The tile load awaiting its render-tile configuration. G_LOADTILE /
     // G_LOADBLOCK always name tile 7 (G_TX_LOADTILE) whatever the game does; the
@@ -838,21 +842,34 @@ inline void yuv16_to_rgba8(uint8_t y, uint8_t u, uint8_t v, const int32_t* conve
 }
 
 // Decodes a rect [x0,x0+w) x [y0,y0+h) of the current texture image into
-// RGBA8. `tlut` is used for CI formats; `palette` selects the CI4 TLUT bank.
-// `row_bytes` is the source image's row stride in bytes. It is NOT derivable
-// from the rect: the RDP loads TMEM with one row stride and samples it with
-// another (OB64's mask is 16 bytes/row of 8-bit texels sampled as 32 4-bit
-// texels, and a LOADBLOCK's stride is its dxt). RT64 uses
-// `bytesPerRow = timg_width << siz >> 1` for the load and `line << 3` for the
-// tile; the caller picks.
+// RGBA8. `tlut` is used for CI formats when `palette_enabled` is set;
+// `palette` selects the CI4 TLUT bank. `row_bytes` is the source image's row
+// stride in bytes. It is NOT derivable from the rect: the RDP loads TMEM with
+// one row stride and samples it with another (OB64's mask is 16 bytes/row of
+// 8-bit texels sampled as 32 4-bit texels, and a LOADBLOCK's stride is its
+// dxt). RT64 uses `bytesPerRow = timg_width << siz >> 1` for the load and
+// `line << 3` for the tile; the caller picks.
+//
+// `palette_enabled` is the RDP's texture LUT mode (`OTHERMODE_H` bits 14-15,
+// RT64's `OtherMode::textLUT()`). A CI tile with LUT mode 0 does not read a
+// palette at all: RT64 reinterprets the loaded bytes as I8
+// (`rt64_framebuffer_manager.cpp`'s `(dstFmt == G_IM_FMT_CI) && (dstSiz ==
+// G_IM_SIZ_8b) && (tlutFormat == 0)` case, which runs `ANY8toI8` in
+// `FbReinterpretCS.hlsl`), i.e. the byte is an intensity replicated into RGB
+// and into alpha. Decoding such a tile as CI against an empty palette paints it
+// black, which is what the title screen's 72x28 and 72x20 unit sprites did.
 void decode_texture_rect(const uint8_t* rdram, uint32_t timg_address, uint8_t fmt, uint8_t siz,
                          int row_bytes, int x0, int y0, int w, int h, const uint16_t* tlut,
-                         bool tlut_valid, uint8_t palette, const int32_t* convert_k,
-                         std::vector<uint8_t>& out) {
+                         bool tlut_valid, uint8_t palette, bool palette_enabled,
+                         const int32_t* convert_k, std::vector<uint8_t>& out) {
     out.assign(static_cast<size_t>(w) * h * 4, 0);
 
     if (row_bytes <= 0) {
         return;
+    }
+    // The LUT mode selects how a CI tile's bytes are read (see the note above).
+    if (fmt == gbi::IM_FMT_CI && !palette_enabled) {
+        fmt = gbi::IM_FMT_I;
     }
     const int bpp = bytes_per_texel(siz);
     for (int y = 0; y < h; ++y) {
@@ -1419,6 +1436,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     WebGLRenderer() {
         setup_result = ultramodern::renderer::SetupResult::Success;
         chosen_api = ultramodern::renderer::GraphicsApi::Auto;
+        const char* tex_trace = getenv("OGRE_TEX_TRACE");
+        trace_ = tex_trace != nullptr && tex_trace[0] != '\0' && tex_trace[0] != '0';
         OGRE_MILESTONE("RENDERER", "webgl2 renderer pending canvas handoff");
     }
 
@@ -2636,6 +2655,12 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     unsigned mtx_logged_ = 0;
     unsigned draw_mtx_logged_ = 0;
     unsigned rect_logged_ = 0;
+    // OGRE_TEX_TRACE: one line per G_TEXRECT with the image it samples and the
+    // colour it decodes to. Bounded, like every other diagnostic here.
+    bool trace_ = false;
+    uint32_t trace_draws_ = 0;
+    uint32_t trace_tluts_ = 0;
+    static constexpr uint32_t kTraceMaxDraws = 1500;
     unsigned wide_logged_ = 0;
     unsigned wide_task_ = 0;   // task whose wide draws the log above covers
     unsigned blit_logged_ = 0;
@@ -2662,6 +2687,17 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     uint16_t last_cimg_width_ = 0;
     uint8_t last_cimg_siz_ = 0, last_cimg_fmt_ = 0;
     std::set<uint64_t> cimg_seen_;   // distinct G_SETCIMG configurations (gfx thread)
+    // The RDP's TMEM palette, which outlives a display list and a task exactly
+    // the way the colour image does. RT64 holds one `RDP::TMEM` for the whole
+    // run (`rt64_rdp.cpp` clears it in the constructor only, and `RDP::reset()`
+    // does not touch it), so a G_LOADTLUT in one display list is still in TMEM
+    // for a CI draw in a later one. The title screen proves the game relies on
+    // it: its CI8 sprites render with the palette loaded several scenes earlier,
+    // and the whole title scene issues no G_LOADTLUT at all.
+    uint16_t tlut_[256]{};
+    bool tlut_valid_ = false;
+    uint16_t tlut_count_ = 0;
+    uint64_t tlut_generation_ = 0;   // bumped by every G_LOADTLUT (image cache key)
     std::set<uint64_t> vi_size_keys_;   // distinct VI scanout sizes (gfx thread)
     // The last visible VI scanout size, w << 32 | h (see vi_size()).
     std::atomic<uint64_t> vi_scanout_{0};
@@ -3329,9 +3365,22 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                 const uint32_t bank = static_cast<uint32_t>(t.palette) * 16;
                 const uint32_t base = st.timg_address + ((p0(w0, 12, 12) >> 2) << st.timg_siz >> 1);
                 for (uint16_t i = 0; i < count && bank + i < 256; ++i) {
-                    st.tlut[bank + i] = n64be16(rdram_, base + i * 2);
+                    tlut_[bank + i] = n64be16(rdram_, base + i * 2);
                 }
-                st.tlut_valid = true;
+                tlut_valid_ = true;
+                tlut_count_ = count;
+                ++tlut_generation_;
+                if (trace_) {
+                    ++trace_tluts_;
+                    if (trace_tluts_ <= 8) {
+                        OGRE_MILESTONE("GFX-TEXTRACE",
+                                       "loadtlut t%u gen=%llu addr=0x%06X base=0x%06X count=%u "
+                                       "bank=%u first=%04X %04X %04X %04X",
+                                       (unsigned)tile, (unsigned long long)tlut_generation_, base,
+                                       st.timg_address, (unsigned)count, (unsigned)bank, tlut_[0],
+                                       tlut_[1], tlut_[2], tlut_[3]);
+                    }
+                }
                 (void)tile;
                 break;
             }
@@ -3640,8 +3689,17 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             t.image_valid = false;
             return;
         }
+        // A CI image's decoded colour depends on the palette and on the RDP's
+        // texture LUT mode as well as on the source bytes, and both outlive the
+        // display list. A G_LOADTLUT in between, or a display list that switches
+        // the LUT mode off, makes the same address decode to a different image,
+        // so the key carries the palette generation and the LUT mode.
+        const bool indexed = (t.fmt == gbi::IM_FMT_CI);
+        const bool palette_enabled = (st.othermode_h & 0xC000u) != 0;
+        const uint64_t palette_key = indexed ? (tlut_generation_ * 2 + (palette_enabled ? 1u : 0u))
+                                             : 0;
         const uint64_t key = make_image_key(t, tile, t.image_address, x0, y0, w, h, row_bytes);
-        if (t.image_valid && t.image.key == key) {
+        if (t.image_valid && t.image.key == key && t.image.palette == palette_key) {
             return;   // already decoded and queued for this draw
         }
 
@@ -3655,8 +3713,28 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
         std::vector<uint8_t> pixels;
         decode_texture_rect(rdram_, t.image_address, t.fmt, t.siz, row_bytes, x0, y0, w, h,
-                            st.tlut, st.tlut_valid, t.palette, st.convert_k, pixels);
+                            tlut_, tlut_valid_, t.palette, palette_enabled, st.convert_k,
+                            pixels);
         g_load_done.fetch_add(1, std::memory_order_relaxed);
+        // OGRE_TEX_TRACE: the colour the decoded image holds. The native
+        // renderer prints the same number from the RDRAM bytes through the
+        // palette (`OGRE_TEX_TRACE_COLOUR`), so two runs of one screen can be
+        // compared without a screenshot. `opaque` counts the texels whose alpha
+        // is high enough to survive RT64's RGBA16 coverage test, which is how a
+        // window of transparent texels is told apart from a black one.
+        if (trace_) {
+            uint64_t sum = 0;
+            unsigned opaque = 0;
+            const size_t count = pixels.size() / 4;
+            for (size_t i = 0; i < count; ++i) {
+                sum += pixels[i * 4 + 0] + pixels[i * 4 + 1] + pixels[i * 4 + 2];
+                if (pixels[i * 4 + 3] >= 128) {
+                    ++opaque;
+                }
+            }
+            t.trace_mean = count ? static_cast<float>(double(sum) / double(count) / 3.0) : 0.0f;
+            t.trace_opaque = opaque;
+        }
 
         // Debug copy for ogre_gfx_debug_tex (probes inspect what was sampled).
         {
@@ -3711,6 +3789,7 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         last_tex_maskt_ = t.maskt;
 
         t.image.key = key;
+        t.image.palette = palette_key;
         t.image.width = w;
         t.image.height = h;
         t.image.origin_s = x0;
@@ -4475,6 +4554,40 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
                            cmd.scissor_on ? 1 : 0, cmd.sx0, cmd.sy0, cmd.sx1, cmd.sy1,
                            (unsigned long long)cmd.tex_key, (unsigned long long)cmd.tex_key1,
                            s0, t0, dsdx, dtdy);
+        }
+        if (trace_ && trace_draws_ < kTraceMaxDraws) {
+            ++trace_draws_;
+            const TileState& tt = st.tiles[st.active_tile & (kMaxTiles - 1)];
+            const int px_w = (xh > xl) ? (xh - xl) : 0;
+            const int px_h = (yh > yl) ? (yh - yl) : 0;
+            // The texel window the rectangle walks, in whole texels, the same
+            // way the native trace computes it: s and t are in 1/32 texel and
+            // dsdx/dtdy change by 1/1024 texel per pixel.
+            const int s_end = s0 + (dsdx * px_w) / 32;
+            const int t_end = t0 + (dtdy * px_h) / 32;
+            const int s_a = s0 / 32, s_b = s_end / 32;
+            const int t_a = t0 / 32, t_b = t_end / 32;
+            OGRE_MILESTONE("GFX-TEXTRACE",
+                           "n=%u dl=%u rect=%d,%d..%d,%d px=%dx%d s=%d t=%d dsdx=%d dtdy=%d "
+                           "window=uls%u ult%u lrs%u lrt%u tile=%d line%u pal%u "
+                           "img=0x%06X fmt=%u siz=%u stride=%d tlut=%s ntlut=%u "
+                           "texels=%dx%d dec=%dx%d uv0=(%.3f,%.3f) uv3=(%.3f,%.3f) "
+                           "mean=%.1f opaque=%u oml=0x%06X lut=%u",
+                           trace_draws_, ctx->trace_task, xl, yl, xh, yh, px_w, px_h, s0, t0, dsdx, dtdy,
+                           (unsigned)tt.uls, (unsigned)tt.ult, (unsigned)tt.lrs, (unsigned)tt.lrt,
+                           st.active_tile, (unsigned)tt.line, (unsigned)tt.palette,
+                           tt.image_address, (unsigned)tt.fmt, (unsigned)tt.siz, tt.image_stride,
+                           tlut_valid_ ? "yes" : "no", tlut_count_,
+                           (s_b > s_a ? s_b - s_a : s_a - s_b) + 1,
+                           (t_b > t_a ? t_b - t_a : t_a - t_b) + 1,
+                           tt.image_valid ? tt.image.width : 0,
+                           tt.image_valid ? tt.image.height : 0, uv[0][0], uv[0][1], uv[3][0],
+                           uv[3][1], tt.trace_mean, tt.trace_opaque, st.othermode_l,
+                           (st.othermode_h >> 14) & 3u);
+            if (trace_draws_ == kTraceMaxDraws) {
+                OGRE_MILESTONE("GFX-TEXTRACE", "trace limit %u reached; %u G_LOADTLUT(s) seen",
+                               kTraceMaxDraws, trace_tluts_);
+            }
         }
         queue_triangles(ctx, cmd, data, 6);
         st.active_tile = saved_tile;

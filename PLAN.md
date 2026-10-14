@@ -54,7 +54,29 @@ recorded in
 renderer. `docs/WEB-PORT-DEPLOYMENT.md` describes the current package;
 `docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md` describe the 2026-08-29
 feasibility work and not the current state. The current state is this file and
-`docs/HANDOFF-2026-10-14-session143.md`.
+`docs/HANDOFF-2026-10-14-session144.md`.
+
+Session 144 closed session 143's second open gap, "CI8 tiles decode black in
+display lists that load no palette". A CI tile whose RDP texture LUT mode
+(`OTHERMODE_H` bits 14-15, RT64's `OtherMode::textLUT()`) is 0 does not read a
+palette at all: RT64 reinterprets the loaded bytes as I8
+(`rt64_framebuffer_manager.cpp`'s `(dstFmt == G_IM_FMT_CI) && (dstSiz ==
+G_IM_SIZ_8b) && (tlutFormat == 0)` case, which runs `ANY8toI8` in
+`FbReinterpretCS.hlsl`), so the byte is an intensity replicated into RGB and into
+alpha. The browser decoded every such tile as CI against an empty palette, which
+is opaque black. The title screen's prologue draws its two unit sprites
+(`72x28` and `72x20`, `img=0x1C13F8 fmt=2 siz=1 line=9`, `oml=0x504240`, `lut=0`)
+through that path, and they were the black rectangle over the scene; they now
+render as the dark silhouette RT64 draws
+(`docs/proofs/web-title-lut-mode0-i8-fix.png`; the browser trace's mean for the
+first sprite moved from `0.0` to `72.2`). The palette also moved out of the
+per-display-list `RenderState` into renderer state, because the RDP's TMEM
+palette outlives a display list (RT64 clears `RDP::TMEM` in the constructor only
+and `RDP::reset()` does not touch it) and a CI image's decoded colour therefore
+depends on the palette generation and on the LUT mode as well as on its source
+bytes. Both are in the image cache key now, and `OGRE_TEX_TRACE` prints what the
+browser decodes. The two sprites do not need the persistence part - they trace
+`tlut=no` and are read as I8 - so no screen has yet exercised it.
 
 Session 143 fixed the browser's presentation of a frame. The presenter drew the
 whole GL framebuffer texture over the canvas, and that texture is the RDP colour
@@ -66,9 +88,8 @@ or black - session 142's "the attract story is only partly drawn".
 `fbSize` minus `OGRE_OVERSCAN`, default 1) and `blit_to_canvas` samples only that
 area. The title logo and the attract story's pages now fill the frame
 (`docs/proofs/web-title-640-after-texrect-fix.png`,
-`docs/proofs/web-attract-story-full-frame.png`). Two gaps stay open: the
-browser's title and story frames are hue-shifted against RT64's target for the
-same text, and CI8 tiles decode black in display lists that load no palette.
+`docs/proofs/web-attract-story-full-frame.png`). The hue shift between the
+browser's title and story frames and RT64's target for the same text stays open.
 
 Session 141 continued the renderer. The render targets and the canvas are now
 sized from the VI's scanout size (a port of RT64's `VI::fbSize`, updated only by
@@ -469,6 +490,13 @@ holds the evidence.
    the VI's origin by containment instead of applying its own view rectangle, and
    the browser's title and story frames are hue-shifted against RT64's target for
    the same text (cloud band `(128,86,84)` against `(156,134,77)`, sky matching).
+   Session 144 measured that difference again and did not explain it: the browser
+   and RT64 decode the same texrect (`rect=0,101..320,104`, `img=0x80217508`,
+   `fmt=0 siz=3 line=80 uls=0 ult=84`) and the browser's decode of it is a
+   plausible RGBA32 cloud, while the canvas colour at that row is a different
+   one. The decode is not the mechanism; the sampling or the blend is. The
+   comparison is `[GFX-TEXTRACE]` against `OGRE_TEX_TRACE`/`OGRE_RECT_STATE`,
+   both of which stay.
    Session 142 closed the title-screen fault and the geometry behind it.
    `draw_texrect` treated the RDP's lower-right corner as inclusive (`xh + 1`,
    `yh + 1`, and a `xh - xl + 1` texel span). The RDP covers `[ul, lr)` for a
@@ -506,10 +534,18 @@ holds the evidence.
    `docs/proofs/web-attract-story-full-frame.png`), the 640x476 world-map mode is
    unchanged, and the frames were checked against RT64's own render target for
    the same screen.
-   See `docs/HANDOFF-2026-10-14-session143.md`,
+   See `docs/HANDOFF-2026-10-14-session144.md`,
+   `docs/HANDOFF-2026-10-14-session143.md`,
    `docs/HANDOFF-2026-10-14-session142.md`,
    `docs/HANDOFF-2026-10-14-session141.md`, `docs/HANDOFF-2026-10-14-session139.md`
-   and `docs/DECISIONS.md`.
+   and `docs/DECISIONS.md`. Session 144 fixed the black CI tiles: a CI tile with
+   texture LUT mode 0 is I8, not palette-indexed, so it samples intensity rather
+   than an empty palette (`decode_texture_rect`'s `palette_enabled`). The title
+   prologue's two unit sprites (`img=0x1C13F8 fmt=2 siz=1 line=9`,
+   `oml=0x504240`, `lut=0`) were the black rectangle over the scene and now match
+   RT64's silhouette (`docs/proofs/web-title-lut-mode0-i8-fix.png`). The TMEM
+   palette also moved out of the per-display-list state, because it outlives a
+   display list the way the colour image does.
    Session 140 added the static package and the deployment path: `make web-dist`
    writes `dist-web/` (page, shell, Emscripten output, `coi-serviceworker.js`,
    `.nojekyll`), `.github/workflows/pages.yml` uploads it as the Pages artifact
