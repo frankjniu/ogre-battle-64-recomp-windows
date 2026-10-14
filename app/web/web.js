@@ -125,6 +125,22 @@
     };
   }
 
+  // The pthread build does not have every `_ogre_*` export on `Module` when
+  // `onRuntimeInitialized` fires. They appear a moment later: measured 0.5 s
+  // after the log line on a local `make web-dist` package and 2 s on the
+  // deployed GitHub Pages build. Every entry point below calls one of them, so
+  // wait for the two that are called first instead of racing them. A ROM picked
+  // quickly, or the auto-start from a stored ROM, otherwise stops in `ccall`
+  // with `TypeError: func is not a function` and never boots.
+  function whenWasmExportsReady(cb) {
+    if (typeof Module._ogre_start_boot === "function" &&
+        typeof Module._ogre_gfx_create_context === "function") {
+      cb();
+      return;
+    }
+    window.setTimeout(function () { whenWasmExportsReady(cb); }, 100);
+  }
+
   // --- Milestone polling ------------------------------------------------------
 
   function pollMilestones() {
@@ -455,8 +471,10 @@
         // If a previously validated ROM is persisted, boot without re-picking.
         if (Module.FS.analyzePath("/ogre/ogrebattle64-us-rev1.z64").exists) {
           log("[web] Stored ROM found - starting the game with the previously loaded ROM.");
-          initWebGL();
-          startBoot();
+          whenWasmExportsReady(function () {
+            initWebGL();
+            startBoot();
+          });
         }
       });
     } catch (err) {
@@ -604,8 +622,12 @@
       Module.FS.writeFile("/rom.z64", bytes);
       log("[web] ROM written to the virtual filesystem. Starting runtime...");
       initAudio();  // inside the user gesture so autoplay is allowed
-      initWebGL();  // inside the user gesture (WebGL2 context creation)
-      startBoot();
+      // initWebGL and the boot call wasm exports that the glue publishes a
+      // moment after the runtime is up; see whenWasmExportsReady.
+      whenWasmExportsReady(function () {
+        initWebGL();  // first GL call from the main thread
+        startBoot();
+      });
     }).catch(function (err) {
       log("[web] Failed to read the ROM file: " + err);
     });

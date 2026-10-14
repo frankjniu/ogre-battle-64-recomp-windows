@@ -434,13 +434,19 @@ holds the evidence.
    reloads the page once. Measured on a plain `python3 -m http.server` serving
    `dist-web` (no COOP/COEP): the page is cross-origin isolated at 811 ms and the
    glue reaches `WASM runtime initialized`; `boot.cjs` reports `RENDERED`
-   (`nonBlack 24508`) against the same build served by `debug/server.py`
-   (`24840`, the session-139 baseline); a GitHub-Pages-like subpath and a
-   gzip-encoded server both isolate and instantiate the wasm. Open: the Pages
-   workflow has not run (GitHub Pages is enabled for the repository with the
-   Actions source, and the data-bundle variable and secret are already set, so
-   the next push to `main` triggers it), and the first load downloads the whole
-   21 MB wasm before the visitor has picked a ROM. See
+   (`nonBlack 239425`, `sawRealDl=true`) against the same numbers for the same
+   build served by `debug/server.py` (`nonBlack 239425 / colorful 19688`, the
+   server's own COOP/COEP headers and no worker); a GitHub-Pages-like
+   subpath and a gzip-encoded server both isolate and instantiate the wasm; and
+   the deployed site (`https://lfarroco.github.io/ogre-battle-64-recomp/`, run
+   `38574439694`) isolates at 1131 ms and boots. Session 140 also found that the
+   glue publishes `Module._ogre_*` after `onRuntimeInitialized` fires (measured
+   509 ms on the local package and 2015 ms on the CI-built one), which made a ROM
+   handed to the page inside that window fail with `TypeError: func is not a
+   function`; `app/web/web.js` now waits with `whenWasmExportsReady()`.
+   Open: the deployed site has only been exercised headless (no hand-played
+   pass), CI and this machine use different Emscripten versions, and the first
+   load downloads the whole 21 MB wasm before the visitor has picked a ROM. See
    `docs/HANDOFF-2026-10-14-session140.md` and `docs/WEB-PORT-DEPLOYMENT.md`.
 9. **The published v0.4.0 archives ship an empty `mods/`, and the bundle that
    feeds the release did not carry one.** Fixed on main (session 108):

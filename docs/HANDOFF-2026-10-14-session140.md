@@ -46,6 +46,15 @@ root by `debug/server.py`, which sets `Cross-Origin-Opener-Policy` and
    initialized`. Exit 0 means the page is isolated.
 7. **The package has no ROM data.** The page reads the visitor's own dump
    through the File API, writes it to `/rom.z64`, and never uploads it.
+8. **`app/web/web.js` waits for the wasm exports before it uses them.** The glue
+   publishes `Module._ogre_*` a moment *after* `onRuntimeInitialized` fires, and
+   handing the page a ROM as soon as the runtime reports in made
+   `Module.ccall("ogre_start_boot", …)` throw `TypeError: func is not a
+   function`, which the page reported as `[web] Failed to read the ROM file` and
+   never recovered from. `whenWasmExportsReady()` gates `initWebGL()` and
+   `startBoot()` at both call sites; `initAudio()` still runs immediately so the
+   `AudioContext` stays inside the user gesture. `debug/lib/harness.cjs`'s
+   `gotoPage` waits for the same export.
 
 ## Evidence
 
@@ -81,14 +90,16 @@ node debug/probes/isolate.cjs --url http://127.0.0.1:8940/ --secs 40
 # wasm ready true
 # ISOLATED (SharedArrayBuffer available)
 
-node debug/probes/boot.cjs --url http://127.0.0.1:8940/ --attempts 2 --secs 60 \
-  --out web-dist-boot
-# attempt 1: sawRealDl=false rendered=true
-# RENDERED {"w":640,"h":480,"total":307200,"nonBlack":24508,"colorful":10160,...}
+node debug/probes/boot.cjs --url http://127.0.0.1:8940/ --attempts 2 --secs 90 \
+  --out web-dist-fixed
+# attempt 1: sawRealDl=true rendered=true
+# RENDERED {"w":640,"h":480,"total":307200,"nonBlack":239425,"colorful":20076,...}
 ```
 
-The capture is `docs/proofs/web-dist-title.png`; it is the title screen, the same
-picture as `debug/out/web-headers-boot-canvas.png` below.
+The capture is `docs/proofs/web-dist-title.png`; it is the title screen fully
+drawn before its fade. The first version of this run reported `nonBlack 24508` in
+an attempt whose sample landed on the frame the first real display list produced;
+the numbers above are the re-run after the export race in §6 was fixed.
 
 ### 3. A/B against the header-setting development server
 
@@ -101,15 +112,20 @@ node debug/probes/isolate.cjs --url http://127.0.0.1:8931/app/web/index.html
 # service worker supported, not controlling      <- the script registered nothing
 
 node debug/probes/boot.cjs --url http://127.0.0.1:8931/app/web/index.html \
-  --attempts 2 --secs 60 --out web-headers-boot
-# RENDERED {"w":640,"h":480,"total":307200,"nonBlack":24840,"colorful":15076,...}
+  --attempts 2 --secs 90 --out web-headers-fixed
+# attempt 1: sawRealDl=true rendered=true
+# RENDERED {"w":640,"h":480,"total":307200,"nonBlack":239425,"colorful":19688,...}
 ```
 
-`24840 / 15076` is the session-139 baseline for this probe, unchanged. The
-`dist-web` run's `24508 / 10160` is a different frame of the same title fade; both
-canvas captures are the same screen, and the service-worker path changes nothing
-about the wasm or the page behaviour. `service worker supported, not controlling`
-is the check that the development flow installs no worker.
+The `nonBlack` count is identical to the package's run through the service
+worker (`239425`), and `colorful` differs by 388 of 307200 pixels, which is the
+title's fade advancing between the two runs. An earlier pair of runs on the same
+two servers (`24840 / 15076` behind the headers, `24508 / 10160` through the
+worker) sampled the frame the first real display list drew, and they are what
+session 139 recorded as the title regression; the numbers above are the re-runs
+after the export race in §6 was fixed.
+`service worker supported, not controlling` is the check that the development
+flow installs no worker.
 
 ### 4. A GitHub-Pages-like subpath works
 
@@ -144,6 +160,44 @@ node debug/probes/isolate.cjs --url http://127.0.0.1:8942/
 `wasm ready true` means the 21 MB module was fetched, decompressed and
 instantiated through the worker.
 
+### 6. The wasm exports are published after `onRuntimeInitialized`
+
+Polling `typeof Module._ogre_start_boot` every 500 ms from the runtime's own log
+line, on a fresh browser profile:
+
+```text
+local dist-web (http://127.0.0.1:8940/)        0 ms start=undefined    509 ms start=function  keys=18
+deployed Pages (https://lfarroco.github.io/…)  0 ms start=undefined   2015 ms start=function  keys=18
+```
+
+`moduleReady()` (FS + `HEAPU8`) is true at 0 ms, so the page's existing readiness
+test passes well before the exports exist. Every one of them is guarded with
+`typeof !== "function"` except the boot call, so handing the page a ROM at that
+moment produced, on the deployed build, every time:
+
+```text
+[web] ROM written to the virtual filesystem. Starting runtime...
+[web] Failed to read the ROM file: TypeError: func is not a function
+```
+
+and the game never started. The deployed page's `ogrebattle64.js` and `.wasm`
+differ from the local ones (`126453`/`21051216` bytes against
+`126161`/`21039450`), because the workflow builds with
+`mymindstorm/setup-emsdk@v14 version: latest` and this machine has emcc
+`6.0.8-git`; the export window is 0.5 s in the local build and 2.0 s in the CI
+one. A visitor clicking the ROM row seconds after load never saw it, which is why
+the deployed site works by hand; the auto-start from a stored ROM has no such
+delay, so the fix is not cosmetic.
+
+The fix is `whenWasmExportsReady()` in `app/web/web.js` (100 ms poll on
+`typeof Module._ogre_start_boot === "function"` and
+`typeof Module._ogre_gfx_create_context === "function"`), which gates
+`initWebGL()` and `startBoot()` in the ROM picker and in the stored-ROM
+auto-start. `initAudio()` stays before it, so the `AudioContext` is still created
+inside the user gesture. `debug/probes/isolate.cjs` and `boot.cjs` were re-run
+after the fix; `debug/lib/harness.cjs`'s `gotoPage` now waits for the export as
+well, because it otherwise hands the ROM to the page inside the same window.
+
 ## What the package is
 
 ```text
@@ -166,6 +220,8 @@ dist-web/.nojekyll              for a branch-based Pages deploy
 | `app/web/coi-serviceworker.js` | new; coi-serviceworker v0.1.7, MIT, vendored with a header comment |
 | `app/web/ogre-web-config.js` | new; the repository layout's `OGRE_WASM_DIR` |
 | `app/web/index.html` | loads the two new scripts; the `SharedArrayBuffer` guard |
+| `app/web/web.js` | `whenWasmExportsReady()`; the ROM picker and the stored-ROM auto-start wait for the `_ogre_*` exports before `initWebGL()`/`startBoot()` |
+| `debug/lib/harness.cjs` | `gotoPage` tolerates the service worker's one reload and waits for `Module._ogre_start_boot` |
 | `Makefile` | `web-dist` target: copies the package, fails on a missing artifact, and normalises the file modes with `chmod -R a+rX` |
 | `.gitignore` | `dist-web/` |
 | `.github/workflows/pages.yml` | new; `make web-dist` then `actions/upload-pages-artifact@v5` (`include-hidden-files: true`) + `actions/deploy-pages@v5` |
@@ -183,10 +239,17 @@ dist-web/.nojekyll              for a branch-based Pages deploy
 
 - `make web-dist` — the Emscripten build was already current; the target
   reconfigured, built, and wrote and checked `dist-web/`.
-- `debug/probes/isolate.cjs` — four URLs: the plain server, the plain server
-  behind gzip, the Pages-like subpath, and `debug/server.py`.
-- `debug/probes/boot.cjs` — the plain server and `debug/server.py`, two
-  attempts each, 60 s.
+- `debug/probes/isolate.cjs` — the plain server, the plain server behind gzip,
+  the Pages-like subpath, `debug/server.py`, and finally the deployed site
+  (`https://lfarroco.github.io/ogre-battle-64-recomp/`, isolated at 1131 ms,
+  `wasm ready true`).
+- `debug/probes/boot.cjs` — the plain server (`sawRealDl=true`, `nonBlack
+  239425`) and `debug/server.py` (`nonBlack 239425 / colorful 19688`), plus one
+  run against the deployed site.
+- The Pages workflow ran: run `38574439694`, build 4m30s and deploy 1m19s, both
+  success; `curl` on the deployed files shows `application/wasm` with
+  `Content-Encoding: gzip` and no COOP/COEP, which is the configuration §5
+  covers.
 - No native build was run. No renderer source changed, so the session-139
   proofs still hold.
 
@@ -194,21 +257,16 @@ dist-web/.nojekyll              for a branch-based Pages deploy
 
 No probe was left in the tree. One throwaway server (`/tmp/gzip-server.py`) and
 one throwaway directory (`/tmp/pages-sim/`) were used for the checks in §4 and
-§5; neither is in the repository. `debug/probes/isolate.cjs` is a diagnostic
-that stays.
+§5, and four throwaway Playwright scripts for §6; none is in the repository.
+`debug/probes/isolate.cjs` is a diagnostic that stays.
 
 ## Open
 
-1. **The Pages workflow has not run.** GitHub Pages was enabled for the
-   repository during this session with the Actions source
-   (`gh api repos/lfarroco/ogre-battle-64-recomp/pages` reports
-   `"build_type": "workflow"`, `html_url
-   https://lfarroco.github.io/ogre-battle-64-recomp/`), and the repository
-   already carries `vars.OGRE_DATA_REPO` (`lfarroco/ogre-recomp-private`) and
-   `secrets.OGRE_DATA_TOKEN`, so the first push to `main` is what triggers the
-   build. Nothing else is required for the deploy half. The build half is the
-   same code path as `.github/workflows/wasm.yml`, which has also never had an
-   observed run.
+1. **The deployed site has been exercised, but only headless.** Run `38574439694`
+   built and deployed it, `isolate.cjs` reports it cross-origin isolated, and the
+   boot probe reaches the game there. A full hand-played pass on the deployed URL
+   has not been done, and the two Emscripten versions (CI `latest` against this
+   machine's `6.0.8-git`) are a difference the local runs cannot cover.
 2. **The first load fetches the whole 21 MB wasm before the visitor picks a
    ROM.** `index.html` loads the glue at page load, which is what every local
    probe assumes. Loading it when the ROM picker is used would cut a visit that

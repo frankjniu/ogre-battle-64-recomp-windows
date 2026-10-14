@@ -51,7 +51,11 @@ python3 -m http.server --bind 127.0.0.1 --directory dist-web 8940
 
 `app/web/coi-serviceworker.js` registers, reloads the page once and serves the two
 headers itself. A probe reaches a URL on that server with `--url`; it must tolerate
-the one self-reload.
+the one self-reload. `debug/lib/harness.cjs`'s `gotoPage` does: it retries the
+navigation when the first document reports that `SharedArrayBuffer` is missing,
+and it treats the page as ready only once `Module._ogre_start_boot` is a function,
+because the glue publishes the `_ogre_*` exports about 0.5 s (local package) to
+2 s (deployed build) *after* the runtime's own `WASM runtime initialized` line.
 
 See [WEB-PORT-DEPLOYMENT.md](../WEB-PORT-DEPLOYMENT.md) for the same headers on
 nginx and other hosts, and for the package layout.

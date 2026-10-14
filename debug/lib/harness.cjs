@@ -127,10 +127,43 @@ async function waitForLog(page, needle, timeout = 30000) {
     (s) => window.ogreLog && window.ogreLog.contains(s), needle, { timeout });
 }
 
-/** Navigate to the build and wait for the wasm runtime to come up. */
+/** Navigate to the build and wait for the wasm runtime to come up.
+ *
+ *  A page served by a host that sends no COOP/COEP (the `make web-dist` package
+ *  on GitHub Pages, or any plain static server) reloads itself once while
+ *  `app/web/coi-serviceworker.js` takes control, and only the second load has
+ *  `SharedArrayBuffer` and starts the runtime. The first document says so in its
+ *  own words, so this waits for that line or for the runtime, then loads again.
+ *  Against `debug/server.py` the runtime comes up on the first load and nothing
+ *  is retried.
+ *
+ *  "Ready" means the runtime's own line *and* `Module._ogre_start_boot`, because
+ *  the glue publishes the `_ogre_*` exports after `onRuntimeInitialized` fires
+ *  (measured 0.5 s on a local package and 2 s on the deployed one) and
+ *  `loadRom` hands the page a ROM as soon as this returns. */
 async function gotoPage(page, cfg) {
-  await page.goto(cfg.url);
-  await waitForLog(page, READY);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      await page.goto(cfg.url);
+    } catch (e) {
+      await sleep(1000); // a reload can interrupt the navigation
+      continue;
+    }
+    const outcome = await page
+      .waitForFunction(() => {
+        const log = window.ogreLog;
+        if (!log) return false;
+        if (log.contains('SharedArrayBuffer is unavailable')) return 'not-isolated';
+        if (log.contains('WASM runtime initialized') &&
+            typeof Module._ogre_start_boot === 'function') return 'ready';
+        return false;
+      }, null, { timeout: 20000 })
+      .then((handle) => handle.jsonValue(), () => null);
+    if (outcome === 'ready') return;
+    await sleep(1000);
+  }
+  throw new Error(`the wasm runtime never reached "${READY}" at ${cfg.url} after 4 loads ` +
+                  '(if the host needs the COOP/COEP service worker, check that it registered)');
 }
 
 /** Hand the ROM to the page's file input and wait for the boot thread. */
