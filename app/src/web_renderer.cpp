@@ -17,16 +17,21 @@
 // runtime's gfx pthread are proxied to the main thread by Emscripten.
 //
 // Known prototype limitations (documented in WEB-PORT-REPORT.md §10):
-//   - Renders directly to the canvas (no VI framebuffer indirection yet), so
-//     framebuffer-as-texture and VI presentation pass-through are stubbed.
+//   - A `G_LOADTILE` whose source lies inside a colour image the RDP has already
+//     rendered still reads RDRAM, not the rendered target (RT64's tile copy has
+//     no equivalent here). The njpeg backdrop does not need it: its assembly is a
+//     CPU copy, which `ogre_sync_framebuffers()` makes possible.
 //   - TEXEL1/second-texture combiners fall back to TEXEL0.
 //   - LOADBLOCK dxt (arbitrary texel spacing) is approximated.
 //   - No lighting/texgen (OB64's title content is unlit 2D).
+//   - Presentation blits the whole scanout target; the VI's own view rectangle
+//     (`fldRegs[].origin` and the x/y scale) is not applied.
 
 #include "renderer.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -583,6 +588,83 @@ inline uint32_t resolve_address(const uint32_t* segments, uint32_t addr) {
 }
 
 // ============================================================================
+// The VI's scanout size
+// ============================================================================
+//
+// `ultramodern::renderer::get_vi_regs()` holds the register values the runtime
+// computed for the frame the VI is currently scanning out (events.cpp
+// `update_vi`). The framebuffer the VI reads is not the RDP colour image's
+// address: `fldRegs[].origin` puts it a row or two into the image, and its
+// *height* is not a register either; it is derived from the vertical region and
+// the y scale.
+//
+// This is a port of RT64's `VI::fbSize` (tools/RT64/src/hle/rt64_vi.cpp), which
+// is what the native renderer sizes its framebuffers and its window with:
+//
+//   size.x = width; if interlaced and the horizontal region is narrow, width/2
+//   size.y = (vEnd - vStart) / (2 * yScale * (size.x / width))
+//   size.y += 2, then rounded down to a multiple of 4
+//
+// The +2/round-to-4 exists because the VI region is usually a few rows short of
+// the image the RDP wrote. For OB64 the standard NTSC mode yields 320x240 and
+// the world map's hi-res mode 640x480, which is what the game's own
+// `G_SETSCISSOR`/`G_SETCIMG` pairs use (docs/HANDOFF-2026-10-14-session139.md
+// §1). The bit layouts are RT64's `HRegion`/`VRegion`/`XTransform`/`YTransform`.
+struct ViSize {
+    int width = 0;
+    int height = 0;
+};
+
+// RT64 `VI::visible`: a blanked mode (type 0) or one whose horizontal region
+// starts at 0 does not update the VI history and so does not resize anything.
+inline bool vi_visible(const ultramodern::renderer::ViRegs& r) {
+    return ((r.VI_STATUS_REG & 3u) != 0u) && (((r.VI_H_START_REG >> 16) & 0x3FFu) > 0u);
+}
+
+inline ViSize vi_framebuffer_size(const ultramodern::renderer::ViRegs& r) {
+    ViSize out;
+    const uint32_t width = r.VI_WIDTH_REG;
+    if (width == 0) {
+        return out;   // no mode set yet
+    }
+    const uint32_t h_word = r.VI_H_START_REG;
+    const uint32_t v_word = r.VI_V_START_REG;
+    const uint32_t x_scale = r.VI_X_SCALE_REG & 0xFFFu;
+    const uint32_t y_scale = r.VI_Y_SCALE_REG & 0xFFFu;
+    if (x_scale == 0 || y_scale == 0) {
+        return out;
+    }
+    const float x_scale_f = 1024.0f / static_cast<float>(x_scale);
+    const float y_scale_f = 1024.0f / static_cast<float>(y_scale);
+    const uint32_t h_start = (h_word >> 16) & 0x3FFu;
+    const uint32_t h_end = h_word & 0x3FFu;
+    const uint32_t v_start = (v_word >> 16) & 0x3FFu;
+    const uint32_t v_end = v_word & 0x3FFu;
+
+    int size_x = static_cast<int>(width);
+    // Interlaced without deflickering doubles the framebuffer's row stride, so a
+    // narrow horizontal region means the real image is half the declared width.
+    if ((r.VI_STATUS_REG & 0x40u) != 0) {
+        const float estimated = static_cast<float>(h_end - h_start) / x_scale_f;
+        if (estimated < (static_cast<float>(width) / 1.875f)) {
+            size_x = static_cast<int>(width) / 2;
+        }
+    }
+
+    const float scale_ratio = static_cast<float>(size_x) / static_cast<float>(width);
+    const float rows = static_cast<float>(v_end - v_start) / (2.0f * y_scale_f * scale_ratio);
+    int size_y = static_cast<int>(std::lround(rows));
+    if (size_x <= 0 || size_y <= 0) {
+        return out;
+    }
+    size_y += 2;
+    size_y = static_cast<int>(std::lround(static_cast<float>(size_y) / 4.0f)) * 4;
+    out.width = size_x;
+    out.height = size_y;
+    return out;
+}
+
+// ============================================================================
 // Which GBI does this task use?
 // ============================================================================
 //
@@ -936,6 +1018,10 @@ uniform int u_use_tex;
 // BlendB/BlendApprox values.
 uniform vec4 u_fog_color;
 uniform vec4 u_blend_color;
+// G_SETCONVERT's K4/K5, as combiner colour inputs (RT64 RasterPS.hlsl). RT64
+// divides the raw 9-bit field by 255; K4/K5 carry no sign extension.
+uniform float u_k4;
+uniform float u_k5;
 uniform int u_bp0, u_bm0, u_ba0, u_bb0;
 uniform int u_bp1, u_bm1, u_ba1, u_bb1;
 uniform int u_force_blend;
@@ -970,7 +1056,9 @@ vec4 color_input(int sel, bool second, vec4 combined) {
     if (sel == 12) return vec4(v_shade.a);                      // SHADE_ALPHA
     if (sel == 13) return vec4(u_env.a);                        // ENV_ALPHA
     if (sel == 14 || sel == 15) return vec4(0.0);               // LOD_FRACTION / PRIM_LOD_FRAC
-    if (sel >= 16 && sel <= 18) return vec4(0.0);               // NOISE / K4 / K5
+    if (sel == 16) return vec4(0.0);                            // NOISE (not emulated)
+    if (sel == 17) return vec4(u_k4);                           // K4
+    if (sel == 18) return vec4(u_k5);                           // K5
     if (sel == 19) return vec4(1.0);                            // ONE
     return vec4(0.0);                                           // ZERO
 }
@@ -1250,6 +1338,10 @@ struct DrawCmd {
     uint32_t comb_L = 0, comb_H = 0;
     float prim[4] = {1, 1, 1, 1};
     float env[4] = {1, 1, 1, 1};
+    // G_SETCONVERT's last two fields as combiner inputs (RT64 RasterPS.hlsl
+    // `ccInputs.K4 = convertK[4] / 255.0f`). Raw 9-bit values; no sign extension
+    // or `2*K+1` scaling, unlike k0..k3 of the YUV matrix.
+    float k4 = 0.0f, k5 = 0.0f;
     bool textured = false;
     uint64_t tex_key = 0;    // TEXEL0's tile image
     uint64_t tex_key1 = 0;   // TEXEL1's tile image
@@ -1385,10 +1477,19 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // before (0xFC121000) selected C = ZERO. Either one draws the rect
         // black, so the probe "passed" while proving nothing.
         put32(o, 0xFC000024); put32(o + 4, 0x08000000); o += 8;
-        // G_TEXRECT (0,0)-(63,47), tile 0; RDPHALF_1 s=0,t=0; RDPHALF_2 dsdx=1,dtdy=1
+        // G_TEXRECT (0,0)-(63,47), tile 0; RDPHALF_1 s=0,t=0; RDPHALF_2
+        // dsdx=32, dtdy=43.
+        //
+        // The step spreads the whole 2x2 tile over the rectangle, which is what
+        // makes this a usable self-check: `u2 - u1 = dsdx * rectWidth / 1024`
+        // (see draw_texrect), so 2 texels over 64 pixels is `2 * 1024 / 64 = 32`,
+        // and 2 texels over 48 rows is `2 * 1024 / 48 = 42.67 -> 43`. The values
+        // were `1, 1` before session 141, when the S/T step was only `dsdx / 32`
+        // of the rectangle's width and the pair therefore sampled a 1/16-texel
+        // sliver of the tile.
         put32(o, 0xE4000000 | (63 << 2) << 12 | (47 << 2)); put32(o + 4, 0); o += 8;
         put32(o, 0xE1000000); put32(o + 4, 0x00000000); o += 8;
-        put32(o, 0xF1000000); put32(o + 4, 0x00010001); o += 8;
+        put32(o, 0xF1000000); put32(o + 4, 0x0020002B); o += 8;
         // G_ENDDL
         put32(o, 0xDF000000); put32(o + 4, 0x00000000); o += 8;
 
@@ -1466,15 +1567,24 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // bytes the game wrote there with the CPU.
     GlFramebuffer& ensure_framebuffer(const DrawCmd& cmd) {
         GlFramebuffer& fb = gl_framebuffers_[cmd.fb_address];
-        // The colour image's own width is the guest truth (320 or 640); the
-        // height comes from the viewport, because the RDP command carries no
-        // height and the draw area is what the framebuffer has to hold.
+        // The colour image's own width is the guest truth (320 or 640). The
+        // height comes from the draw (see target_height_px): the RDP command
+        // carries no height, so it is the VI's scanout height, the viewport's
+        // screen height and the scissor's bottom row together.
         const int width = (cmd.fb_width_px >= 1 && cmd.fb_width_px <= kMaxFramebufferSide)
                               ? cmd.fb_width_px
                               : canvas_width_;
-        const int height = (cmd.fb_height_px >= 1 && cmd.fb_height_px <= kMaxFramebufferSide)
-                               ? cmd.fb_height_px
-                               : canvas_height_;
+        int height = (cmd.fb_height_px >= 1 && cmd.fb_height_px <= kMaxFramebufferSide)
+                         ? cmd.fb_height_px
+                         : canvas_height_;
+        // RT64 FramebufferManager::get keeps the tallest height a framebuffer has
+        // been asked for while its width and siz do not change, and resets it when
+        // they do. Without that, a workload whose draws do not cover the target
+        // (a partial scissor, or the one frame lag on a VI mode switch) would
+        // shrink the target, recreate it, and lose the pixels already in it.
+        if (fb.fbo != 0 && fb.width == width && fb.siz == cmd.fb_siz) {
+            height = std::max(height, fb.height);
+        }
         const uint32_t row_bytes = cmd.fb_row_bytes != 0
                                        ? cmd.fb_row_bytes
                                        : static_cast<uint32_t>(width << cmd.fb_siz >> 1);
@@ -1626,6 +1736,31 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         fb_writeback_pending_ = 0;
     }
 
+    // Resizes the canvas drawing buffer to the size the VI is scanning out. Only
+    // the browser main thread calls this (from flush_commands' present path), so
+    // the DOM call is legal. The element's CSS size belongs to index.html and is
+    // left alone: a 320x240 buffer keeps its 2x pixelated upscale there, and a
+    // 640x480 one is shown 1:1 at its own size.
+    void resize_canvas(int width, int height) {
+        if (width < 1 || height < 1 || width > kMaxFramebufferSide ||
+            height > kMaxFramebufferSide) {
+            return;
+        }
+        if (width == canvas_width_ && height == canvas_height_) {
+            return;
+        }
+        emscripten_set_canvas_element_size("#game-canvas", width, height);
+        canvas_width_ = width;
+        canvas_height_ = height;
+        // The RDRAM fallback's staging texture is canvas-sized.
+        if (present_tex_ != 0) {
+            glDeleteTextures(1, &present_tex_);
+            present_tex_ = 0;
+        }
+        OGRE_MILESTONE("GFX-PRESENT", "canvas resized to %dx%d for the VI mode", width,
+                       height);
+    }
+
     // Draws `tex` over the whole canvas with the COPY combiner (TEXEL0 straight
     // through), which is the present path.
     void blit_to_canvas(GLuint tex) {
@@ -1688,6 +1823,15 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     // the draws went straight to the canvas (no colour image was ever set), the
     // canvas already holds the frame and nothing is blitted over it.
     void present_framebuffer(uint32_t address) {
+        // The canvas follows the VI's scanout size. A 640x480 mode (the world map)
+        // presents 1:1 at 640x480 instead of being halved into a 320x240 drawing
+        // buffer; the element's CSS size stays what index.html set, so a 320x240
+        // mode keeps its 2x pixelated upscale and a 640x480 one is pixel-exact.
+        const ViSize vi = vi_size();
+        if (vi.width > 0 && vi.height > 0) {
+            resize_canvas(vi.width, vi.height);
+        }
+
         uint32_t key = address;
         auto it = gl_framebuffers_.find(key);
         if (it == gl_framebuffers_.end() || it->second.tex == 0) {
@@ -1951,6 +2095,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             glUniform4fv(glGetUniformLocation(program_, "u_env"), 1, cmd.env);
             glUniform4fv(glGetUniformLocation(program_, "u_fog_color"), 1, cmd.fog);
             glUniform4fv(glGetUniformLocation(program_, "u_blend_color"), 1, cmd.blend_color);
+            glUniform1f(glGetUniformLocation(program_, "u_k4"), cmd.k4);
+            glUniform1f(glGetUniformLocation(program_, "u_k5"), cmd.k5);
 
             if (cmd.textured) {
                 // TEXEL0's and TEXEL1's tile images are separate GL textures,
@@ -2230,6 +2376,26 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         if (vi == nullptr) {
             return;
         }
+        // Only a visible mode updates the size the render targets are built for,
+        // which is what RT64's VIHistory does (`if (viDifferent && viVisible)
+        // viHistory.pushVI(...)`). OB64 blanks the VI while it switches between
+        // the 320x240 scene mode and the world map's 640x480 one, and a blanked
+        // mode still carries the next mode's serrate bit with `hStart = 0`, so
+        // fbSize alone reads that state as a 320x952 image.
+        const ViSize size = vi_framebuffer_size(*vi);
+        if (vi_visible(*vi) && size.width > 0 && size.height > 0) {
+            const uint64_t packed = (static_cast<uint64_t>(size.width) << 32) |
+                                    static_cast<uint32_t>(size.height);
+            if (vi_scanout_.exchange(packed, std::memory_order_relaxed) != packed &&
+                vi_size_keys_.size() < 8 && vi_size_keys_.insert(packed).second) {
+                OGRE_MILESTONE("GFX-VI",
+                               "VI scanout %dx%d origin=0x%06X status=0x%08X width=%u "
+                               "hStart=0x%08X vStart=0x%08X xScale=0x%08X yScale=0x%08X",
+                               size.width, size.height, vi->VI_ORIGIN_REG & 0x00FFFFFFu,
+                               vi->VI_STATUS_REG, vi->VI_WIDTH_REG, vi->VI_H_START_REG,
+                               vi->VI_V_START_REG, vi->VI_X_SCALE_REG, vi->VI_Y_SCALE_REG);
+            }
+        }
         request_present(vi->VI_ORIGIN_REG, vi->VI_STATUS_REG);
     }
 
@@ -2401,6 +2567,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     unsigned mtx_logged_ = 0;
     unsigned draw_mtx_logged_ = 0;
     unsigned rect_logged_ = 0;
+    unsigned wide_logged_ = 0;
+    unsigned wide_task_ = 0;   // task whose wide draws the log above covers
     unsigned blit_logged_ = 0;
     unsigned s2d_logged_ = 0;
     unsigned framebuffers_logged_ = 0;
@@ -2425,6 +2593,9 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
     uint16_t last_cimg_width_ = 0;
     uint8_t last_cimg_siz_ = 0, last_cimg_fmt_ = 0;
     std::set<uint64_t> cimg_seen_;   // distinct G_SETCIMG configurations (gfx thread)
+    std::set<uint64_t> vi_size_keys_;   // distinct VI scanout sizes (gfx thread)
+    // The last visible VI scanout size, w << 32 | h (see vi_size()).
+    std::atomic<uint64_t> vi_scanout_{0};
     // Presentation: the VI's scanout buffer, requested by update_screen() on the
     // gfx thread and consumed by flush_commands() on the main thread.
     uint32_t present_address_ = 0;
@@ -3499,6 +3670,32 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
     // ----- drawing (gfx pthread: record commands) --------------------------------
 
+    // Bounded diagnostic for the 640-wide colour images: the title screen's
+    // hi-res mode and the world map's three heap targets render into them. The
+    // first 64 draws of the first task that targets one are logged with their
+    // geometry, because a hi-res frame that comes out as flat horizontal spans
+    // is a different fault from one whose texture sampling is wrong.
+    void log_wide_draw(const RenderState& st, const char* what, int x0, int y0, int x1,
+                       int y1, const char* detail) {
+        if (st.cimg_address == 0 || st.cimg_width < 640) {
+            return;
+        }
+        if (wide_task_ == 0) {
+            wide_task_ = task_count_.load();
+        }
+        if (task_count_.load() != wide_task_ || wide_logged_ >= 64) {
+            return;
+        }
+        ++wide_logged_;
+        OGRE_MILESTONE("GFX-WIDE",
+                       "%s (%d,%d)-(%d,%d) fb=0x%06X cimg=%u target=%dx%d siz=%u "
+                       "scissor=%d(%d,%d,%d,%d) %s",
+                       what, x0, y0, x1, y1, st.cimg_address, (unsigned)st.cimg_width,
+                       target_width_px(st), target_height_px(st), (unsigned)st.cimg_siz,
+                       st.scissor_enabled ? 1 : 0, st.scissor_x0, st.scissor_y0,
+                       st.scissor_x1, st.scissor_y1, detail != nullptr ? detail : "");
+    }
+
     // Fills the render-state fields of a DrawCmd from the current RDP state.
     void record_state(DrawCmd& cmd, RenderState& st, bool textured) {
         const Combiner& cb = st.combiner;
@@ -3535,6 +3732,8 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         cmd.textured = textured;
         cmd.tex_sc = st.tex_sc;
         cmd.tex_tc = st.tex_tc;
+        cmd.k4 = static_cast<float>(st.convert_k[4] & 0x1FF) / 255.0f;
+        cmd.k5 = static_cast<float>(st.convert_k[5] & 0x1FF) / 255.0f;
         if (textured) {
             // TEXEL0 = the G_TEXTURE tile, TEXEL1 = the tile above it; each
             // carries the image decoded from its own source and rect.
@@ -3683,6 +3882,15 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
             return;
         }
         const RawVertex* v[3] = {&st.vertices[i0], &st.vertices[i1], &st.vertices[i2]};
+        {
+            int x0 = v[0]->x, x1 = v[0]->x, y0 = v[0]->y, y1 = v[0]->y;
+            for (int k = 1; k < 3; ++k) {
+                x0 = std::min<int>(x0, v[k]->x); x1 = std::max<int>(x1, v[k]->x);
+                y0 = std::min<int>(y0, v[k]->y); y1 = std::max<int>(y1, v[k]->y);
+            }
+            log_wide_draw(st, "tri", x0, y0, x1, y1,
+                          texture_available(st) ? "tex=1" : "tex=0");
+        }
         float data[3 * 8];
         for (int i = 0; i < 3; ++i) {
             if (!transform_vertex(st, *v[i], data + i * 8)) {
@@ -3757,6 +3965,13 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         // full-screen black cover over the whole scene.
         if (xh < xl || yh < yl) {
             return;
+        }
+        {
+            char detail[96];
+            snprintf(detail, sizeof(detail), "fill=[%.2f,%.2f,%.2f,%.2f] cyc=%d",
+                     st.fill_color[0], st.fill_color[1], st.fill_color[2],
+                     st.fill_color[3], static_cast<int>((st.othermode_h >> 20) & 3));
+            log_wide_draw(st, "fillrect", xl, yl, xh, yh, detail);
         }
         if (rect_logged_ < 3) {
             ++rect_logged_;
@@ -4053,6 +4268,17 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         const int16_t t0 = static_cast<int16_t>(ctx->rdp_half1 & 0xFFFF);
         const int16_t dsdx = static_cast<int16_t>((ctx->rdp_half2 >> 16) & 0xFFFF);
         const int16_t dtdy = static_cast<int16_t>(ctx->rdp_half2 & 0xFFFF);
+        {
+            const TileState& wt = st.tiles[st.active_tile & (kMaxTiles - 1)];
+            char detail[128];
+            snprintf(detail, sizeof(detail),
+                     "tile=%d addr=0x%06X stride=%d fmt=%u siz=%u line=%d "
+                     "uls=%u ult=%u lrs=%u lrt=%u s0=%d t0=%d dsdx=%d dtdy=%d",
+                     st.active_tile, wt.image_address, wt.image_stride, (unsigned)wt.fmt,
+                     (unsigned)wt.siz, (int)wt.line, (unsigned)wt.uls, (unsigned)wt.ult,
+                     (unsigned)wt.lrs, (unsigned)wt.lrt, s0, t0, dsdx, dtdy);
+            log_wide_draw(st, "texrect", xl, yl, xh, yh, detail);
+        }
 
         if (txr_logged_ < 3) {
             ++txr_logged_;
@@ -4093,8 +4319,24 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
 
         const float us = s0 / 32.0f;
         const float vs = t0 / 32.0f;
-        const float du = dsdx / 32.0f;
-        const float dv = dtdy / 32.0f;
+        // The per-pixel S/T step. RT64 turns the rectangle into a UV pair with
+        // (tools/RT64/src/hle/rt64_rdp.cpp drawRect)
+        //
+        //     lrs = ((uls << 7) + dsdx * (rectWidth << 2)) >> 7
+        //     u2  = lrs / 32        ->   u2 - u1 = dsdx * rectWidth / 1024
+        //
+        // so `dsdx` is in 1/1024 texel-units relative to the s10.5 origin: a
+        // 320-texel image stretched over 640 pixels carries dsdx = 512, and
+        // 512 / 1024 = 0.5 texels per pixel. Dividing by 32 instead - which is
+        // what this did before session 141 - made the sampled span 32x too
+        // large. On the title screen, whose 320x240 backdrop is drawn as forty
+        // 640x12 `G_TEXRECT` strips, each strip then repeated its own six-row
+        // source image about 35 times, which is the horizontal banding
+        // `docs/proofs/web-title-640-before-uv-fix.png` shows. It never showed
+        // up before because every scene the browser had rendered used triangles
+        // or the S2DEX2 object rectangle, and neither goes through this path.
+        const float du = dsdx / 1024.0f;
+        const float dv = dtdy / 1024.0f;
         const float w = static_cast<float>(xh - xl + 1);
         const float h = static_cast<float>(yh - yl + 1);
 
@@ -4152,21 +4394,79 @@ class WebGLRenderer final : public ultramodern::renderer::RendererContext {
         st.active_tile = saved_tile;
     }
 
-    // Screen (pixel) -> NDC. The denominator is the *screen* size, which the
-    // RSP viewport defines: OB64 submits vscale = [640 480 511 0] for its
-    // 320x240 screen, i.e. vscale.x/4 = width/2, so the screen is twice the
-    // scale. Dividing by the canvas size instead only works while the two
-    // agree, and the game also renders 640x480 (VI fbSizeX=640 in the world
-    // map), where every coordinate past 319 landed outside NDC.
+    // Screen (pixel) -> NDC. The denominator is the size of the *render target*
+    // the draw lands in, because the RDP's screen coordinates are framebuffer
+    // pixels: the RSP viewport only decides where inside that target the
+    // geometry goes.
+    //
+    // For a colour image the width is the image's own `G_SETCIMG` width, which is
+    // the guest's statement of the target size (320 or 640; session 139 §1 lists
+    // all six configurations). The RSP viewport is the fallback for a display
+    // list that never sets one, and the VI's scanout size the fallback after
+    // that. Before session 141 the denominator was the viewport alone, so the
+    // world map's 640-wide targets - whose display lists do not all set a
+    // viewport - clamped every coordinate past x=319.
+    //
+    // The viewport scale is in 14.2 fixed pixels and OB64 submits
+    // vscale = [640 480 511 0] for its 320x240 screen, so `vscale / 4` is half
+    // the screen and `vscale * 2 / 4` is the screen.
+    int target_width_px(const RenderState& st) const {
+        if (st.cimg_address != 0 && st.cimg_width >= 1 &&
+            st.cimg_width <= kMaxFramebufferSide) {
+            return st.cimg_width;
+        }
+        if (st.viewport_set && st.view_scale[0] * 2.0f >= 1.0f) {
+            return static_cast<int>(std::lround(st.view_scale[0] * 2.0f));
+        }
+        const ViSize vi = vi_size();
+        if (vi.width > 0 && vi.width <= kMaxFramebufferSide) {
+            return vi.width;
+        }
+        return canvas_width_;
+    }
+
+    // The target's height is not in any RDP command. RT64 takes
+    // `max(drawn bottom, VI height)` (`framebufferHeightForDisplay`,
+    // tools/RT64/src/hle/rt64_framebuffer.h), so the same three inputs are used
+    // here: the VI's scanout height, the viewport's screen height, and the bottom
+    // row the current scissor allows. A draw that goes to the canvas keeps the
+    // canvas height, because the canvas is what its NDC maps onto.
+    int target_height_px(const RenderState& st) const {
+        int h = 0;
+        if (st.viewport_set && st.view_scale[1] * 2.0f >= 1.0f) {
+            h = static_cast<int>(std::lround(st.view_scale[1] * 2.0f));
+        }
+        const ViSize vi = vi_size();
+        h = std::max(h, vi.height);
+        if (st.scissor_enabled) {
+            h = std::max(h, st.scissor_y1 + 1);
+        }
+        if (st.cimg_address == 0) {
+            return canvas_height_;
+        }
+        if (h < 1) {
+            h = canvas_height_;
+        }
+        return std::min(h, kMaxFramebufferSide);
+    }
+
+    // The size of the last *visible* VI mode - RT64's VIHistory top, which is
+    // what the native renderer sizes its framebuffers from. Set by update_screen
+    // on the gfx thread (packed as width << 32 | height so a reader on the main
+    // thread cannot see half of an update).
+    ViSize vi_size() const {
+        const uint64_t packed = vi_scanout_.load(std::memory_order_relaxed);
+        ViSize out;
+        out.width = static_cast<int>(packed >> 32);
+        out.height = static_cast<int>(packed & 0xFFFFFFFFu);
+        return out;
+    }
+
     float screen_width(const RenderState& st) const {
-        return (st.viewport_set && st.view_scale[0] * 2.0f >= 1.0f)
-                   ? st.view_scale[0] * 2.0f
-                   : static_cast<float>(canvas_width_);
+        return static_cast<float>(target_width_px(st));
     }
     float screen_height(const RenderState& st) const {
-        return (st.viewport_set && st.view_scale[1] * 2.0f >= 1.0f)
-                   ? st.view_scale[1] * 2.0f
-                   : static_cast<float>(canvas_height_);
+        return static_cast<float>(target_height_px(st));
     }
     float ndc_xf(float x, const RenderState& st) const {
         return 2.0f * x / screen_width(st) - 1.0f;

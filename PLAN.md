@@ -54,7 +54,17 @@ recorded in
 renderer. `docs/WEB-PORT-DEPLOYMENT.md` describes the current package;
 `docs/WEB-PORT.md` and `docs/WEB-PORT-REPORT.md` describe the 2026-08-29
 feasibility work and not the current state. The current state is this file and
-`docs/HANDOFF-2026-10-14-session140.md`.
+`docs/HANDOFF-2026-10-14-session141.md`.
+
+Session 141 continued the renderer. The render targets and the canvas are now
+sized from the VI's scanout size (a port of RT64's `VI::fbSize`, updated only by
+a visible mode), the world map's 640-wide images are `640x481` and present at
+640x476 instead of being drawn into `640x240` and shown through a 320x240 canvas,
+the per-pixel `G_TEXRECT` S/T step was corrected from 32x too large (the title
+screen's banding), and `K4`/`K5` are combiner inputs. A pre-existing wall was
+found while measuring: the browser build faults with `divide by zero` the first
+time the game renders the hi-res title screen, in the session-140 package and in
+this one alike.
 
 ## Status
 
@@ -418,13 +428,38 @@ holds the evidence.
    The assembled cathedral backdrop now appears
    (`docs/proofs/web-newgame-cathedral-assembled.png`); session 138's
    `web-newgame-cathedral-covered.png` is the state this replaces.
-   Not verified in a browser: CI, and the `OGRE_RAM_KEY_AT_MS` path. Open: the
-   canvas is fixed at 320x240 while the VI scans out 640x476 in the world map, so
-   that mode is rendered into a 640x480 target and downscaled to the canvas
-   (`[GFX-FB]` and `[GFX-PRESENT]` report the sizes); the RDP's framebuffers are
-   not yet sampleable as textures (framebuffer-as-texture, the same gap as the
-   native renderer's tile copy); and `K4`/`K5` as combiner inputs still return 0.
-   See `docs/HANDOFF-2026-10-14-session139.md` and `docs/DECISIONS.md`.
+   Not verified in a browser: CI, and the `OGRE_RAM_KEY_AT_MS` path.
+   Session 141 closed three of those items from the renderer side.
+   (a) The render target's size and the canvas now come from the VI's scanout
+   size, a port of RT64's `VI::fbSize` over the register words
+   `ultramodern::renderer::get_vi_regs()` returns: the target's height is
+   `max(viewport, VI height, scissor bottom + 1)` (RT64's
+   `framebufferHeightForDisplay`) and keeps the tallest value while width and
+   `siz` hold, so the world map's 640-wide colour images are `640x481` instead of
+   `640x240`, and the canvas element is resized on a mode switch, so that mode
+   presents 640x476 instead of being halved into a 320x240 drawing buffer.
+   Only a *visible* mode updates the size (`status.type != BLANK &&
+   hRegion.hStart > 0`, RT64's `VI::visible`): the blanked state OB64 puts the VI
+   in across the switch carries the next mode's serrate bit with `hStart = 0`,
+   which `fbSize` alone reads as `320x952`. The NDC denominator is the render
+   target's size (colour-image width, else viewport, else VI), which is what the
+   RDP's screen coordinates are, so the 640-wide targets no longer clamp at
+   x=319. (b) The per-pixel `G_TEXRECT` S/T step was 32x too large
+   (`dsdx / 32` where RT64's `drawRect` gives `dsdx * rectWidth / 1024`); this is
+   the horizontal banding the title screen showed
+   (`docs/proofs/web-title-640-before-uv-fix.png`), because its 320x240 backdrop
+   is forty 640x12 texrects. (c) `K4`/`K5` are combiner colour inputs now
+   (`convertK[4] / 255`, RT64 `RasterPS.hlsl`) instead of returning 0.
+   Still open in the browser renderer: framebuffer-as-texture (a `G_LOADTILE`
+   whose source is a rendered colour image reads RDRAM), presentation ignores the
+   VI's own view rectangle, and **the browser build faults (`divide by zero`) the
+   first time the game renders its hi-res title screen** - both the session-140
+   package and the session-141 build freeze at task 277 with the same wasm stack
+   (`func_801989AC` <- `func_80198ECC` <- `func_801A29B8` <- `func_801A40EC` <-
+   `func_80177EC0` <- `func_80072398` <- `func_8008AFE0`), so it is not a
+   renderer regression but the title screen is unreachable in the browser.
+   See `docs/HANDOFF-2026-10-14-session141.md`, `docs/HANDOFF-2026-10-14-session139.md`
+   and `docs/DECISIONS.md`.
    Session 140 added the static package and the deployment path: `make web-dist`
    writes `dist-web/` (page, shell, Emscripten output, `coi-serviceworker.js`,
    `.nojekyll`), `.github/workflows/pages.yml` uploads it as the Pages artifact
