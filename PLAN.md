@@ -58,17 +58,7 @@ known and what the next step is.
 
 ### Display
 
-1. **CRT FILTER on the world map and on weaker GPUs.** The three filters are
-    checked on the New Game cathedral, in 4:3 and widescreen, on an RTX 5070 Ti
-    at 2880x2160 and 3840x2160 (`docs/guides/app-build.md` → "CRT filters").
-    Two paths are unobserved. A framebuffer taller than 288 lines is folded to
-    240 scanlines (`VIRenderer::prepare`); the world map's 640-wide targets
-    (AGENTS.md) may be such a framebuffer. No per-filter GPU time is measured,
-    and LOTTES reads about 31 texels per output pixel. Next step: the developer
-    turns each filter on at the world map from a save and reports the picture;
-    time the VI pass per filter (PIX on D3D12) on the machine's AMD integrated
-    GPU at 1080p.
-2. **CRT FILTER and the HD detail.** The filters read the frame averaged to one
+1. **CRT FILTER and the HD detail.** The filters read the frame averaged to one
     texel per framebuffer pixel, so with a filter on, RESOLUTION AUTO and the HD
     background strips only add anti-aliasing. This is the usual CRT behaviour.
     Next step: ask the developer whether a filter should keep the horizontal
@@ -78,7 +68,7 @@ known and what the next step is.
 
 ### Features and mods
 
-3. **HD backgrounds beyond the cathedral.** `mods/backgrounds/` writes a
+2. **HD backgrounds beyond the cathedral.** `mods/backgrounds/` writes a
     backdrop at the game's resolution, and `tools/backgrounds.py hd` (`make
     bg-hd`) cuts RT64 replacement strips from the same PNG, one per `G_LOADTILE`
     strip hash (`docs/guides/hd-backgrounds.md`). Only the cathedral (scene
@@ -89,17 +79,6 @@ known and what the next step is.
     the next backdrop (scene and step) and supplies art; map it in
     `backgrounds.txt`, run `make bg-extract` and `make bg-hd`, and generalise
     `chunk_rect` if the check fails.
-4. **HD strips that share a hash, and the first frames.** Strips that are
-    identical at game resolution have one RT64 hash and show one HD image at
-    every such place; the placeholder pair has four groups that differ by up to
-    2.9/255 in HD (slow gradients). The pack writes the game-resolution pixels
-    itself, so it can make every strip unique: change the lowest bit of one
-    texel in each duplicate strip in `ogre_hd_background` (an invisible step of
-    1/31 in one channel), then rebuild the strips. Separately, the strips use
-    RT64's `stream` operation, so a strip can draw at game resolution for the
-    first frames of a scene. Next step: implement the bit change and require the
-    tool's shared-hash report to be empty; compare the cathedral's first frames
-    with `defaultOperation` `stream` against `stall`.
 
 ### Parked
 

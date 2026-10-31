@@ -24,6 +24,7 @@ mistaken for a replacement.
     tools/backgrounds.py hd 01                 # the cathedral, plain and -wide
     tools/backgrounds.py hd 01 --scale 4       # force the HD canvas to 4x
     tools/backgrounds.py hd 01 --dump D        # keep the RT64 texture dumps in D
+    tools/backgrounds.py hd 01 --operation stream   # load strips in the background
     tools/backgrounds.py hd 01 --from D        # reuse D instead of running
 
 The game draws the composed backdrop as textured quads, one `G_LOADTILE` strip
@@ -207,10 +208,6 @@ CANVAS_IMAGES = {
 # of its rows inside the image; the rest is the check's margin for a source PNG
 # that Pillow and stb_image decode differently (16-bit or gamma-tagged files).
 MATCH_SHARE = 0.98
-# Strips that are identical at game resolution share one RT64 hash. Their HD
-# crops are reported when they differ by at least this mean (0..255 per
-# channel); below it the difference is resampling noise.
-SHARED_REPORT = 1.0
 
 
 def pillow():
@@ -280,6 +277,46 @@ def lowres_canvas(img, fit: bool) -> list[list[tuple[int, int, int]]]:
         src = small[min(max(y - y0, 0), dh - 1)]
         canvas.append([src[min(max(x - x0, 0), dw - 1)] for x in range(CANVAS_W)])
     return canvas
+
+
+def strip_stride(width: int) -> int:
+    """Rows between two strips of a chunk: a 320-wide chunk loads 6 rows every
+    5, a 176-wide chunk 11 rows every 10 (one overlap row)."""
+    return 5 if width == 320 else 10
+
+
+def make_strips_unique(canvas: list[list[tuple[int, int, int]]]) -> int:
+    """`make_strips_unique` in app/src/hd_backgrounds.cpp, in the same order:
+    a strip whose pixels repeat an earlier strip's gets the lowest blue bit of
+    one texel in its third row flipped, at the first column that makes it
+    unique. Returns how many strips were changed."""
+    seen: set[tuple] = set()
+    changed = 0
+    for (w, h), (cx, cy) in CANVAS_IMAGES.items():
+        stride = strip_stride(w)
+        for top in range(0, h, stride):
+            rows = min(stride + 1, h - top)
+            mark = cy + top + min(2, rows - 1)
+
+            def key():
+                return (w, rows) + tuple(tuple(canvas[cy + top + r][cx:cx + w]) for r in range(rows))
+
+            k = key()
+            col = -1
+            while k in seen:
+                if col >= 0:
+                    r, g, b = canvas[mark][cx + col]
+                    canvas[mark][cx + col] = (r, g, b ^ 1)
+                col += 1
+                if col >= w:
+                    break
+                r, g, b = canvas[mark][cx + col]
+                canvas[mark][cx + col] = (r, g, b ^ 1)
+                k = key()
+            if col >= 0:
+                changed += 1
+            seen.add(k)
+    return changed
 
 
 def hd_canvas(img, fit: bool, scale: int):
@@ -400,10 +437,11 @@ def build_variant(variant: str, source: Path, dump: Path, scale: int | None
         print(f"backgrounds.py: {variant}: {source.name} is {img.size[0]}x{img.size[1]}, "
               f"which gives a 1x canvas; the strips add no detail", file=sys.stderr)
     canvas = lowres_canvas(img, fit)
+    changed = make_strips_unique(canvas)
     hd = hd_canvas(img, fit, k)
 
     out: list[tuple[str, object]] = []
-    crops_by_content: dict[tuple, list[tuple[int, int, object]]] = {}
+    expected_total = found_total = 0
     for (w, h), (address, strips) in sorted(images.items()):
         cx, cy = CANVAS_IMAGES[(w, h)]
         equal = total = 0
@@ -430,34 +468,27 @@ def build_variant(variant: str, source: Path, dump: Path, scale: int | None
                 f"backgrounds.py: {variant}: the {w}x{h} image's strips do not match canvas "
                 f"rect ({cx},{cy}) of {source.name}; this backdrop's layout differs from the "
                 f"four-chunk canvas, or the run did not apply the pack")
-        # Strips whose game-resolution content is identical share one hash, and
-        # RT64 then shows one HD strip at every such place. Report the places
-        # whose HD art differs.
-        step = max(st["height"] for st in strips) - 1
-        for ult in range(0, h, max(1, step)):
-            rows = min(step + 1, CANVAS_H - (cy + ult))
-            key = tuple(tuple(canvas[cy + ult + r][cx:cx + w]) for r in range(rows))
-            crop = hd.crop((cx * k, (cy + ult) * k, (cx + w) * k, (cy + ult + rows) * k))
-            crops_by_content.setdefault(key, []).append((cx, cy + ult, crop))
-    from PIL import ImageChops, ImageStat
-    for places in crops_by_content.values():
-        if len(places) < 2:
-            continue
-        first = places[0][2]
-        worst = max(sum(ImageStat.Stat(ImageChops.difference(first, art)).mean) / 3
-                    for _x, _y, art in places[1:])
-        if worst >= SHARED_REPORT:
-            print(f"backgrounds.py: {variant}: the strips at canvas rows "
-                  f"{', '.join(str(y) for _x, y, _a in places)} (x={places[0][0]}) are "
-                  f"identical at game resolution, so they share one hash; RT64 draws one "
-                  f"HD strip at every place, and their HD art differs by up to "
-                  f"{worst:.1f}/255 on average", file=sys.stderr)
+        # RT64 dumps one file per hash, so a strip position missing from the
+        # dump shares its hash with another strip and would show that strip's
+        # HD image.
+        expected = set(range(0, h, strip_stride(w)))
+        shared = sorted(expected - {s["ult"] for s in strips})
+        expected_total += len(expected)
+        found_total += len(expected) - len(shared)
+        if shared:
+            print(f"backgrounds.py: {variant}: the {w}x{h} image's strips at rows "
+                  f"{', '.join(str(r) for r in shared)} share a hash with another strip; the "
+                  f"app that wrote the dump does not make the strips unique "
+                  f"(make_strips_unique in app/src/hd_backgrounds.cpp)", file=sys.stderr)
+    print(f"backgrounds.py: {variant}: {found_total} of {expected_total} strips have their own "
+          f"hash ({changed} made unique by one texel)")
     print(f"backgrounds.py: {variant}: {source.name} {img.size[0]}x{img.size[1]} -> HD canvas "
           f"{CANVAS_W * k}x{CANVAS_H * k} ({k}x)")
     return out, version
 
 
-def write_pack(eid: str, variants: dict[str, list[tuple[str, object]]], version: int) -> None:
+def write_pack(eid: str, variants: dict[str, list[tuple[str, object]]], version: int,
+               operation: str) -> None:
     """Write the strips under hd/<id>[-wide]/ and merge them into hd/rt64.json,
     keeping the other mappings' entries."""
     HD.mkdir(parents=True, exist_ok=True)
@@ -468,7 +499,7 @@ def write_pack(eid: str, variants: dict[str, list[tuple[str, object]]], version:
     db["configuration"] = {
         "autoPath": "rt64",
         "configurationVersion": 3,
-        "defaultOperation": "stream",
+        "defaultOperation": operation,
         "defaultShift": "half",
         "hashVersion": version,
     }
@@ -527,7 +558,7 @@ def cmd_hd(args) -> int:
                 log=dump / "run.log")
         strips, version = build_variant(variant, source, dump, args.scale)
         variants[variant] = strips
-    write_pack(eid, variants, version)
+    write_pack(eid, variants, version, args.operation)
     if args.from_dir is None and args.dump is None:
         shutil.rmtree(dump_root, ignore_errors=True)
     return 0
@@ -561,6 +592,13 @@ def main() -> int:
                     help="reuse the dumps of an earlier --dump instead of running")
     hd.add_argument("--app", type=Path, default=None)
     hd.add_argument("--rom", type=Path, default=DEFAULT_ROM)
+    # stall: RT64 decodes a strip before the frame that first draws it, so no
+    # strip shows at game resolution; the cathedral's 116 strips cost 16.1 ms
+    # once. stream: background threads load them and the game-resolution strip
+    # draws meanwhile; all 116 were in HD 21.1 ms after the first was queued
+    # (normal speed, 2026-10-31).
+    hd.add_argument("--operation", choices=("stall", "stream"), default="stall",
+                    help="RT64 load operation for the strips (default: stall)")
 
     args = ap.parse_args()
     if args.command in ("extract", "hd") and args.app is None:

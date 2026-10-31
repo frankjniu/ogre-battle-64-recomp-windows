@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #if !defined(__EMSCRIPTEN__)
@@ -167,6 +168,68 @@ std::vector<uint16_t> to_canvas_fit(const uint8_t* rgba, int sw, int sh) {
     return canvas;
 }
 
+// The strips the game draws the backdrop with, one G_LOADTILE per quad
+// (docs/guides/njpeg-backgrounds.md -> the pipeline, step 5): a 320-wide chunk
+// loads 6 rows every 5 rows, a 176-wide chunk 11 rows every 10. The chunks are
+// chunk_rect's, in pass order.
+struct StripChunk {
+    int x;
+    int y;
+    int w;
+    int h;
+    int stride;
+};
+
+constexpr StripChunk kStripChunks[] = {
+    {0, 0, 320, 240, 5},
+    {320, 0, 176, 240, 10},
+    {0, 239, 320, 144, 5},
+    {320, 239, 176, 144, 10},
+};
+
+// RT64 replaces a strip by the hash of its texels, so strips with the same
+// game-resolution pixels share one HD image (tools/backgrounds.py hd). This
+// makes every strip of the canvas unique, in strip order: a strip that repeats
+// an earlier one gets the lowest blue bit of one texel flipped, in its third
+// row. No other strip loads that row (neighbours share a strip's first and
+// last rows), and it is never canvas row 239, where the top and bottom chunks
+// meet. The first column that makes the strip unique is used, so every strip
+// carries at most one changed texel: a step of 1/31 in one channel, drawn only
+// when the HD strips are not loaded. tools/backgrounds.py repeats this pass,
+// so the pixels it checks are these.
+void make_strips_unique(std::vector<uint16_t>& canvas) {
+    std::unordered_set<std::string> seen;
+    for (const StripChunk& c : kStripChunks) {
+        for (int top = 0; top < c.h; top += c.stride) {
+            const int rows = std::min(c.stride + 1, c.h - top);
+            const int mark_row = c.y + top + std::min(2, rows - 1);
+            auto key = [&]() {
+                std::string k;
+                k.reserve(8 + size_t(rows) * c.w * 2);
+                k += std::to_string(c.w) + "x" + std::to_string(rows) + ":";
+                for (int r = 0; r < rows; ++r) {
+                    const uint16_t* row = &canvas[size_t(c.y + top + r) * kCanvasW + c.x];
+                    k.append(reinterpret_cast<const char*>(row), size_t(c.w) * sizeof(uint16_t));
+                }
+                return k;
+            };
+            std::string k = key();
+            int col = -1;
+            while (!seen.insert(k).second) {
+                uint16_t* row = &canvas[size_t(mark_row) * kCanvasW + c.x];
+                if (col >= 0) {
+                    row[col] ^= 0x0002;  // undo the previous try
+                }
+                if (++col >= c.w) {
+                    break;
+                }
+                row[col] ^= 0x0002;
+                k = key();
+            }
+        }
+    }
+}
+
 // Load one image file into the canvas form, or leave `out` empty. `fit` picks
 // the aspect-preserving mapping used for the widescreen variant.
 bool load_canvas(const std::filesystem::path& png, const char* what, bool fit,
@@ -183,6 +246,7 @@ bool load_canvas(const std::filesystem::path& png, const char* what, bool fit,
         return false;
     }
     out = fit ? to_canvas_fit(data, w, h) : to_canvas(data, w, h);
+    make_strips_unique(out);
     stbi_image_free(data);
     std::fprintf(stderr, "[hdbg]   %-13s <- %s (%dx%d -> %s)\n", what,
                  png.filename().string().c_str(), w, h,

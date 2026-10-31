@@ -300,8 +300,10 @@ this file.
   The game draws the backdrop as 116 `G_LOADTILE` strips (320x6, 176x11) per frame;
   `tools/backgrounds.py hd <id>` reads each strip's hash and rows from an `OGRE_DUMP_TEX` run with the
   pack applied, cuts the matching rectangle of the PNG at an integer scale, and writes
-  `mods/backgrounds/hd/`, which the renderer loads with `loadReplacementDirectory`. Strips identical
-  at game resolution share one hash and one HD image (2026-10-31).
+  `mods/backgrounds/hd/`, which the renderer loads with `loadReplacementDirectory`. The pack makes
+  every strip unique by flipping one texel's lowest blue bit in each strip that repeats an earlier
+  one (`make_strips_unique`, mirrored in the tool), and the strips use RT64's `stall` operation, so no
+  strip draws at game resolution (2026-10-31).
 
 ## Releases and packaging
 

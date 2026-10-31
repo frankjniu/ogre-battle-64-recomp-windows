@@ -167,9 +167,13 @@ tools/backgrounds.py hd 01 --from D          # rebuild from D without running
    (`<hash>.v5.rice.json`) and its size (`.tile.json`), and names the chunk by
    its size.
 3. It checks each strip's dumped pixels against the canvas the pack wrote (the
-   same box filter as `hd_backgrounds.cpp`) and stops when fewer than 98 % of the
-   texels match, which is what a different chunk layout produces. The cathedral
-   matches 100 %.
+   same box filter and the same `make_strips_unique` pass as
+   `hd_backgrounds.cpp`) and stops when fewer than 98 % of the texels match,
+   which is what a different chunk layout produces. The cathedral matches
+   exactly (0 of 220,976 texels differ per variant). It also counts the strip
+   positions that have their own hash in the dump: RT64 dumps one file per
+   hash, so a missing position shares a hash with another strip. The cathedral
+   has 116 of 116 in both variants.
 4. It resamples the PNG to an integer multiple of the canvas with Lanczos
    (the `-wide` image placed as `to_canvas_fit` places it), cuts each strip's
    rectangle, and writes `hd/<id>/<hash>.png`, `hd/<id>-wide/<hash>.png` and
@@ -178,15 +182,24 @@ tools/backgrounds.py hd 01 --from D          # rebuild from D without running
 The app loads `<pack>/hd` as an RT64 texture pack at renderer start when the
 pack is loaded and `hd/rt64.json` exists, and logs `[hdbg] texture pack <dir>`.
 `OGRE_BG_HD=0` skips it for one run and keeps the game-resolution write. The
-replacements use RT64's defaults: `stream` (a strip can show at game
-resolution for the first frames while its PNG loads) and the half-texel shift.
-`mods/backgrounds/hd/` is generated and gitignored. Rebuild it after changing a
-PNG or `chunk_rect`.
+replacements use RT64's half-texel shift and the `stall` operation: RT64 decodes
+a strip before the frame that first draws it, so no strip shows at game
+resolution. Measured at normal speed on the cathedral, the 116 strips cost
+16.1 ms of decoding once (1.44 ms at most for one). `--operation stream` loads
+them on background threads instead, with no wait; the game-resolution strip
+draws until its PNG is ready, and all 116 were in HD 21.1 ms after the first
+was queued (one or two frames at 60 Hz). `mods/backgrounds/hd/` is generated
+and gitignored. Rebuild it after changing a PNG, `chunk_rect` or
+`make_strips_unique`.
 
-Strips that are identical at game resolution have one hash, so RT64 draws one HD
-strip at every such place. This happens in slow vertical gradients and flat
-areas; the tool lists the places whose HD art differs by at least 1/255 on
-average (the placeholder pair: four groups, up to 2.9/255).
+RT64 replaces a strip by the hash of its texels, so two strips with the same
+game-resolution pixels would share one HD image; that happens in slow vertical
+gradients and flat areas (the placeholder pair had 4 such strips in the plain
+image and 43 in the wide one). When the pack loads an image,
+`make_strips_unique` (`app/src/hd_backgrounds.cpp`) flips the lowest blue bit of
+one texel in each strip that repeats an earlier one, in the strip's third row,
+which no other strip loads. Each strip changes at most one texel by 1/31 in one
+channel, and that texel is drawn only when the HD strips are not loaded.
 
 ## Widescreen
 
@@ -298,5 +311,6 @@ not the composed screen.
 * The pack replaces the backdrop only, not the dialogue box or the portraits.
 * The HD strips need one capture run per mapping and per variant, and a run
   reaches only the backdrops its route assembles (`OGRE_STEP` for scene `0x0D`).
-* Strips that are identical at game resolution share one HD image (see "HD
-  strips").
+* `make_strips_unique` assumes the draw's strip layout (6 rows every 5 for a
+  320-wide chunk, 11 every 10 for a 176-wide one); the tool's hash count reports
+  a backdrop drawn another way.
