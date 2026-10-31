@@ -211,6 +211,11 @@ this file.
 - **RESOLUTION defaults to `auto` (RT64 `WindowIntegerScale`) under the key `render_resolution`.**
   Files written while the row was hidden carry a `resolution = native` no player chose, so that key
   is ignored. Integer scales keep 2D pixels even (session 145).
+- **2D rectangles sample at the console's pixel positions (RT64 `upscale2D = Original`).** RT64's
+  default `ScaledOnly` upscales any `G_TEXRECT` not scaled exactly 1:1, and OB64 stretches its
+  dialogue box by 1026..1169/1024; at 4x and above the last row and column then read one texel past
+  the window, which drew a broken row under the box's shadow and a sliver beside the portrait.
+  `OGRE_UPSCALE_2D=scaled` brings that back for an A/B (2026-10-31).
 - **MSAA stays behind `OGRE_DISPLAY_EXPERIMENTS=1` (or a set `OGRE_MSAA`).** It produced artifacts
   in session 121 and is unverified since; the configured value is kept and not applied.
 - **The game window opens 1080 points tall (1440x1080; 1920x1080 with WIDESCREEN), and the process

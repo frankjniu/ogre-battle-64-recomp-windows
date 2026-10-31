@@ -67,6 +67,13 @@ known and what the next step is.
     HD detail (sample the HD frame across a scanline instead of the averaged
     texel), and whether the rows need tunables (scanline strength, mask
     strength, curvature on or off), which today are the libretro defaults.
+2. **A vertical line at the centre of the frame in a cutscene dialogue.** The
+    developer's screenshot (2026-10-31; fullscreen at 12x, WIDESCREEN on, CRT
+    FILTER `crts`) shows a one-column dip at game x 160 that crosses both
+    dialogue boxes and the backdrop. A 9x windowed run with the same settings
+    does not show it, with the filter on or off. Next step: the developer turns
+    CRT FILTER off on the screen that shows the line; if the line stays, capture
+    the fullscreen frame with `OGRE_CAPTURE_PRESENT`.
 
 ### Features and mods
 

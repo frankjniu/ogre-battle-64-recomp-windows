@@ -601,9 +601,16 @@ points and the swap chain is real pixels. The boot logs
 | `MSAA` | `OFF` / `2X` / `4X` / `8X` | `msaa_option`; a change rebuilds the render targets (`updateMultisampling`). Experimental |
 | `WINDOW` | `WINDOWED` / `FULLSCREEN` | `wm_option`; the backend's `setFullScreen`, without recreating the window |
 
-1:1 2D screens (publishers, title, text) look the same at every resolution
-because RT64's `upscale2D = ScaledOnly` keeps unscaled rectangles native; scaled
-sprites, njpeg backdrops and 3D render higher. Saved keys:
+2D rectangles (`G_TEXRECT`) look the same at every resolution: the app sets
+RT64's `upscale2D = Original` (`set_application_user_config`), so the shader
+samples each rectangle at the console's pixel positions. RT64's default
+`ScaledOnly` upscaled every rectangle whose `dsdx`/`dtdy` is not exactly 1024,
+and the dialogue box (three rectangles stretched by 1026..1169/1024 over a 16x61
+window) then sampled one texel past its window in its last row and column: a
+broken row under the box's shadow and a sliver beside the portrait.
+`OGRE_UPSCALE_2D=scaled|all` restores RT64's modes. Triangles (3D, the cutscene
+backdrop strips) render at the full resolution, and HD replacement textures
+sample at full resolution in both modes. Saved keys:
 `render_resolution = native|2x|auto`, `crt_filter = off|hyllian|crts|lottes`,
 `msaa = off|2x|4x|8x`, `window = windowed|fullscreen`. The older `resolution`
 key is not read, so an existing `settings.cfg` gets `AUTO`.
@@ -1051,6 +1058,7 @@ All knobs default to off. Settings overrides apply for one run and never write
 | `OGRE_WS_SCENES=<hex>[,<hex>…]` | Expand scenes (default `0x03`, `0x0D`; HD-background scenes added) |
 | `OGRE_RESOLUTION=native\|2x\|auto` | RESOLUTION |
 | `OGRE_CRT=off\|hyllian\|crts\|lottes` | CRT FILTER |
+| `OGRE_UPSCALE_2D=original\|scaled\|all` | RT64's `upscale2D` for 2D rectangles; default `original` (see "Display") |
 | `OGRE_DISPLAY_EXPERIMENTS=1` | show and apply MSAA |
 | `OGRE_MSAA=off\|2x\|4x\|8x` | MSAA (enables the row) |
 | `OGRE_WINDOW=windowed\|fullscreen` | WINDOW |
