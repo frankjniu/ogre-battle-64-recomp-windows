@@ -135,6 +135,11 @@ configured without them uses the default generator and `cl.exe`, which fails.
   `Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja`.
 - **`bash` resolves to WSL** once the VS `PATH` is first: the name finds
   `System32\bash.exe`. Run repo scripts with `/usr/bin/bash`.
+- **`make` from PowerShell runs recipes in `cmd.exe`** when no `sh.exe` is on
+  `PATH` (the Chocolatey `make` is a native build). Append Git's `usr\bin` at the
+  end of `PATH`, not the front: its `link.exe` would shadow the MSVC linker.
+  `tools/smoke-dist.sh` check 5 also needs
+  `C:\Windows\System32\WindowsPowerShell\v1.0` on `PATH`.
 - **`python3` may be the Microsoft Store stub.** `tools/smoke-dist.sh` skips a
   candidate that cannot run `-c "import sys"` and tries `python3`, `python`, then
   `py -3`. Other tools that call `python3` (`make bg-extract`, `make bg-hd`) still
@@ -412,6 +417,28 @@ controllers may be absent, and the game then runs silently.
 `.github/workflows/release.yml` builds packages, creates a GitHub release and
 attaches one archive per platform (`ogre-battle-64-recomp-windows-x86_64.zip`
 for Windows). Its matrix still lists macOS and Linux.
+
+### Releasing from the fork (Windows only)
+
+Releases are published on `frankjniu/ogre-battle-64-recomp-windows` from the
+Windows machine. The fork's Release workflow is disabled: it needs a self-hosted
+runner or the private data repository, and the fork has neither. v0.9.0 was
+made this way.
+
+```sh
+make dist-zip DIST_OS=windows CMAKE_ARGS="-G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl"
+DIST_OS=windows /usr/bin/bash tools/smoke-dist.sh        # must print PASS
+gh release create vX.Y.Z dist/ogre-battle-64-recomp-windows.zip \
+  --repo frankjniu/ogre-battle-64-recomp-windows --target <main commit> --draft \
+  --title "vX.Y.Z (Windows)" --notes-file <notes.md>
+gh release edit vX.Y.Z --repo frankjniu/ogre-battle-64-recomp-windows --draft=false
+```
+
+Bump `recomp::Version` in `app/src/main.cpp` (and `app/src/main_web.cpp`) to
+the release's version first. Pin `--target` to a commit: a draft creates its tag
+only when it is published, at the target's state then. `gh pr create` and
+`gh release` in a fork default to the parent repository, so always pass
+`--repo`.
 
 ### `make release`
 
