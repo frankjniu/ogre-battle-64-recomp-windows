@@ -7,6 +7,57 @@ the RT64 renderer.
 **This repository contains no copyrighted game data.** You must supply your own
 ROM dump.
 
+## About this fork
+
+This repository is a Windows fork of
+[lfarroco/ogre-battle-64-recomp](https://github.com/lfarroco/ogre-battle-64-recomp).
+It builds, tests and releases the Windows executable only. Download the Windows
+build from this repository's
+[Releases](https://github.com/frankjniu/ogre-battle-64-recomp-windows/releases)
+page.
+
+Changes since upstream's v0.8.3 release:
+
+- **Lower CPU use.** The game's idle thread sleeps instead of spinning a core: a
+  30-second boot uses about 4 s of CPU instead of 34 s. The start screen uses 7%
+  of one core instead of 170%.
+- **Sharper picture.** The window opens at 1080p, is DPI aware, and renders at
+  the largest whole multiple of 320x240 that fits it. 2D art (dialogue boxes,
+  portraits) is sampled at the console's pixel positions, so it shows no seams at
+  high resolution.
+- **CRT filters:** HYLLIAN, CRTS and LOTTES.
+- **Cheats:** MAX GOTH and MAX ITEM COUNTS.
+- **Quick save and quick load** with F5 and F9.
+- **Replacement dialogue backdrops,** including higher-resolution images through
+  an RT64 texture pack. The repository ships one test image;
+  [`docs/guides/hd-backgrounds.md`](docs/guides/hd-backgrounds.md) explains how
+  to make a pack.
+- **Fixes:** audio tasks run in step with the RSP, a stalled game writes a hang
+  report, and a double-clicked launch that crashes still writes `error.log`.
+- **A documented Windows build** with the Visual Studio 2022 Build Tools and
+  clang-cl.
+
+## Features
+
+Every setting is on the start screen and in the `ESC` panel during play, and is
+saved in `settings.cfg` or `controls.cfg` beside the executable.
+
+| Feature | What it does |
+|---|---|
+| GAME SPEED | 1x, 2x, 4x or 8x. During play, `=`/`-` on the keyboard or R3 on a pad change it. |
+| RESOLUTION | `NATIVE` (320x240), `2X`, or `AUTO` (the default). |
+| WIDESCREEN | 16:9 on the mission field and in cutscene dialogues; other screens keep 4:3 with side bars. |
+| CRT FILTER | `OFF`, `HYLLIAN` (sharp, lightest), `CRTS` (slight curve) or `LOTTES` (shadow mask, bloom and curve). |
+| WINDOW | Windowed or fullscreen. |
+| SOUNDS, VOLUME | Sound on or off, and the output volume. |
+| CONTROLS | Rebind every N64 button on the keyboard and on an XInput gamepad. |
+| MOUSE | The pointer drives the world-map and mission-field cursors. Off by default. |
+| CHEATS | MAX GOTH holds goth at 9,999,999; MAX ITEM COUNTS holds every owned item at 99. |
+| Quick save | `F5` copies the battery save to a quick slot; `F9` twice restores it and restarts the game. |
+| Mods | `.nrm` code mods in `mods/`, turned on one by one on the MODS tab. The package ships three, all off: Skip Boot Logos, EXP Overflow and Item Randomizer (experimental). |
+| Saves | The battery save is `saves/ogrebattle64-us-rev1.bin`. `tools/sramsave.py` imports emulator saves (mupen64plus `.srm`, parallel-n64, DexDrive `.N64`). |
+| Crash log | A crash writes `error.log` beside the executable with the fault address and the N64 thread call chain. |
+
 ## System requirements
 
 * **OS** — Windows 10 or 11 (64-bit).
@@ -34,7 +85,7 @@ executable.
 ## Playing
 
 Unzip the release, then start `ogrebattle64.exe`. The start screen (`OGRE BATTLE
-64: RECOMP`, tabs MAIN, MODS, CONTROLS, SETTINGS, DEBUG) asks for the ROM once:
+64: RECOMP`, tabs MAIN, MODS, CONTROLS, SETTINGS, CHEATS, DEBUG) asks for the ROM once:
 press `SPACE` to pick it, drag it onto the window, or put it next to the
 executable. `ESC` opens the same panel over the running game. The battery save is
 `saves/` beside the executable.
@@ -84,7 +135,7 @@ the bank configs set `base_path: ../..`.
 
 ## AI disclaimer
 
-This project is mostly an experiment of checking "How far can DeepSeek go?". So far,
+This project is mostly an experiment of checking "How far can DeepSeek and Claude Code go?". So far,
 the results are quite impressive!
 
 ## Legal

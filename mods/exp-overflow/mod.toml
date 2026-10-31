@@ -27,7 +27,7 @@ authors = [ "Ogre Battle 64 Recomp" ]
 # The id the port registers for mods. See `MOD_GAME_ID` in app/src/game.hpp.
 game_id = "ogrebattle64"
 
-# The port's `project_version` is 0.1.0 (app/src/main.cpp). A mod whose minimum
+# The port's `project_version` is 0.9.0 (app/src/main.cpp). A mod whose minimum
 # is higher is refused at load.
 minimum_recomp_version = "0.1.0"
 
