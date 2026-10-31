@@ -1540,25 +1540,26 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         app_->interpreter->loadUCodeGBI(task->t.ucode & 0x3FFFFFF, task->t.ucode_data & 0x3FFFFFF, true);
 
         ++dl_count_;
+        // OGRE_DL_TRACE=1 prints every submission with its time, and how long RT64
+        // took to process it. Without it a run prints nothing per display list
+        // (session 145); it used to sample the first eight and every tenth, which
+        // is debug output in a release build (session 117 item 8).
+        static const bool dl_trace = getenv("OGRE_DL_TRACE") != nullptr;
         const auto dl_begin = std::chrono::high_resolution_clock::now();
         // Wall time between submissions plus the recompiled-function entries the
         // game spent on the frame: a frame that takes 2 s because it executes
         // 50x the work is a different bug from one that simply slept.
         static uint64_t last_entries = 0;
-        {
+        if (dl_trace) {
             uint64_t entries = ultramodern::debug_total_entry_count();
             const uint64_t delta = entries - last_entries;
             last_entries = entries;
-            // OGRE_DL_TRACE=1 prints every submission with its time; the default
-            // samples the first few and every tenth.
-            if (getenv("OGRE_DL_TRACE") != nullptr || dl_count_ <= 8 || (dl_count_ % 10) == 0) {
-                // trace_millis, not time_since_start: the profiler and scheduler
-                // ring report on the same clock, so stalls can be lined up with
-                // the work the game was doing.
-                fprintf(stderr, "[renderer] display list %u at t=%llums entries=%llu (type=%u ucode=0x%08X data=0x%08X)\n",
-                        dl_count_, (unsigned long long)ultramodern::trace_millis(),
-                        (unsigned long long)delta, task->t.type, task->t.ucode, task->t.data_ptr);
-            }
+            // trace_millis, not time_since_start: the profiler and scheduler
+            // ring report on the same clock, so stalls can be lined up with
+            // the work the game was doing.
+            fprintf(stderr, "[renderer] display list %u at t=%llums entries=%llu (type=%u ucode=0x%08X data=0x%08X)\n",
+                    dl_count_, (unsigned long long)ultramodern::trace_millis(),
+                    (unsigned long long)delta, task->t.type, task->t.ucode, task->t.data_ptr);
         }
 
         // OGRE_NOP_RECT=<selectors>: bisect aid, see the helper above.
@@ -1807,7 +1808,7 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         }
         const auto dl_end = std::chrono::high_resolution_clock::now();
         const auto dl_ms = std::chrono::duration_cast<std::chrono::microseconds>(dl_end - dl_begin).count();
-        if (dl_count_ <= 8 || (dl_count_ % 10) == 0 || dl_ms > 100000) {
+        if (dl_trace) {
             fprintf(stderr, "[renderer]   processDisplayLists %lld us (dl %u)\n",
                     (long long)dl_ms, dl_count_);
             fflush(stderr);

@@ -46,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from n64map import load_map  # noqa: E402
+from rdram import load_image  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 ROM = ROOT / "assets" / "ogre64.z64"
@@ -164,8 +165,8 @@ def descriptors(main: str) -> dict[int, int | None]:
 def read_words(rom: bytes, vram: int, count: int, dump: bytes | None = None):
     if dump is not None:
         base = vram & 0x1FFFFFFF
-        # runtime byte order: logical word at a is LE at (a-0x80000000)
-        return [int.from_bytes(bytes(dump[base + i * 4:base + i * 4 + 4]), "little")
+        # `load_image` returns ROM order, whichever layout the file has.
+        return [int.from_bytes(bytes(dump[base + i * 4:base + i * 4 + 4]), "big")
                 for i in range(count)]
     seg = load_map().vram_to_rom(vram)
     if seg is None or seg + count * 4 > len(rom):
@@ -175,7 +176,7 @@ def read_words(rom: bytes, vram: int, count: int, dump: bytes | None = None):
 
 def cmd_scenes(dump_path: str | None) -> None:
     rom = ROM.read_bytes()
-    dump = Path(dump_path).read_bytes() if dump_path else None
+    dump = load_image(dump_path) if dump_path else None
     main = disassemble(ELF_MAIN)
     reg = scene_registry(main)
     desc = descriptors(main)

@@ -28,6 +28,7 @@
 // an identical redefinition is harmless.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <io.h>
 #endif
 
 #include "recomp.h"
@@ -204,10 +205,39 @@ static void disable_console_quick_edit() {
     mode &= ~static_cast<DWORD>(ENABLE_QUICK_EDIT_MODE);
     SetConsoleMode(input, mode);
 }
+
+// True when `fd` already writes to a file or a pipe that the launching process
+// chose (`ogrebattle64.exe > run.log 2>&1`, a CI step, an IDE's output pane).
+static bool std_fd_is_redirected(int fd) {
+    const intptr_t handle = _get_osfhandle(fd);
+    if (handle == -1 || handle == -2) {  // -2 is the UCRT's _NO_CONSOLE_FILENO
+        return false;
+    }
+    const DWORD type = GetFileType(reinterpret_cast<HANDLE>(handle));
+    return type == FILE_TYPE_DISK || type == FILE_TYPE_PIPE;
+}
+
+// Reopens a standard stream on `path` so that it lands on its own descriptor
+// `fd`. A process started with no standard handles (an Explorer launch) gets
+// streams bound to no descriptor: the UCRT sets their `_file` to
+// _NO_CONSOLE_FILENO (-2) and keeps fds 0..2 open as placeholders, so freopen
+// would open fd 3 or higher, and everything printed would miss fd 1/2 and
+// crash_log's pipe on them. Closing the placeholder first makes `fd` the lowest
+// free descriptor, which freopen then takes (session 145).
+static void reopen_std_stream(FILE* stream, int fd, const char* path, const char* mode) {
+    if (_fileno(stream) < 0) {
+        _close(fd);
+    }
+    FILE* reopened = nullptr;
+    freopen_s(&reopened, path, mode, stream);
+}
 #endif
 
 int main(int argc, char** argv) {
 #if defined(_WIN32) && !defined(__MINGW32__)
+    // Read before AttachConsole, which is what retargets the streams below.
+    const bool stdout_redirected = std_fd_is_redirected(1);
+    const bool stderr_redirected = std_fd_is_redirected(2);
     // OGRE_CONSOLE=1: allocate a console and put the [boot] log in it. The
     // distributed build is a GUI-subsystem image, and AttachConsole below only
     // finds a console that the parent already has, so a double-click has none.
@@ -215,10 +245,9 @@ int main(int argc, char** argv) {
     // way to see where a boot stops (Zelda64Recomp's Windows build has the same
     // `--show-console` switch). It never runs unless the variable is set.
     if (getenv("OGRE_CONSOLE") != nullptr && GetConsoleWindow() == nullptr && AllocConsole()) {
-        FILE* console = nullptr;
-        freopen_s(&console, "CONIN$", "r", stdin);
-        freopen_s(&console, "CONOUT$", "w", stdout);
-        freopen_s(&console, "CONOUT$", "w", stderr);
+        reopen_std_stream(stdin, 0, "CONIN$", "r");
+        reopen_std_stream(stdout, 1, "CONOUT$", "w");
+        reopen_std_stream(stderr, 2, "CONOUT$", "w");
         SetConsoleOutputCP(CP_UTF8);
         disable_console_quick_edit();
     }
@@ -227,12 +256,26 @@ int main(int argc, char** argv) {
     // attaches only when the parent already has a console (a double-click from
     // Explorer has none, so it fails and is ignored). This runs before
     // crash_log::install so the capture forwards to the console like any other
-    // terminal.
+    // terminal. A stream the caller redirected to a file or a pipe keeps it:
+    // reopening it on CONOUT$ sent `> run.log 2>&1` to the console and left the
+    // file empty (session 119).
     else if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-        FILE* console = nullptr;
-        freopen_s(&console, "CONOUT$", "w", stdout);
-        freopen_s(&console, "CONOUT$", "w", stderr);
+        if (!stdout_redirected) {
+            reopen_std_stream(stdout, 1, "CONOUT$", "w");
+        }
+        if (!stderr_redirected) {
+            reopen_std_stream(stderr, 2, "CONOUT$", "w");
+        }
         disable_console_quick_edit();
+    }
+    // An Explorer launch has no standard handles and no console. Give both
+    // streams the null device on fds 1 and 2, so crash_log's capture has
+    // something to record and error.log carries the boot log (session 119).
+    if (_fileno(stdout) < 0) {
+        reopen_std_stream(stdout, 1, "NUL", "w");
+    }
+    if (_fileno(stderr) < 0) {
+        reopen_std_stream(stderr, 2, "NUL", "w");
     }
 #endif
 

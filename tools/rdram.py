@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""Read an `OGRE_DUMP_RDRAM=<path>` image with the runtime's byte order.
+"""Read a whole-RDRAM image, in either of the two layouts the app writes.
 
-**The image stores bytes in ROM order.** The four file bytes at a guest address,
-read big-endian, are the guest word; the file byte at `a & 0x1FFFFFFF` is the
-logical byte the game holds at guest address `a`. Session 132 verified this on
-`D_8018FC88` (= `0x80269640`: the file bytes are `80 26 96 40`) and on the whole
-part-cache layout, whose presence bitmap, sheets and code table come out at
-`+0x8000`, `+0x8200`, `+0x82A8` and `+0x8350` only under this rule.
+**Two layouts exist, and `load_image` accepts both.**
+
+* `OGRE_RAM_KEY_FULL` writes **ROM order**: the four file bytes at a guest
+  address, read big-endian, are the guest word, and the file byte at
+  `a & 0x1FFFFFFF` is the logical byte the game holds at `a`. Session 132
+  verified this on `D_8018FC88` (= `0x80269640`: the file bytes are
+  `80 26 96 40`).
+* `OGRE_DUMP_RDRAM` and the console's `dump`/`snap` write the **raw host
+  buffer** (`fwrite(rdram, ...)`): every 4-byte group is the guest word in
+  little-endian order, so the same pointer reads `40 96 26 80`.
+
+`load_image` tells them apart by counting `jr $ra` (`0x03E00008`) in the main
+segment (`0x80070C00..0x800AEDB0`, resident in every image, hundreds of
+returns): `03 E0 00 08` in ROM order, `08 00 E0 03` in the raw layout. A raw
+image is byte-swapped per word on load, so every reader below works on ROM
+order:
 
     word  at guest address a : int.from_bytes(d[a & 0x1FFFFFFF : +4], 'big')
     half  at guest address a : int.from_bytes(d[a & 0x1FFFFFFE : +2], 'big')
     byte  at guest address a : d[a & 0x1FFFFFFF]
-
-An LE read of the same four bytes returns the byte-reversed value
-(`0x40962680` for the pointer above), which is not the guest word.
 
 (`docs/guides/app-build.md` -> "Reading a dump" and
 `docs/guides/sprite-mechanisms.md`.) Every session re-derives this, which is why
@@ -47,6 +54,7 @@ bytes that *are* there and names the ROM offset they came from. The
 
 from __future__ import annotations
 
+import array
 import re
 import struct
 import sys
@@ -54,6 +62,38 @@ from pathlib import Path
 
 RDRAM_BASE = 0x80000000
 RDRAM_SIZE = 0x800000
+
+# The main segment's code, as RDRAM offsets. It is loaded at boot and never
+# replaced, so every image holds it.
+MAIN_CODE = (0x00070C00, 0x000AEDB0)
+_JR_RA_ROM_ORDER = bytes.fromhex("03e00008")
+_JR_RA_RAW = bytes.fromhex("0800e003")
+
+
+def image_layout(data: bytes) -> str:
+    """`"rom"` for a ROM-order image, `"raw"` for the host buffer's layout."""
+    code = data[MAIN_CODE[0]:MAIN_CODE[1]]
+    rom_order = code.count(_JR_RA_ROM_ORDER)
+    raw = code.count(_JR_RA_RAW)
+    if rom_order == 0 and raw == 0:
+        raise ValueError("no `jr $ra` in the main segment: not an RDRAM image")
+    return "rom" if rom_order >= raw else "raw"
+
+
+def to_rom_order(data: bytes) -> bytes:
+    """`data` in ROM order, whichever layout it has."""
+    if image_layout(data) == "raw":
+        words = array.array("I")
+        assert words.itemsize == 4
+        words.frombytes(data[:len(data) & ~3])
+        words.byteswap()
+        data = words.tobytes() + data[len(data) & ~3:]
+    return data
+
+
+def load_image(path: str | Path) -> bytes:
+    """The image at `path`, in ROM order whichever layout the file has."""
+    return to_rom_order(Path(path).read_bytes())
 
 
 def parse_addr(text: str) -> int:
@@ -67,13 +107,13 @@ def parse_addr(text: str) -> int:
 class Dump:
     def __init__(self, path: str) -> None:
         self.path = path
-        self.data = open(path, "rb").read()
+        raw = Path(path).read_bytes()
+        self.layout = image_layout(raw)
+        self.data = to_rom_order(raw)
         self.base = RDRAM_BASE
         # The whole dump in logical (guest) byte order: logical[off] ==
-        # d.byte(0x80000000 + off). The file already stores the logical bytes in
-        # order, so this is a straight copy. An earlier version transposed each
-        # 4-byte group, which is right only for a byte-reversed image and is what
-        # made the `banks` comparison read the wrong bytes (session 132).
+        # d.byte(0x80000000 + off). `load_image` already returns ROM order, so
+        # this is a straight copy.
         self.logical = bytearray(self.data)
 
     def logical_at(self, addr: int, length: int) -> bytes:

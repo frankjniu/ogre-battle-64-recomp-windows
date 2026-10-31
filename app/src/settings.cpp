@@ -33,7 +33,7 @@ std::filesystem::path g_pref_dir;
 // update_gfx callback) reads and writes them, so they need no lock.
 int g_game_speed = 1;
 WidescreenMode g_widescreen = WidescreenMode::Off;
-ResolutionMode g_resolution = ResolutionMode::Native;
+ResolutionMode g_resolution = ResolutionMode::Auto;
 AntialiasMode g_antialias = AntialiasMode::Off;
 DisplayMode g_display = DisplayMode::Windowed;
 SoundMode g_sound = SoundMode::On;
@@ -132,11 +132,12 @@ std::string lowercase(std::string text) {
     return text;
 }
 
-// Whether RESOLUTION and MSAA are live this run. The two are experimental and
-// produced visual artifacts in a player run (developer, session 121), so they are
-// off unless the run asks for them: `OGRE_DISPLAY_EXPERIMENTS=1`, or a set
-// `OGRE_RESOLUTION`/`OGRE_MSAA`, which is a developer naming the feature
-// directly. One value per process, so it is read once.
+// Whether MSAA is live this run. It produced visual artifacts in a player run
+// together with RESOLUTION (developer, session 121) and has not been verified
+// since, so it is off unless the run asks for it: `OGRE_DISPLAY_EXPERIMENTS=1`,
+// or a set `OGRE_MSAA`, which is a developer naming the feature directly.
+// RESOLUTION left the gate in session 145. One value per process, so it is read
+// once.
 bool experiments_enabled() {
     static const bool enabled = [] {
         const char* flag = std::getenv("OGRE_DISPLAY_EXPERIMENTS");
@@ -146,23 +147,20 @@ bool experiments_enabled() {
                 return true;
             }
         }
-        // A developer naming one of the two values directly is an opt-in too, so
-        // the debug spellings keep working on their own.
-        for (const char* name : {"OGRE_RESOLUTION", "OGRE_MSAA"}) {
-            const char* value = std::getenv(name);
-            if (value != nullptr && value[0] != '\0') {
-                return true;
-            }
+        // A developer naming the value directly is an opt-in too, so the debug
+        // spelling keeps working on its own.
+        const char* value = std::getenv("OGRE_MSAA");
+        if (value != nullptr && value[0] != '\0') {
+            return true;
         }
         return false;
     }();
     return enabled;
 }
 
-// The mode RESOLUTION is in this run: the configured one when the experiments are
-// on, `Native` otherwise.
+// The mode RESOLUTION is in this run: always the configured one (session 145).
 ResolutionMode applied_resolution() {
-    return experiments_enabled() ? g_resolution : ResolutionMode::Native;
+    return g_resolution;
 }
 
 AntialiasMode applied_antialias() {
@@ -264,17 +262,20 @@ SoundMode parse_sound(const std::string& text) {
     return SoundMode::On;
 }
 
-// `resolution = native|2x|auto`. A missing or unparsable value is the default,
-// `native`, which is what every build before the row drew.
+// `render_resolution = native|2x|auto`. A missing or unparsable value is the
+// default, `auto`: render at the window's own pixel size (session 145). The key
+// was `resolution` while the row was hidden, and every file written then holds
+// `resolution = native`, which no player chose; that key is no longer read, so
+// those files get the new default.
 ResolutionMode parse_resolution(const std::string& text) {
-    const std::string value = lowercase(setting_value(text, "resolution"));
+    const std::string value = lowercase(setting_value(text, "render_resolution"));
+    if (value == "native" || value == "1x" || value == "1" || value == "original") {
+        return ResolutionMode::Native;
+    }
     if (value == "2x" || value == "2" || value == "double") {
         return ResolutionMode::Double;
     }
-    if (value == "auto" || value == "window" || value == "integer") {
-        return ResolutionMode::Auto;
-    }
-    return ResolutionMode::Native;
+    return ResolutionMode::Auto;
 }
 
 // `msaa = off|2x|4x|8x`. A missing or unparsable value is the default, `off`.
@@ -359,8 +360,8 @@ void write_settings() {
         "game_speed = " + std::to_string(g_game_speed) + "\n"
         "# widescreen: off or on.\n"
         "widescreen = " + lowercase(widescreen_mode_label(static_cast<int>(g_widescreen))) + "\n"
-        "# resolution: native, 2x or auto.\n"
-        "resolution = " + lowercase(resolution_mode_label(static_cast<int>(g_resolution))) + "\n"
+        "# render_resolution: native (320x240), 2x, or auto (the window's pixel size).\n"
+        "render_resolution = " + lowercase(resolution_mode_label(static_cast<int>(g_resolution))) + "\n"
         "# msaa: off, 2x, 4x or 8x.\n"
         "msaa = " + lowercase(antialias_mode_label(static_cast<int>(g_antialias))) + "\n"
         "# window: windowed or fullscreen.\n"
@@ -763,7 +764,7 @@ void load_settings(const std::filesystem::path& pref_dir) {
     g_pref_dir = pref_dir;
     int speed = 1;
     WidescreenMode widescreen = WidescreenMode::Off;
-    ResolutionMode resolution = ResolutionMode::Native;
+    ResolutionMode resolution = ResolutionMode::Auto;
     AntialiasMode antialias = AntialiasMode::Off;
     DisplayMode display = DisplayMode::Windowed;
     SoundMode sound = SoundMode::On;
@@ -801,7 +802,7 @@ void load_settings(const std::filesystem::path& pref_dir) {
     // OGRE_WINDOW=windowed|fullscreen: the same one-run rule, for the three
     // DISPLAY rows.
     if (const char* env = std::getenv("OGRE_RESOLUTION"); env != nullptr && env[0] != '\0') {
-        resolution = parse_resolution(std::string("resolution = ") + env);
+        resolution = parse_resolution(std::string("render_resolution = ") + env);
         std::fprintf(stderr, "[settings] OGRE_RESOLUTION=%s overrides the saved resolution\n", env);
     }
     if (const char* env = std::getenv("OGRE_MSAA"); env != nullptr && env[0] != '\0') {
@@ -841,15 +842,13 @@ void load_settings(const std::filesystem::path& pref_dir) {
     publish_graphics();
     publish_mouse();
     ultramodern::set_speed_multiplier(static_cast<uint32_t>(speed));
-    // RESOLUTION and MSAA are experimental: report the value actually applied,
-    // and say why a configured one is not.
+    // MSAA is experimental: report the value actually applied, and say why a
+    // configured one is not.
     const bool experiments = experiments_enabled();
-    if (!experiments &&
-        (resolution != ResolutionMode::Native || antialias != AntialiasMode::Off)) {
+    if (!experiments && antialias != AntialiasMode::Off) {
         std::fprintf(stderr,
-                     "[settings] resolution %s and msaa %s are experimental and not applied; "
-                     "set OGRE_DISPLAY_EXPERIMENTS=1 to enable them\n",
-                     lowercase(resolution_mode_label(static_cast<int>(resolution))).c_str(),
+                     "[settings] msaa %s is experimental and not applied; "
+                     "set OGRE_DISPLAY_EXPERIMENTS=1 to enable it\n",
                      lowercase(antialias_mode_label(static_cast<int>(antialias))).c_str());
     }
     std::fprintf(stderr,

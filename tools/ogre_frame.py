@@ -30,7 +30,7 @@ Usage:
     tools/ogre_frame.py <dump> --scan                       # every PLausible DL root
 
 `--log` reads the `[renderer] display list N ... data=0x...` lines the app
-prints, which name the root display list of a frame. The scene's display lists
+prints with `OGRE_DL_TRACE=1`, which name the root display list of a frame. The scene's display lists
 are double buffered, so the log's last few roots are the ones to try, and the
 tool renders them all so the frame nearest the press can be picked by eye.
 
@@ -47,6 +47,9 @@ import struct
 import sys
 import zlib
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from rdram import load_image  # noqa: E402
 
 RDRAM_SIZE = 0x800000
 W, H = 320, 240
@@ -308,7 +311,7 @@ def main() -> int:
     ap.add_argument("--scan", action="store_true", help="try every SETTIMG-adjacent address as a root")
     args = ap.parse_args()
 
-    img = Image(args.dump.read_bytes())
+    img = Image(load_image(args.dump))
     if len(img.d) != RDRAM_SIZE:
         print(f"{args.dump}: {len(img.d)} bytes, expected {RDRAM_SIZE}", file=sys.stderr)
         return 2

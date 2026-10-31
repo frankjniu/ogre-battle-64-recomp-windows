@@ -200,7 +200,7 @@ of an audio buffer address (not an instruction boundary). The store is faithful
 = SAVEBUFF, which the game uses constantly), so `app/src/rsp.cpp` wraps the
 recompiled ucode in `audio_ucode_guard`: if it ever returns non-`Broke`, log it
 and report the task completed rather than letting the runtime exit the process.
-See `docs/HANDOFF-2026-09-18-session75.md` §6.
+See session 75 §6 (git history).
 
 **Verification recipe (no listening required):** the game's own AI descriptor is
 at `*(0x800A9B90)` — `+0x00` buffer, `+0x04` length in words; a live console

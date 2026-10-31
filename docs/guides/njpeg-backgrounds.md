@@ -12,10 +12,10 @@ background that shows part of the previous screen.
    `u16` height (big-endian), then `'HUFF'`, then a `u16` macroblock count.
 2. **Decode** — the game submits an `M_NJPEGTASK` (RSP task type 4) that decodes
    the blob to 16-bit YUV in place (`docs/guides/rsp-microcode.md`,
-   `docs/HANDOFF-2026-09-15-session47.md`).
+   session 47 in git history).
 3. **Draw** — the gfx ucode `0x800A5110` (**S2DEX 2.08**) draws the macroblocks
    as `G_OBJ_RECTANGLE_R`s into a game framebuffer
-   (`docs/HANDOFF-2026-09-15-session51.md`).
+   (session 51 in git history).
 4. **CPU readback** — `func_ovlE_8019976C` (bankE) copies the drawn framebuffer
    out, **four passes per assembly**, each with its own decode+draw, into four
    fixed heap buffers.
@@ -133,7 +133,7 @@ buffers, not from this render.
   session 77: it never blocked in this path, and every scene that does not render
   into its three fixed addresses paid its full 500 ms timeout per display list
   (the boot's publisher stills ran at 2 lists/s instead of 30 —
-  `docs/HANDOFF-2026-09-18-session77.md`).
+  session 77 in git history).
 
 ## Checking another background
 
@@ -166,12 +166,12 @@ To inspect the *result*, drive the live console from game state (a wall-clock
   reading of `state[0x78]`/`state[0x7A]` is not pinned down here either.
 * Whether every one of the 75 assets reaches `func_ovlE_8019976C`, or some take a
   different (non-readback) path; the step table
-  (`docs/HANDOFF-2026-09-15-session44.md` §1) maps the opening's steps to assets.
+  (session 44 §1 in git history) maps the opening's steps to assets.
 
 ## See also
 
-* `docs/HANDOFF-2026-09-16-session57.md` — the stale-source fix, the live-console
+* session 57 (git history) — the stale-source fix, the live-console
   A/B, and the 2x2 tile identification.
 * `docs/guides/rsp-microcode.md` — the `M_NJPEGTASK` decoder and RSPRecomp.
-* `docs/HANDOFF-2026-09-15-session51.md` — the S2DEX2 object commands and the
+* session 51 (git history) — the S2DEX2 object commands and the
   YUV16 two-plane tile format.

@@ -139,21 +139,24 @@ if [ "$code" -ne 0 ]; then
     [ -f "$work/error.log" ] && { echo "--- error.log ---"; cat "$work/error.log" >&2; }
     fail "the packaged binary did not reach main (or did not exit cleanly)"
 fi
-if [ -s "$log" ]; then
-    grep -q "\[smoke\] main reached" "$log" || {
-        cat "$log" >&2
-        fail "the app exited 0 without reaching the smoke marker"
+# An empty log fails. It is what a Windows build that reopens its stdio on the
+# parent's console produces, and every Windows release up to session 145 did:
+# the checks below were then skipped, so the session-107 capture assertion never
+# ran on the platform it was written for.
+[ -s "$log" ] || fail "the app exited 0 and wrote nothing to its redirected output"
+grep -q "\[smoke\] main reached" "$log" || {
+    cat "$log" >&2
+    fail "the app exited 0 without reaching the smoke marker"
+}
+# The presented-frame capture must be off unless the caller set the variable.
+# A stale entry made RT64 read a buffer destination as a texture on the first
+# present: the v0.4.0 Windows access violation (session 107).
+if [ -z "${OGRE_CAPTURE_PRESENT:-}" ]; then
+    grep -q "\[smoke\] capture path: (unset)" "$log" || {
+        grep "capture path" "$log" >&2 || true
+        fail "the presented-frame capture is on without OGRE_CAPTURE_PRESENT"
     }
-    # The presented-frame capture must be off unless the caller set the variable.
-    # A stale entry made RT64 read a buffer destination as a texture on the first
-    # present: the v0.4.0 Windows access violation (session 107).
-    if [ -z "${OGRE_CAPTURE_PRESENT:-}" ]; then
-        grep -q "\[smoke\] capture path: (unset)" "$log" || {
-            grep "capture path" "$log" >&2 || true
-            fail "the presented-frame capture is on without OGRE_CAPTURE_PRESENT"
-        }
-        echo "smoke-dist: the presented-frame capture is off by default"
-    fi
+    echo "smoke-dist: the presented-frame capture is off by default"
 fi
 echo "smoke-dist: the binary loaded, reached main and exited 0"
 

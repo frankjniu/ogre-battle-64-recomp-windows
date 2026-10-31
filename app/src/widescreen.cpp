@@ -106,8 +106,14 @@ bool scene_expands(uint16_t scene) {
 constexpr float kOriginalAspect = 4.0f / 3.0f;
 constexpr float kExpandAspect = 16.0f / 9.0f;
 
-// The height a window opens at. The width follows the shape.
-constexpr int kInitialHeight = 720;
+// The height a window opens at, in window points (1080p; developer request,
+// session 145). The width follows the shape. A display whose usable area cannot
+// hold it gets the largest window that fits (`widescreen_initial_window_size`).
+constexpr int kInitialHeight = 1080;
+
+// Room left for the title bar and the frame when the window is clamped to the
+// display's usable area, in points.
+constexpr int kDecorationAllowance = 64;
 
 // The mode as of the previous `widescreen_update` call, so a change of mode is
 // what resizes the window and a scene change is not.
@@ -245,8 +251,30 @@ void widescreen_request_refit() {
 }
 
 void widescreen_initial_window_size(int& width, int& height) {
+    const float aspect = window_aspect();
     height = kInitialHeight;
-    width = width_for_height(height, window_aspect());
+    width = width_for_height(height, aspect);
+    // The window opens centred on the primary display. Shrink it, keeping the
+    // shape, when that display's usable area (the desktop minus the taskbar or
+    // the menu bar) is smaller than 1080p plus the window frame.
+    SDL_Rect usable{};
+    if (SDL_GetDisplayUsableBounds(0, &usable) != 0 || usable.w <= 0 || usable.h <= 0) {
+        return;
+    }
+    const int max_height = usable.h - kDecorationAllowance;
+    const int max_width = usable.w - kDecorationAllowance;
+    if (height > max_height) {
+        height = max_height;
+        width = width_for_height(height, aspect);
+    }
+    if (width > max_width) {
+        width = max_width;
+        height = static_cast<int>(std::lround(static_cast<double>(width) / aspect));
+    }
+    if (height != kInitialHeight) {
+        std::fprintf(stderr, "[widescreen] display usable area %dx%d: window opens at %dx%d\n",
+                     usable.w, usable.h, width, height);
+    }
 }
 
 }  // namespace ogre

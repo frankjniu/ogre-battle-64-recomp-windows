@@ -15,8 +15,10 @@ The runtime stores every 32-bit word byte-reversed, so with `d` the image:
     logical byte at address a = d[a & 0x1FFFFFFF]
     guest word at address a   = int.from_bytes(d[a & 0x1FFFFFFF : +4], 'big')
 
-**The image is stored in ROM order.** A word the game holds as `0x80269640`
-is the four file bytes `80 26 96 40`. An LE read of those bytes returns
+**The image is read in ROM order.** `OGRE_RAM_KEY_FULL` writes ROM order and
+`OGRE_DUMP_RDRAM` writes the raw host buffer; `rdram.load_image` detects which
+and converts the raw one, so either file works. A word the game holds as
+`0x80269640` is then the four bytes `80 26 96 40`. An LE read of those bytes returns
 `0x40962680`, which is the byte-reversed value and not the guest word. Session
 131 read this file with the LE/XOR-3 rules above and every cell it rendered was
 transposed inside each word; the cache's own layout globals (`D_8018FC88`,
@@ -48,11 +50,14 @@ import struct
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from rdram import load_image  # noqa: E402
+
 
 class Image:
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.data = path.read_bytes()
+        self.data = load_image(path)
         if len(self.data) != 0x800000:
             print(f"warning: {path} is {len(self.data)} bytes, expected 0x800000", file=sys.stderr)
 

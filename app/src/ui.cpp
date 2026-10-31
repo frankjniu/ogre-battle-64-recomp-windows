@@ -773,11 +773,11 @@ std::vector<Panel::Row> Panel::build_rows(Tab tab) const {
             rows.push_back(Row{RowKind::GameSpeed, {}, 0, 0, -1});
             rows.push_back(Row{RowKind::Section, "DISPLAY", 0, 0, -1});
             rows.push_back(Row{RowKind::Widescreen, {}, 0, 0, -1});
-            // RESOLUTION and MSAA are experimental and off unless the run asks
-            // for them, so their rows are absent by default rather than present
-            // and inert (settings.hpp -> display_experiments_enabled).
+            rows.push_back(Row{RowKind::Resolution, {}, 0, 0, -1});
+            // MSAA is experimental and off unless the run asks for it, so its row
+            // is absent by default rather than present and inert (settings.hpp ->
+            // display_experiments_enabled).
             if (display_experiments_enabled()) {
-                rows.push_back(Row{RowKind::Resolution, {}, 0, 0, -1});
                 rows.push_back(Row{RowKind::Antialias, {}, 0, 0, -1});
             }
             rows.push_back(Row{RowKind::Display, {}, 0, 0, -1});

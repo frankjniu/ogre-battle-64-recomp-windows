@@ -353,6 +353,14 @@ bool init_sdl() {
     if (getenv("SDL_AUDIODRIVER") == nullptr) {
         SDL_setenv("SDL_AUDIODRIVER", "wasapi", 1);
     }
+    // Make the process per-monitor DPI aware, with window sizes in scaled points
+    // and the drawable in real pixels: the model macOS already uses. Without it
+    // Windows stretched the window's pixels on a scaled display (200% on the
+    // developer's 5K display: a 960x720 window covered 1920x1440 pixels and
+    // RT64 drew 960x720 of them), so no resolution setting could be sharp. The
+    // launcher and the overlay already scale by output pixels over window points.
+    // SDL_WINDOWS_DPI_SCALING in the environment still overrides this.
+    SDL_SetHint(SDL_HINT_WINDOWS_DPI_SCALING, "1");
 #endif
     // Only video and events are required. SDL_Init fails the whole call when any
     // requested subsystem fails, and audio genuinely fails on a machine with no
@@ -464,6 +472,16 @@ ultramodern::renderer::WindowHandle create_window(Platform& platform, const char
     // this the 4:3 picture keeps a few pixels of pillarbox at the default
     // setting.
     widescreen_fit_window(window);
+    {
+        int points_w = 0;
+        int points_h = 0;
+        int pixels_w = 0;
+        int pixels_h = 0;
+        SDL_GetWindowSize(window, &points_w, &points_h);
+        SDL_GetWindowSizeInPixels(window, &pixels_w, &pixels_h);
+        fprintf(stderr, "[SDL] game window %dx%d points, %dx%d pixels\n", points_w, points_h,
+                pixels_w, pixels_h);
+    }
 
 #if defined(__APPLE__)
     // RT64's Metal path needs two native handles, and neither of them is the

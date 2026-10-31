@@ -652,7 +652,7 @@ index d7caa12..97d80bc 100644
                      result.tileWidth = tileWidth;
                      result.lineWidth = tileLineWidth;
 diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
-index 7de5b69..1519428 100644
+index 7de5b69..8bbf97f 100644
 --- a/src/hle/rt64_present_queue.cpp
 +++ b/src/hle/rt64_present_queue.cpp
 @@ -4,12 +4,55 @@
@@ -711,7 +711,25 @@ index 7de5b69..1519428 100644
      // PresentQueue
  
      PresentQueue::PresentQueue() {
-@@ -93,6 +136,24 @@ namespace RT64 {
+@@ -39,11 +82,12 @@ namespace RT64 {
+         int nextWriteCursor = (writeCursor + 1) % presents.size();
+ 
+         // Stall the thread until the barrier is lifted if we're trying to write on a present being used by the GPU.
+-        bool waitForBarrier;
+-        do {
+-            const std::scoped_lock lock(cursorMutex);
+-            waitForBarrier = (nextWriteCursor == barrierCursor);
+-        } while (waitForBarrier);
++        // OB64: wait on barrierCondition. The original loop re-took cursorMutex with no pause, which held a host
++        // core whenever the queue was full and competed with threadAdvanceBarrier for the same mutex.
++        {
++            std::unique_lock<std::mutex> lock(cursorMutex);
++            barrierCondition.wait(lock, [&]() { return nextWriteCursor != barrierCursor; });
++        }
+ 
+         // Modify the cursor and notify anything waiting on the queue.
+         {
+@@ -93,6 +137,24 @@ namespace RT64 {
      }
  
      void PresentQueue::threadPresent(const Present &present, bool &swapChainValid) {
@@ -736,7 +754,7 @@ index 7de5b69..1519428 100644
          FramebufferManager &fbManager = ext.sharedResources->framebufferManager;
          RenderTargetManager &targetManager = ext.sharedResources->renderTargetManager;
          const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
-@@ -146,6 +207,14 @@ namespace RT64 {
+@@ -146,6 +208,14 @@ namespace RT64 {
                  viFb = fbManager.find(present.screenVI.fbAddress());
              }
  
@@ -751,7 +769,7 @@ index 7de5b69..1519428 100644
              Framebuffer *presentFb = viFb;
              
              // Show the framebuffer the debugger has requested instead.
-@@ -221,6 +290,46 @@ namespace RT64 {
+@@ -221,6 +291,46 @@ namespace RT64 {
              else {
                  uint32_t fbAddress = present.screenVI.fbAddress();
  
@@ -798,7 +816,7 @@ index 7de5b69..1519428 100644
                  // Use a scratch framebuffer to upload the RAM to the render target.
                  scratchFb.addressStart = fbAddress;
                  scratchFb.width = fbSize.x;
-@@ -254,6 +363,7 @@ namespace RT64 {
+@@ -254,6 +364,7 @@ namespace RT64 {
                  if (!present.paused && (viHistory.top().vi != present.screenVI)) {
                      viHistory.pushVI(present.screenVI, fbSize.x);
                  }
@@ -806,7 +824,7 @@ index 7de5b69..1519428 100644
              }
          }
  
-@@ -266,6 +376,36 @@ namespace RT64 {
+@@ -266,6 +377,36 @@ namespace RT64 {
                  swapChainFramebuffers[i] = ext.device->createFramebuffer(RenderFramebufferDesc(&swapChainTexture, 1));
              }
          }
@@ -843,7 +861,7 @@ index 7de5b69..1519428 100644
          
          for (int32_t i = 0; i < framesToPresent; i++) {
              uint32_t frameCountersNextPresented = 0;
-@@ -342,11 +482,97 @@ namespace RT64 {
+@@ -342,11 +483,97 @@ namespace RT64 {
                  }
                  
                  commandList->setFramebuffer(swapChainFramebuffer);
@@ -943,7 +961,7 @@ index 7de5b69..1519428 100644
                  }
  
                  RenderHookDraw *drawHook = GetRenderHookDraw();
-@@ -354,6 +580,28 @@ namespace RT64 {
+@@ -354,6 +581,28 @@ namespace RT64 {
                      drawHook(commandList, swapChainFramebuffer);
                  }
  
@@ -972,7 +990,7 @@ index 7de5b69..1519428 100644
                  {
                      const std::scoped_lock lock(inspectorMutex);
                      if (inspector != nullptr) {
-@@ -367,6 +615,51 @@ namespace RT64 {
+@@ -367,6 +616,51 @@ namespace RT64 {
                      RenderCommandSemaphore *signalSemaphore = drawSemaphores[swapChainIndex].get();
                      ext.presentGraphicsWorker->commandQueue->executeCommandLists(&commandList, 1, &waitSemaphore, 1, &signalSemaphore, 1, ext.presentGraphicsWorker->commandFence.get());
                      ext.presentGraphicsWorker->wait();
@@ -1024,6 +1042,35 @@ index 7de5b69..1519428 100644
                  }
              }
  
+@@ -427,8 +721,12 @@ namespace RT64 {
+     }
+     
+     void PresentQueue::threadAdvanceBarrier() {
+-        std::scoped_lock<std::mutex> cursorLock(cursorMutex);
+-        barrierCursor = (barrierCursor + 1) % presents.size();
++        {
++            std::scoped_lock<std::mutex> cursorLock(cursorMutex);
++            barrierCursor = (barrierCursor + 1) % presents.size();
++        }
++
++        barrierCondition.notify_all();
+     }
+ 
+     void PresentQueue::threadLoop() {
+diff --git a/src/hle/rt64_present_queue.h b/src/hle/rt64_present_queue.h
+index e08b02c..1c89bcc 100644
+--- a/src/hle/rt64_present_queue.h
++++ b/src/hle/rt64_present_queue.h
+@@ -36,6 +36,9 @@ namespace RT64 {
+         int barrierCursor;
+         std::mutex cursorMutex;
+         std::condition_variable cursorCondition;
++        // OB64: signalled when barrierCursor moves, so a producer waiting for a free
++        // slot blocks instead of spinning on cursorMutex.
++        std::condition_variable barrierCondition;
+         uint64_t presentId;
+         std::mutex presentIdMutex;
+         std::condition_variable presentIdCondition;
 diff --git a/src/hle/rt64_rdp.cpp b/src/hle/rt64_rdp.cpp
 index a10c11a..64059f9 100644
 --- a/src/hle/rt64_rdp.cpp
@@ -1920,10 +1967,28 @@ index 7a8c13b..c61b685 100644
          void listProcessBegin();
          void listProcessEnd();
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
-index 5a331aa..8ba25d4 100644
+index 5a331aa..7cc437c 100644
 --- a/src/hle/rt64_workload_queue.cpp
 +++ b/src/hle/rt64_workload_queue.cpp
-@@ -418,12 +418,21 @@ namespace RT64 {
+@@ -51,11 +51,12 @@ namespace RT64 {
+         int nextWriteCursor = (writeCursor + 1) % workloads.size();
+ 
+         // Stall the thread until the barrier is lifted if we're trying to write on a workload being used by the GPU.
+-        bool waitForBarrier;
+-        do {
+-            const std::scoped_lock lock(cursorMutex);
+-            waitForBarrier = (nextWriteCursor == barrierCursor);
+-        } while (waitForBarrier);
++        // OB64: wait on barrierCondition. The original loop re-took cursorMutex with no pause, which held a host
++        // core whenever the queue was full and competed with threadAdvanceBarrier for the same mutex.
++        {
++            std::unique_lock<std::mutex> lock(cursorMutex);
++            barrierCondition.wait(lock, [&]() { return nextWriteCursor != barrierCursor; });
++        }
+ 
+         // Modify the cursor and notify anything waiting on the queue.
+         {
+@@ -418,12 +419,21 @@ namespace RT64 {
                  const FramebufferPair &fbPair = workload.fbPairs[f];
                  const auto &colorImg = fbPair.colorImage;
                  const auto &depthImg = fbPair.depthImage;
@@ -1946,6 +2011,35 @@ index 5a331aa..8ba25d4 100644
  
                      // When the target is much bigger than the reference height, we reduce the resolution scaling (but clamped to 1.0).
                      const uint32_t heightThreshold = (workload.viFbSize[1] > 0) ? ((workload.viFbSize[1] * 3) / 2) : 360;
+@@ -865,8 +875,12 @@ namespace RT64 {
+     }
+ 
+     void WorkloadQueue::threadAdvanceBarrier() {
+-        std::scoped_lock<std::mutex> cursorLock(cursorMutex);
+-        barrierCursor = (barrierCursor + 1) % workloads.size();
++        {
++            std::scoped_lock<std::mutex> cursorLock(cursorMutex);
++            barrierCursor = (barrierCursor + 1) % workloads.size();
++        }
++
++        barrierCondition.notify_all();
+     }
+ 
+     void WorkloadQueue::threadAdvanceWorkloadId(uint64_t newWorkloadId) {
+diff --git a/src/hle/rt64_workload_queue.h b/src/hle/rt64_workload_queue.h
+index bde2f03..210fc7c 100644
+--- a/src/hle/rt64_workload_queue.h
++++ b/src/hle/rt64_workload_queue.h
+@@ -67,6 +67,9 @@ namespace RT64 {
+         int barrierCursor;
+         std::mutex cursorMutex;
+         std::condition_variable cursorCondition;
++        // OB64: signalled when barrierCursor moves, so a producer waiting for a free
++        // slot blocks instead of spinning on cursorMutex.
++        std::condition_variable barrierCondition;
+         uint64_t workloadId;
+         uint64_t lastPresentId;
+         std::mutex workloadIdMutex;
 diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
 index 9fae0d4..230b5b9 100644
 --- a/src/render/rt64_framebuffer_renderer.cpp

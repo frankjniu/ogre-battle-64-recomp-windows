@@ -8,7 +8,7 @@ decides what is drawn.
 This guide names the three producers of those rectangles, the buffers they read,
 and the way to check one. It is the reference for "a rectangle draws black",
 "a glyph is missing", "a sprite part is in the wrong place" and the questions in
-`docs/notes-black-sprite.md`.
+the session 131-133 black-sprite notes (git history).
 
 ## 1. What a draw is
 
@@ -105,7 +105,7 @@ A session-132 attempt to prove otherwise is **withdrawn**: it tested for a code
 at `timg - 8 + 0x78`, but `timg - 8` is the record *upstream* of the draw's own
 record, and its `+0x78` code belongs to that neighbour. Nothing observed shows a
 mis-rendered text glyph, so the text draws' addresses are taken as correct. See
-`docs/notes-black-sprite.md` §3b.
+the session 131-133 black-sprite notes §3b (git history).
 
 The accessors, in the order a caller uses them:
 
@@ -314,7 +314,7 @@ There are two separate faults in this area, and they must not be conflated.
 
 **Fault A (withdrawn).** Session 132 first reported that the text draws bind
 `record` instead of `record + 8`. The measurement did not support it; the claim
-is withdrawn in `docs/notes-black-sprite.md` §3b. What remains worth knowing is the
+is withdrawn in the session 131-133 black-sprite notes §3b (git history). What remains worth knowing is the
 sheet switch itself: `func_8017909C` clears the selector at cache load
 (`0x801790B4`) and `func_8017AA38` saves and restores it around a message parse
 (`0x8017AA6C`, `0x8017AAF4`), so the working sheet is owned by whichever script

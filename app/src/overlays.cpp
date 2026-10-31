@@ -1,5 +1,7 @@
+#include <chrono>
 #include <cstdio>
 #include <cstdint>
+#include <thread>
 
 #include "recomp.h"
 #include "funcs.h"
@@ -55,3 +57,15 @@ void register_streamed_overlays() {
 }
 
 }  // namespace ogre
+
+// Called on every pass of the game's idle loop (thread 1, func_8007F8E4 at
+// 0x8007F998), inserted by the `[[patches.hook]]` in config/config.toml. On
+// hardware that loop runs only when every other thread is blocked; here N64
+// threads are native threads, so without a pause it held a whole host core for
+// the whole run (session 145). The pause is a native sleep and stays outside the
+// N64 scheduler: a `yield_self` here made the idle thread queue itself and swap,
+// and one boot in four then froze at the publishers -> title transition.
+extern "C" void ogre_idle_wait(uint8_t* rdram) {
+    (void)rdram;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}

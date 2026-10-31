@@ -118,28 +118,27 @@ void set_widescreen_mode(WidescreenMode mode);
 // `right_text`; the drawn row uses the panel's own radio layout.
 std::string widescreen_mode_text();
 
-// RESOLUTION and MSAA are experimental and shipped behind a flag. Both are
-// implemented and reach RT64, but a player run with them produced visual
-// artifacts (developer, session 121), so they are off and their rows are absent
-// from the SETTINGS tab unless `OGRE_DISPLAY_EXPERIMENTS=1` asks for them. The
-// gate also accepts a set `OGRE_RESOLUTION` or `OGRE_MSAA`, so the debug
-// spellings keep working. While it is off the two values are not applied at all
-// (native resolution, no antialiasing) and the values already in
-// `settings.cfg` are kept for a later run with the flag on.
+// MSAA is experimental and shipped behind a flag. It is implemented and reaches
+// RT64, but a player run with it and RESOLUTION produced visual artifacts
+// (developer, session 121), so it is off and its row is absent from the SETTINGS
+// tab unless `OGRE_DISPLAY_EXPERIMENTS=1` asks for it. The gate also accepts a set
+// `OGRE_MSAA`, so the debug spelling keeps working. While it is off the value is
+// not applied at all and the value already in `settings.cfg` is kept for a later
+// run with the flag on. RESOLUTION left the gate in session 145.
 bool display_experiments_enabled();
 
 // The RESOLUTION row: how many pixels RT64 renders before it scales the picture
 // to the window. `Native` is the game's own target (320x240), which is what the
-// port drew before the row existed; `Double` renders at twice that in each axis;
+// port drew before session 145; `Double` renders at twice that in each axis;
 // `Auto` renders at the largest integer multiple of the native resolution that
-// fits the window (RT64's `WindowIntegerScale`). The names are the row's own;
+// fits the window (RT64's `WindowIntegerScale`): 9x on a 1080-point window at
+// 200% scaling, 4x on a 1080-pixel one. The names are the row's own;
 // `settings.cpp` maps them to `ultramodern::renderer::Resolution`.
 //
-// Experimental (`display_experiments_enabled`). `resolution_mode()` returns the
-// mode in use, which is `Native` while the gate is off.
+// `Auto` is the default (session 145), stored as `render_resolution`.
 //
 // The enumerators follow the row's display order, so `Native` is the marker of
-// the first option and the default.
+// the first option.
 enum class ResolutionMode {
     Native = 0,
     Double = 1,
@@ -167,7 +166,7 @@ std::string resolution_mode_text();
 // the default and what the port did before the row existed. MSAA affects 3D
 // edges only; the 2D screens are drawn as rectangles and are unchanged.
 //
-// Experimental, on the same gate as RESOLUTION. `antialias_mode()` returns `Off`
+// Experimental (`display_experiments_enabled`). `antialias_mode()` returns `Off`
 // while the gate is off.
 enum class AntialiasMode {
     Off = 0,

@@ -113,7 +113,30 @@ static bool audio_ucode_enabled() {
     return enabled;
 }
 
+// `OGRE_RSP_LOG=1` prints two `[rsp]` lines per RSP task: the task descriptor and
+// which microcode served it. A stock run submits ~58 tasks/s, so the lines are
+// off by default; they were 93% of a stock run's output and pushed everything
+// else out of the crash report's 100-line stdout ring (session 117 item 7,
+// session 145). `tools/runlog.py` reads them, so a run analysed with it sets the
+// variable, and its `--check` fails on a log that has none.
+static bool rsp_log_enabled() {
+    static const bool enabled = [] {
+        const char* value = getenv("OGRE_RSP_LOG");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
+static void log_served(const OSTask* task, const char* what) {
+    if (rsp_log_enabled()) {
+        printf("[rsp] task type %u submitted (%s)\n", static_cast<unsigned>(task->t.type), what);
+    }
+}
+
 static void log_task(const OSTask* task, const char* path) {
+    if (!rsp_log_enabled()) {
+        return;
+    }
     printf("[rsp] task type=%u ucode=0x%08X ucode_size=0x%X ucode_data=0x%08X "
            "ucode_data_size=0x%X data_ptr=0x%08X data_size=0x%X flags=0x%X (%s)\n",
            static_cast<unsigned>(task->t.type), static_cast<unsigned>(task->t.ucode),
@@ -128,23 +151,21 @@ recomp::rsp::callbacks_t make_rsp_callbacks() {
             log_task(task, "sp_task_queue/microcode path");
             if ((uint32_t)task->t.ucode == kNjpegUcodeAddr) {
                 if (njpeg_enabled()) {
-                    printf("[rsp] task type %u submitted (njpeg microcode)\n", static_cast<unsigned>(task->t.type));
+                    log_served(task, "njpeg microcode");
                     return njpeg_ucode;
                 }
-                printf("[rsp] task type %u submitted (njpeg microcode disabled; stub)\n",
-                       static_cast<unsigned>(task->t.type));
+                log_served(task, "njpeg microcode disabled; stub");
                 return stub_ucode;
             }
             if ((uint32_t)task->t.ucode == kAudioUcodeAddr) {
                 if (audio_ucode_enabled()) {
-                    printf("[rsp] task type %u submitted (audio microcode)\n", static_cast<unsigned>(task->t.type));
+                    log_served(task, "audio microcode");
                     return audio_ucode_guard;
                 }
-                printf("[rsp] task type %u submitted (audio microcode disabled; stub)\n",
-                       static_cast<unsigned>(task->t.type));
+                log_served(task, "audio microcode disabled; stub");
                 return stub_ucode;
             }
-            printf("[rsp] task type %u submitted (stub microcode)\n", static_cast<unsigned>(task->t.type));
+            log_served(task, "stub microcode");
             return stub_ucode;
         },
     };
