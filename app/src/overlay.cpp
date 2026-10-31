@@ -41,6 +41,8 @@ struct OverlayState {
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
     Font font;
+    // Every text run of the panel, kept across frames (ui.hpp -> TextCache).
+    ui::TextCache text;
     std::unique_ptr<ui::Panel> panel;
     SDL_Window* game_window = nullptr;
     SDL_GameController* const* game_pads = nullptr;
@@ -345,8 +347,6 @@ void draw() {
     SDL_SetRenderDrawColor(g_overlay.renderer, 8, 9, 12, 255);
     SDL_RenderClear(g_overlay.renderer);
 
-    ui::TextLayer title;
-    ui::TextLayer body;
     const int title_height = px(kTitleScale) * Font::kCellHeight;
     const int center_x = output_width / 2;
 
@@ -363,8 +363,8 @@ void draw() {
                        metrics.layout_height + gap + footer_height;
     int cursor_y = std::max(px(24), (output_height - block_height) / 2);
 
-    title.build(g_overlay.renderer, g_overlay.font, "OGRE BATTLE 64: RECOMP",
-                px(kTitleScale), kTitleColor);
+    const ui::TextLayer& title = g_overlay.text.layer(
+        g_overlay.renderer, g_overlay.font, "OGRE BATTLE 64: RECOMP", px(kTitleScale), kTitleColor);
     title.draw(g_overlay.renderer, center_x, 0, cursor_y, true);
     cursor_y += title_height + px(30);
 
@@ -375,13 +375,13 @@ void draw() {
     SDL_RenderFillRect(g_overlay.renderer, &rule);
     cursor_y += rule_height + px(26);
 
-    ui::draw_panel(g_overlay.renderer, g_overlay.font, *g_overlay.panel, output_width,
+    ui::draw_panel(g_overlay.renderer, g_overlay.font, g_overlay.text, *g_overlay.panel, output_width,
                    output_height, cursor_y, ui_scale);
     cursor_y += metrics.layout_height + gap;
 
-    body.build(g_overlay.renderer, g_overlay.font, "ESC RESUMES THE GAME",
-               px(2), kHintColor);
-    body.draw(g_overlay.renderer, center_x, 0, cursor_y, true);
+    g_overlay.text.layer(g_overlay.renderer, g_overlay.font, "ESC RESUMES THE GAME", px(2),
+                         kHintColor)
+        .draw(g_overlay.renderer, center_x, 0, cursor_y, true);
 
     if (g_overlay.shot_path != nullptr && !g_overlay.shot_written &&
         (g_overlay.shot_at_ms == 0 ||
@@ -397,6 +397,7 @@ void draw() {
     }
 
     SDL_RenderPresent(g_overlay.renderer);
+    g_overlay.text.end_frame();
 }
 
 }  // namespace
@@ -454,6 +455,8 @@ void overlay_init(Platform& platform, const std::filesystem::path& pref_dir,
 }
 
 void overlay_shutdown() {
+    // The cached text textures belong to the renderer destroyed below.
+    g_overlay.text.clear();
     if (g_overlay.renderer != nullptr) {
         SDL_DestroyRenderer(g_overlay.renderer);
         g_overlay.renderer = nullptr;

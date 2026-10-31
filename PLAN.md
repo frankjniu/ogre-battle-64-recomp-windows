@@ -101,30 +101,6 @@ known and what the next step is.
     tool's shared-hash report to be empty; compare the cathedral's first frames
     with `defaultOperation` `stream` against `stall`.
 
-### Robustness
-
-5. **The launcher's error screen reuses one text layer per frame.**
-    `launcher.cpp:782-791` rebuilds `body` for the title, each line and the
-    hint in one frame. The same pattern lost the overlay's LOTTES label until
-    the settings panel switched to `FrameText` (`app/src/ui.cpp`). Next step:
-    give each run its own layer, as `FrameText` does, and check the error
-    screen with a missing ROM.
-6. **`tools/smoke-dist.sh` and the Microsoft Store `python3` stub.** On a stock
-    Windows machine `python3` resolves to the Store stub, check 2 runs it, and
-    the check fails with "Python was not found" (`docs/guides/app-build.md` →
-    "Traps on this machine"). Next step: accept a candidate only when
-    `"$candidate" -c "import sys"` succeeds, so `py` or a real `python` is used.
-
-### Performance
-
-7. **The settings panel builds one texture per text run per frame.** While the
-    launcher or the `ESC` overlay is open, `FrameText` creates and destroys an
-    SDL texture for every run, about sixty per frame on the SETTINGS tab (the
-    single reused layer before it created as many).
-    Next step: cache the textures by text, colour and scale across frames, and
-    compare the overlay thread's CPU time before and after (per-thread CPU:
-    `docs/guides/app-build.md` → "Windows setup" step 8).
-
 ### Parked
 
 - The `ESC` overlay does not pause the game (developer's choice).

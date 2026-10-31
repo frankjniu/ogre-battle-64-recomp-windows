@@ -71,16 +71,21 @@ if [ "$kind" = windows ]; then
     for dll in dxcompiler.dll dxil.dll msvcp140.dll vcruntime140.dll vcruntime140_1.dll; do
         [ -f "$dist/$dll" ] || fail "$dll is missing from the package"
     done
+    # A candidate counts only if it runs Python. On a stock Windows machine
+    # `python3` (and often `python`) is the Microsoft Store alias in WindowsApps:
+    # it exists on PATH, prints "Python was not found" and exits 9009, which
+    # failed this check before a real interpreter was tried.
     python=""
-    for candidate in python3 python py; do
-        if command -v "$candidate" >/dev/null 2>&1; then python="$candidate"; break; fi
+    for candidate in python3 python "py -3"; do
+        # shellcheck disable=SC2086
+        if $candidate -c "import sys" >/dev/null 2>&1; then python="$candidate"; break; fi
     done
     if [ -n "$python" ]; then
-        if [ "$python" = py ]; then python="py -3"; fi
+        echo "smoke-dist: PE import check with $python"
         # shellcheck disable=SC2086
         $python "$root/tools/pe_imports.py" "$dist" || fail "the package does not carry every DLL its binaries import"
     else
-        echo "smoke-dist: no python found; skipping the PE import check"
+        echo "smoke-dist: no working python (python3, python, py -3); skipping the PE import check"
     fi
 elif [ "$kind" = macos ] && command -v otool >/dev/null 2>&1; then
     extra=$(otool -L "$app" | tail -n +2 | grep -vE "System/Library|/usr/lib|@executable_path" || true)

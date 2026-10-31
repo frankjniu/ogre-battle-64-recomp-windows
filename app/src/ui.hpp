@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <SDL.h>
@@ -55,6 +56,50 @@ private:
     SDL_Texture* texture_ = nullptr;
     int width_ = 0;
     int height_ = 0;
+};
+
+// Text runs rasterised once and reused across frames, keyed by text, scale and
+// colour. A frame asks for every run it draws with `layer()`, and `end_frame()`
+// destroys the runs that frame did not ask for, so a label that changes leaves
+// no texture behind. The launcher and the overlay each keep one per renderer.
+//
+// Building a texture per run per frame cost CPU: in the launcher's loop, before
+// vsync paced it, the cache took the process idle on SETTINGS from 170% to 122%
+// of one core (vsync then took it to 7%). It also lost text: one TextLayer
+// rebuilt for several runs in a frame destroyed each texture right after
+// queueing its draw, and the overlay's CRT FILTER row then lacked its LOTTES
+// label while RESOLUTION or CRT FILTER was selected (2026-10-31). A cached
+// texture lives at least until the end of the frame that drew it.
+//
+// The textures belong to one renderer: call `clear()` before that renderer is
+// destroyed.
+class TextCache {
+public:
+    TextCache() = default;
+    TextCache(const TextCache&) = delete;
+    TextCache& operator=(const TextCache&) = delete;
+    ~TextCache();
+
+    // The run's layer, built on first use. The reference stays valid until the
+    // `end_frame()` of a frame that did not ask for the run, or `clear()`.
+    const TextLayer& layer(SDL_Renderer* renderer, const Font& font, const std::string& text,
+                           int scale, SDL_Color color);
+
+    // Destroys the runs not asked for since the previous `end_frame()`. Call
+    // once per frame, after the frame is presented.
+    void end_frame();
+
+    // Destroys every run.
+    void clear();
+
+    size_t size() const { return entries_.size(); }
+
+private:
+    struct Entry {
+        TextLayer layer;
+        bool used = false;
+    };
+    std::unordered_map<std::string, Entry> entries_;
 };
 
 // Splits `text` so no line is wider than `max_chars` characters. Words are kept
@@ -314,8 +359,9 @@ PanelMetrics measure_panel(const Font& font, Panel& panel, int output_width,
 bool write_ppm(SDL_Renderer* renderer, const std::filesystem::path& path);
 
 // Draws the tab bar and the active tab's rows, and stores the hit-test geometry
-// in `panel`. `top_y` is the top of the tab bar.
-PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, Panel& panel,
+// in `panel`. `top_y` is the top of the tab bar. The text comes from `text`,
+// whose `end_frame()` the caller runs after presenting the frame.
+PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, TextCache& text, Panel& panel,
                      int output_width, int output_height, int top_y, float ui_scale);
 
 }  // namespace ogre::ui

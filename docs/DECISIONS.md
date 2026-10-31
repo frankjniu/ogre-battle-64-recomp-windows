@@ -188,6 +188,11 @@ this file.
 
 ## App, settings and UI
 
+- **UI text is drawn through `ui::TextCache`, and the start screen's renderer has vsync.** A cached
+  run keeps its texture across frames and at least to the end of the frame that drew it; one
+  `TextLayer` rebuilt for several runs in a frame lost the overlay's LOTTES label. The launcher and
+  the overlay each own a cache and clear it before destroying their renderer. The launcher idle on
+  SETTINGS used 170% of one core, 122% with the cache, 7% with vsync (2026-10-31).
 - **Player settings live in `<config>/settings.cfg`, and an `OGRE_*` variable overrides a key for
   one run without writing it back.** The keys are `game_speed`, `widescreen`, `sounds`, `volume`,
   `render_resolution`, `msaa`, `window` and `mouse` (sessions 93, 102, 121).

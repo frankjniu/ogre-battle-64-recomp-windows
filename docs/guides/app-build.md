@@ -135,9 +135,10 @@ configured without them uses the default generator and `cl.exe`, which fails.
   `Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja`.
 - **`bash` resolves to WSL** once the VS `PATH` is first: the name finds
   `System32\bash.exe`. Run repo scripts with `/usr/bin/bash`.
-- **`python3` may be the Microsoft Store stub.** It breaks
-  `tools/smoke-dist.sh`'s `tools/pe_imports.py` call. Put a real `python3` first
-  on `PATH`.
+- **`python3` may be the Microsoft Store stub.** `tools/smoke-dist.sh` skips a
+  candidate that cannot run `-c "import sys"` and tries `python3`, `python`, then
+  `py -3`. Other tools that call `python3` (`make bg-extract`, `make bg-hd`) still
+  need a real one first on `PATH`.
 - **`build-dist/ogrebattle64.exe` does not start in place** until
   `dxcompiler.dll` and `dxil.dll` are copied beside it from `build-dist/RT64/`.
   `make dist` copies them into the package.
@@ -360,9 +361,9 @@ release workflow runs it before collecting the archive. It checks:
    opens it with `explorer.exe`, and waits for the process to exit. A host with
    no Explorer (a hosted runner, a service) prints a skip line.
 
-`SMOKE_TIMEOUT` bounds checks 3 and 5. The script resolves `python3` for
-`tools/pe_imports.py`; the Microsoft Store stub fails check 2 (see "Traps on this
-machine").
+`SMOKE_TIMEOUT` bounds checks 3 and 5. Check 2 runs `tools/pe_imports.py` with
+the first of `python3`, `python` and `py -3` that runs Python, so the Microsoft
+Store stub is skipped; it prints `smoke-dist: PE import check with <python>`.
 
 ### Crash reports — `error.log`
 

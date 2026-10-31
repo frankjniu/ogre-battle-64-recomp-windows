@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
-#include <deque>
 #include <vector>
 
 #include "settings.hpp"
@@ -486,33 +485,70 @@ RowsLayout layout_rows(const Font& font, const Panel& panel, const std::vector<P
 
 }  // namespace
 
-// --- FrameText ----------------------------------------------------------------
-// The panel's text runs for one frame, each in its own texture, all kept until
-// the panel has been drawn. One reused TextLayer destroyed each run's texture
-// right after queueing its draw, and in the overlay a run went missing from
-// the frame: the CRT FILTER row's LOTTES label was absent while RESOLUTION or
-// CRT FILTER was the selected row and present while WINDOW was, with the same
-// draw calls for that row (2026-10-31). With every texture kept to the end of
-// the frame the label is drawn in both of those cases.
-class FrameText {
+// --- CachedText ---------------------------------------------------------------
+// The panel's view of a TextCache, with TextLayer's build/draw shape: `build`
+// picks the run from the cache and `draw` draws it.
+class CachedText {
 public:
+    explicit CachedText(TextCache& cache) : cache_(cache) {}
+
     void build(SDL_Renderer* renderer, const Font& font, const std::string& text, int scale,
                SDL_Color color) {
-        layers_.emplace_back();
-        layers_.back().build(renderer, font, text, scale, color);
+        current_ = &cache_.layer(renderer, font, text, scale, color);
     }
 
     void draw(SDL_Renderer* renderer, int center_x, int left, int top, bool centered) const {
-        if (!layers_.empty()) {
-            layers_.back().draw(renderer, center_x, left, top, centered);
+        if (current_ != nullptr) {
+            current_->draw(renderer, center_x, left, top, centered);
         }
     }
 
-    int width() const { return layers_.empty() ? 0 : layers_.back().width(); }
+    int width() const { return current_ != nullptr ? current_->width() : 0; }
 
 private:
-    std::deque<TextLayer> layers_;
+    TextCache& cache_;
+    const TextLayer* current_ = nullptr;
 };
+
+// --- TextCache ----------------------------------------------------------------
+
+TextCache::~TextCache() {
+    clear();
+}
+
+const TextLayer& TextCache::layer(SDL_Renderer* renderer, const Font& font, const std::string& text,
+                                  int scale, SDL_Color color) {
+    std::string key = text;
+    key.push_back('\0');
+    key += std::to_string(scale);
+    key.push_back('\0');
+    key.push_back(static_cast<char>(color.r));
+    key.push_back(static_cast<char>(color.g));
+    key.push_back(static_cast<char>(color.b));
+    key.push_back(static_cast<char>(color.a));
+    auto [it, inserted] = entries_.try_emplace(std::move(key));
+    if (inserted) {
+        it->second.layer.build(renderer, font, text, scale, color);
+    }
+    it->second.used = true;
+    return it->second.layer;
+}
+
+void TextCache::end_frame() {
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        if (!it->second.used) {
+            it = entries_.erase(it);
+        }
+        else {
+            it->second.used = false;
+            ++it;
+        }
+    }
+}
+
+void TextCache::clear() {
+    entries_.clear();
+}
 
 // --- TextLayer ----------------------------------------------------------------
 
@@ -1397,7 +1433,7 @@ PanelMetrics measure_panel(const Font& font, Panel& panel, int output_width,
     return metrics;
 }
 
-PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, Panel& panel,
+PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, TextCache& text, Panel& panel,
                      int output_width, int output_height, int top_y, float ui_scale) {
     (void)output_height;
     auto px = [ui_scale](int value) {
@@ -1413,7 +1449,7 @@ PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, Panel& panel,
     const int description_width = panel_left + panel_width - description_x;
     const int left_width = description_x - panel_left - px(16);
 
-    FrameText layer;
+    CachedText layer(text);
     Panel::Geometry geometry;
 
     // The panel background is drawn first: the tab bar and the rows both sit on

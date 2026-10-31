@@ -376,7 +376,14 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
                             SDL_GetError());
         return {};
     }
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    // Vsync paces the loop below, which has no other wait: without it the start
+    // screen redrew as fast as it could and used about 120% of one core while
+    // idle on SETTINGS (2026-10-31).
+    SDL_Renderer* renderer =
+        SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (renderer == nullptr) {
+        renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    }
     if (renderer == nullptr) {
         renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     }
@@ -391,6 +398,8 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
 
     Font font;
     font.init(renderer);
+    // Every text run of the screen, kept across frames (ui.hpp -> TextCache).
+    ui::TextCache text;
     std::fprintf(stderr, "[launcher] waiting for a ROM (save folder: %s)\n",
                  context.pref_dir.string().c_str());
 
@@ -728,11 +737,9 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
         std::snprintf(footer_text, sizeof(footer_text), "SAVED TO: %s",
                       context.pref_dir.string().c_str());
 
-        ui::TextLayer title;
-        ui::TextLayer footer;
-        ui::TextLayer body;
-        title.build(renderer, font, kTitle, px(kTitleScale), kTitleColor);
-        footer.build(renderer, font, footer_text, px(kFooterScale), kFooterColor);
+        const ui::TextLayer& title = text.layer(renderer, font, kTitle, px(kTitleScale), kTitleColor);
+        const ui::TextLayer& footer =
+            text.layer(renderer, font, footer_text, px(kFooterScale), kFooterColor);
 
         std::vector<std::string> error_lines;
         if (!error.empty()) {
@@ -779,21 +786,25 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
         cursor_y += px(2) + px(30);
 
         if (!error_lines.empty()) {
-            body.build(renderer, font, kErrorTitle, px(kErrorScale), kErrorColor);
-            body.draw(renderer, center_x, 0, cursor_y, true);
+            // Each line is its own cached run. One TextLayer rebuilt for every
+            // line destroyed each texture right after queueing its draw, the
+            // pattern that lost a label from the overlay (ui.hpp -> TextCache).
+            text.layer(renderer, font, kErrorTitle, px(kErrorScale), kErrorColor)
+                .draw(renderer, center_x, 0, cursor_y, true);
             cursor_y += line_height + px(8);
             for (const std::string& line : error_lines) {
-                body.build(renderer, font, line, px(kErrorScale), kErrorColor);
-                body.draw(renderer, center_x, 0, cursor_y, true);
+                text.layer(renderer, font, line, px(kErrorScale), kErrorColor)
+                    .draw(renderer, center_x, 0, cursor_y, true);
                 cursor_y += line_height + px(6);
             }
             cursor_y += px(8);
-            body.build(renderer, font, kErrorHint, px(kErrorScale), kHintColor);
-            body.draw(renderer, center_x, 0, cursor_y, true);
+            text.layer(renderer, font, kErrorHint, px(kErrorScale), kHintColor)
+                .draw(renderer, center_x, 0, cursor_y, true);
         }
 
         cursor_y += px(30);
-        ui::draw_panel(renderer, font, panel, output_width, output_height, cursor_y, ui_scale);
+        ui::draw_panel(renderer, font, text, panel, output_width, output_height, cursor_y,
+                       ui_scale);
         cursor_y += metrics.layout_height + px(14);
 
         footer.draw(renderer, center_x, 0, cursor_y, true);
@@ -812,9 +823,11 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
         }
 
         SDL_RenderPresent(renderer);
+        text.end_frame();
     }
 
     pads.close_all();
+    text.clear();
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
 
