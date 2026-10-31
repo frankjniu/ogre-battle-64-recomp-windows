@@ -110,6 +110,7 @@ public:
         GameSpeed,
         Widescreen,
         Resolution,
+        CrtFilter,
         Antialias,
         Display,
         Sound,

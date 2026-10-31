@@ -35,6 +35,7 @@ int g_game_speed = 1;
 WidescreenMode g_widescreen = WidescreenMode::Off;
 ResolutionMode g_resolution = ResolutionMode::Auto;
 AntialiasMode g_antialias = AntialiasMode::Off;
+CrtFilterMode g_crt = CrtFilterMode::Off;
 DisplayMode g_display = DisplayMode::Windowed;
 SoundMode g_sound = SoundMode::On;
 int g_volume = kVolumeDefaultPercent;
@@ -95,6 +96,13 @@ std::atomic<int> g_audio_gain{kVolumeDefaultPercent};
 
 void publish_audio_gain() {
     g_audio_gain.store(g_sound == SoundMode::On ? g_volume : 0, std::memory_order_relaxed);
+}
+
+// CRT FILTER for the renderer thread, which polls it every frame.
+std::atomic<int> g_crt_applied{0};
+
+void publish_crt() {
+    g_crt_applied.store(static_cast<int>(g_crt), std::memory_order_relaxed);
 }
 
 // Publishes MOUSE ENABLED to the two cursor modules. Both read the value on
@@ -293,6 +301,34 @@ AntialiasMode parse_antialias(const std::string& text) {
     return AntialiasMode::Off;
 }
 
+// `crt_filter = off|hyllian|crts|lottes` (`lottes-fast`, libretro's name for
+// CRTS, also parses). A missing or unparsable value is the default, `off`.
+CrtFilterMode parse_crt(const std::string& text) {
+    const std::string value = lowercase(setting_value(text, "crt_filter"));
+    if (value == "hyllian") {
+        return CrtFilterMode::Hyllian;
+    }
+    if (value == "lottes-fast" || value == "lottes_fast" || value == "lottesfast" ||
+        value == "crts") {
+        return CrtFilterMode::LottesFast;
+    }
+    if (value == "lottes") {
+        return CrtFilterMode::Lottes;
+    }
+    return CrtFilterMode::Off;
+}
+
+// The `crt_filter` value written for a mode.
+const char* crt_filter_key(CrtFilterMode mode) {
+    switch (mode) {
+        case CrtFilterMode::Off:        return "off";
+        case CrtFilterMode::Hyllian:    return "hyllian";
+        case CrtFilterMode::LottesFast: return "crts";
+        case CrtFilterMode::Lottes:     return "lottes";
+    }
+    return "off";
+}
+
 // `window = windowed|fullscreen`. A missing or unparsable value is the default,
 // `windowed`.
 DisplayMode parse_display(const std::string& text) {
@@ -362,6 +398,8 @@ void write_settings() {
         "widescreen = " + lowercase(widescreen_mode_label(static_cast<int>(g_widescreen))) + "\n"
         "# render_resolution: native (320x240), 2x, or auto (the window's pixel size).\n"
         "render_resolution = " + lowercase(resolution_mode_label(static_cast<int>(g_resolution))) + "\n"
+        "# crt_filter: off, hyllian, crts or lottes.\n"
+        "crt_filter = " + std::string(crt_filter_key(g_crt)) + "\n"
         "# msaa: off, 2x, 4x or 8x.\n"
         "msaa = " + lowercase(antialias_mode_label(static_cast<int>(g_antialias))) + "\n"
         "# window: windowed or fullscreen.\n"
@@ -577,6 +615,43 @@ std::string resolution_mode_text() {
     return radio_text(resolution_mode_label, kResolutionModeCount, resolution_mode_index());
 }
 
+const char* crt_filter_mode_label(int index) {
+    switch (static_cast<CrtFilterMode>(index)) {
+        case CrtFilterMode::Off:        return "OFF";
+        case CrtFilterMode::Hyllian:    return "HYLLIAN";
+        case CrtFilterMode::LottesFast: return "CRTS";
+        case CrtFilterMode::Lottes:     return "LOTTES";
+    }
+    return "OFF";
+}
+
+CrtFilterMode crt_filter_mode() {
+    return g_crt;
+}
+
+int crt_filter_mode_index() {
+    const int index = static_cast<int>(g_crt);
+    return index >= 0 && index < kCrtFilterModeCount ? index : -1;
+}
+
+void set_crt_filter_mode(CrtFilterMode mode) {
+    if (mode == g_crt) {
+        return;
+    }
+    g_crt = mode;
+    publish_crt();
+    write_settings();
+    std::fprintf(stderr, "[settings] crt filter %s\n", crt_filter_key(mode));
+}
+
+std::string crt_filter_mode_text() {
+    return radio_text(crt_filter_mode_label, kCrtFilterModeCount, crt_filter_mode_index());
+}
+
+int crt_filter_applied() {
+    return g_crt_applied.load(std::memory_order_relaxed);
+}
+
 const char* antialias_mode_label(int index) {
     switch (static_cast<AntialiasMode>(index)) {
         case AntialiasMode::Off:    return "OFF";
@@ -766,6 +841,7 @@ void load_settings(const std::filesystem::path& pref_dir) {
     WidescreenMode widescreen = WidescreenMode::Off;
     ResolutionMode resolution = ResolutionMode::Auto;
     AntialiasMode antialias = AntialiasMode::Off;
+    CrtFilterMode crt = CrtFilterMode::Off;
     DisplayMode display = DisplayMode::Windowed;
     SoundMode sound = SoundMode::On;
     int volume = kVolumeDefaultPercent;
@@ -779,6 +855,7 @@ void load_settings(const std::filesystem::path& pref_dir) {
         widescreen = parse_widescreen(text);
         resolution = parse_resolution(text);
         antialias = parse_antialias(text);
+        crt = parse_crt(text);
         display = parse_display(text);
         sound = parse_sound(text);
         volume = parse_volume(text);
@@ -804,6 +881,12 @@ void load_settings(const std::filesystem::path& pref_dir) {
     if (const char* env = std::getenv("OGRE_RESOLUTION"); env != nullptr && env[0] != '\0') {
         resolution = parse_resolution(std::string("render_resolution = ") + env);
         std::fprintf(stderr, "[settings] OGRE_RESOLUTION=%s overrides the saved resolution\n", env);
+    }
+    // OGRE_CRT=off|hyllian|crts|lottes: the same rule, for the CRT
+    // FILTER row.
+    if (const char* env = std::getenv("OGRE_CRT"); env != nullptr && env[0] != '\0') {
+        crt = parse_crt(std::string("crt_filter = ") + env);
+        std::fprintf(stderr, "[settings] OGRE_CRT=%s overrides the saved crt filter\n", env);
     }
     if (const char* env = std::getenv("OGRE_MSAA"); env != nullptr && env[0] != '\0') {
         antialias = parse_antialias(std::string("msaa = ") + env);
@@ -834,12 +917,14 @@ void load_settings(const std::filesystem::path& pref_dir) {
     g_widescreen = widescreen;
     g_resolution = resolution;
     g_antialias = antialias;
+    g_crt = crt;
     g_display = display;
     g_sound = sound;
     g_volume = volume;
     g_mouse = mouse;
     publish_audio_gain();
     publish_graphics();
+    publish_crt();
     publish_mouse();
     ultramodern::set_speed_multiplier(static_cast<uint32_t>(speed));
     // MSAA is experimental: report the value actually applied, and say why a
@@ -852,10 +937,11 @@ void load_settings(const std::filesystem::path& pref_dir) {
                      lowercase(antialias_mode_label(static_cast<int>(antialias))).c_str());
     }
     std::fprintf(stderr,
-                 "[settings] game speed x%d, widescreen %s, resolution %s, msaa %s, window %s, "
-                 "sounds %s, volume %d%%, mouse %s%s\n",
+                 "[settings] game speed x%d, widescreen %s, resolution %s, crt filter %s, "
+                 "msaa %s, window %s, sounds %s, volume %d%%, mouse %s%s\n",
                  speed, lowercase(widescreen_mode_label(static_cast<int>(widescreen))).c_str(),
                  lowercase(resolution_mode_label(static_cast<int>(resolution_mode()))).c_str(),
+                 crt_filter_key(crt),
                  lowercase(antialias_mode_label(static_cast<int>(antialias_mode()))).c_str(),
                  lowercase(display_mode_label(static_cast<int>(display))).c_str(),
                  lowercase(sound_mode_label(static_cast<int>(sound))).c_str(), volume,

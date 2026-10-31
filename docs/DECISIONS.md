@@ -167,6 +167,11 @@ this file.
   ELF builds `0x32AF40` or `0x2E6840` (no `lui` of `0x8025..0x803F` or `0xA025..0xA03F`, no low half
   `0xAF40`, neither word in the ROM), so both are computed at run time; `0x32AF40` is
   `0x2E6840 + 0x44700`, row 219 of a 640-wide 16-bit image at `0x2E6840`.
+- **The CRT filters run in RT64's VI pass from a box-filtered copy of the frame, and only
+  permissively licensed shaders are used.** `VIRenderer::prepare` averages the frame to one texel per
+  framebuffer pixel with `BoxFilterCS`, then `VideoInterfaceCrtPS.hlsl` draws crt-hyllian-fast (MIT),
+  crt-lottes-fast or crt-lottes (public domain). GPL shaders (zfast-crt, crt-easymode, crt-geom) would
+  put the executable under the GPL; the MIT notice is in `packaging/README-dist.txt` (2026-10-31).
 - **RT64's "Fix LR with Scissor" (`enhancementConfig.rect.fixRectLR`) is off.** It widened the
   Organize Screen's font rectangles by a column; it is set after `Application::setup`, and
   `OGRE_RECT_LR_FIX=1` restores it (session 101).

@@ -576,12 +576,13 @@ The window's shape follows the toggle and never changes with the scene.
 re-fits the window (`widescreen_update` reports it to `main.cpp`). The `MISSION`
 banner clipping at both edges is the game's own marquee and happens in 4:3 too.
 
-### Display: WINDOW, RESOLUTION, MSAA
+### Display: WINDOW, RESOLUTION, CRT FILTER, MSAA
 
 ```
 DISPLAY
 WIDESCREEN   [x] OFF [ ] ON
 RESOLUTION   [ ] NATIVE [ ] 2X [x] AUTO
+CRT FILTER   [x] OFF [ ] HYLLIAN [ ] CRTS [ ] LOTTES
 MSAA         [x] OFF [ ] 2X [ ] 4X [ ] 8X      (only with OGRE_DISPLAY_EXPERIMENTS=1)
 WINDOW       [x] WINDOWED [ ] FULLSCREEN
 ```
@@ -595,15 +596,44 @@ points and the swap chain is real pixels. The boot logs
 | row | options | what it changes |
 |---|---|---|
 | `RESOLUTION` | `NATIVE` / `2X` / `AUTO` | `res_option`. `NATIVE` is RT64's `Original` (320x240); `2X` is `Original2x`, which `set_application_user_config` (`app/src/renderer.cpp`) turns into `Manual` at `resolutionMultiplier 2.0`; `AUTO` (default) is `WindowIntegerScale`, the largest integer multiple of 320x240 that fits the window's pixels (4x at 100% scaling on 1080p, 9x at 200%) |
+| `CRT FILTER` | `OFF` / `HYLLIAN` / `CRTS` / `LOTTES` | RT64's `UserConfiguration::crtFilter`, polled by `RT64Renderer::apply_crt_filter` once per screen update; see "CRT filters" below |
 | `MSAA` | `OFF` / `2X` / `4X` / `8X` | `msaa_option`; a change rebuilds the render targets (`updateMultisampling`). Experimental |
 | `WINDOW` | `WINDOWED` / `FULLSCREEN` | `wm_option`; the backend's `setFullScreen`, without recreating the window |
 
 1:1 2D screens (publishers, title, text) look the same at every resolution
 because RT64's `upscale2D = ScaledOnly` keeps unscaled rectangles native; scaled
 sprites, njpeg backdrops and 3D render higher. Saved keys:
-`render_resolution = native|2x|auto`, `msaa = off|2x|4x|8x`,
-`window = windowed|fullscreen`. The older `resolution` key is not read, so an
-existing `settings.cfg` gets `AUTO`.
+`render_resolution = native|2x|auto`, `crt_filter = off|hyllian|crts|lottes`,
+`msaa = off|2x|4x|8x`, `window = windowed|fullscreen`. The older `resolution`
+key is not read, so an existing `settings.cfg` gets `AUTO`.
+
+#### CRT filters
+
+The VI pass (`tools/RT64/src/render/rt64_vi_renderer.cpp`, patched) draws the
+filter in two steps. `VIRenderer::prepare` runs RT64's `BoxFilterCS` on the
+present command list before the swap chain framebuffer is bound, and averages
+the rendered frame to one texel per framebuffer pixel. The box is the
+resolution scale rounded to whole texels; widescreen's horizontal scale is
+fractional, so its input has slightly more or fewer columns. A framebuffer
+taller than 288 lines (an interlaced or high-resolution mode) is folded to one
+texel per two lines, so it still shows 240 scanlines. `VIRenderer::render` then
+draws one of three CRT shaders over the VI viewport
+(`tools/RT64/src/shaders/VideoInterfaceCrtPS.hlsl`, three variants by define).
+Each is a port of libretro's slang version (github.com/libretro/slang-shaders,
+`crt/shaders/`) with that version's default parameters:
+
+| option | source | license | texel reads per pixel | look |
+|---|---|---|---|---|
+| `HYLLIAN` | `crt-hyllian-fast` | MIT | 4 | Catmull-Rom horizontal filter, one beam per line, magenta/green dot mask, no curvature |
+| `CRTS` | `crt-lottes-fast` (Lottes' own name for it is CRTS; `lottes-fast` also parses) | public domain | 8 | two sine-shaped beams, RGB mask, a tone curve that restores the mask's brightness loss, curvature 0.02, rounded corners |
+| `LOTTES` | `crt-lottes` | public domain | 31 distinct | Gaussian beams over three lines, stretched-VGA shadow mask, bloom 0.15, curvature 0.031/0.041 |
+
+Shaders under the GPL (zfast-crt, crt-easymode, crt-geom, crt-pi) were left out
+because they would put the shipped executable under the GPL. Average brightness
+of the cathedral frame (0..255, red channel): off 127, HYLLIAN 101, CRTS 114,
+LOTTES 112. All three hold the present rate at 2880x2160 and 3840x2160 on
+an RTX 5070 Ti; no per-pass GPU time has been measured. Each change prints
+`[renderer] crt filter <MODE>`.
 
 MSAA is gated by `OGRE_DISPLAY_EXPERIMENTS` (`1`/`on`/`true`/`yes`) or a set
 `OGRE_MSAA`. With the gate off the row is absent (`Panel::build_rows`), the value
@@ -704,9 +734,9 @@ OGRE_NO_AUDIO=1 OGRE_PREF_DIR=C:/tmp/cl OGRE_ROM="$ROM" OGRE_OVERLAY=1 \
 # "[overlay] EXIT GAME" / "[SDL] game window close requested", exit 0, no error.log
 ```
 
-The SETTINGS rows are GAME SPEED, WIDESCREEN, RESOLUTION, (MSAA), WINDOW,
-SOUNDS, VOLUME, MOUSE ENABLED, with headings skipped, so a script's `Down` count
-depends on the MSAA gate.
+The SETTINGS rows are GAME SPEED, WIDESCREEN, RESOLUTION, CRT FILTER, (MSAA),
+WINDOW, SOUNDS, VOLUME, MOUSE ENABLED, with headings skipped, so a script's
+`Down` count depends on the MSAA gate.
 
 ## Mouse cursors
 
@@ -962,6 +992,7 @@ All knobs default to off. Settings overrides apply for one run and never write
 | `OGRE_WIDESCREEN=off\|on` | WIDESCREEN; each transition prints `[widescreen]` |
 | `OGRE_WS_SCENES=<hex>[,<hex>…]` | Expand scenes (default `0x03`, `0x0D`; HD-background scenes added) |
 | `OGRE_RESOLUTION=native\|2x\|auto` | RESOLUTION |
+| `OGRE_CRT=off\|hyllian\|crts\|lottes` | CRT FILTER |
 | `OGRE_DISPLAY_EXPERIMENTS=1` | show and apply MSAA |
 | `OGRE_MSAA=off\|2x\|4x\|8x` | MSAA (enables the row) |
 | `OGRE_WINDOW=windowed\|fullscreen` | WINDOW |

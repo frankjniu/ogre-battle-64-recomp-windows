@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 79dfc38..3d4997c 100644
+index 79dfc38..66923e2 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -285,7 +285,13 @@ function(build_ray_shader TARGETOBJ SHADERNAME)
@@ -17,6 +17,17 @@ index 79dfc38..3d4997c 100644
      set(SDL2_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/include")
      set(SDL2_LIBRARIES "SDL2" "SDL2main")
      link_directories("${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64")
+@@ -548,6 +554,10 @@ build_pixel_shader(  rt64 "src/shaders/TextureResolvePS.hlsl" "src/shaders/Textu
+ build_pixel_shader(  rt64 "src/shaders/TextureResolvePS.hlsl" "src/shaders/TextureResolveSamples8XPS.hlsl" "-D SAMPLES_8X")
+ build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSRegular.hlsl")
+ build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING")
++# OGRE: the CRT filters (UserConfiguration::CRTFilter).
++build_pixel_shader(  rt64 "src/shaders/VideoInterfaceCrtPS.hlsl" "src/shaders/VideoInterfaceCrtPSHyllian.hlsl" "-D CRT_HYLLIAN")
++build_pixel_shader(  rt64 "src/shaders/VideoInterfaceCrtPS.hlsl" "src/shaders/VideoInterfaceCrtPSLottesFast.hlsl" "-D CRT_LOTTES_FAST")
++build_pixel_shader(  rt64 "src/shaders/VideoInterfaceCrtPS.hlsl" "src/shaders/VideoInterfaceCrtPSLottes.hlsl" "-D CRT_LOTTES")
+ build_vertex_shader( rt64 "src/shaders/FullScreenVS.hlsl")
+ build_vertex_shader( rt64 "src/shaders/Im3DVS.hlsl")
+ build_pixel_shader(  rt64 "src/shaders/ComposePS.hlsl")
 diff --git a/src/common/rt64_tmem_hasher.h b/src/common/rt64_tmem_hasher.h
 index 8c6af2b..a614e4e 100644
 --- a/src/common/rt64_tmem_hasher.h
@@ -36,6 +47,85 @@ index 8c6af2b..a614e4e 100644
      };
  };
 \ No newline at end of file
+diff --git a/src/common/rt64_user_configuration.cpp b/src/common/rt64_user_configuration.cpp
+index cc35442..50b5682 100644
+--- a/src/common/rt64_user_configuration.cpp
++++ b/src/common/rt64_user_configuration.cpp
+@@ -17,6 +17,7 @@ namespace RT64 {
+         j["resolutionMultiplier"] = cfg.resolutionMultiplier;
+         j["downsampleMultiplier"] = cfg.downsampleMultiplier;
+         j["filtering"] = cfg.filtering;
++        j["crtFilter"] = cfg.crtFilter;
+         j["aspectRatio"] = cfg.aspectRatio;
+         j["aspectTarget"] = cfg.aspectTarget;
+         j["extAspectRatio"] = cfg.extAspectRatio;
+@@ -40,6 +41,7 @@ namespace RT64 {
+         cfg.resolutionMultiplier = j.value("resolutionMultiplier", defaultCfg.resolutionMultiplier);
+         cfg.downsampleMultiplier = j.value("downsampleMultiplier", defaultCfg.downsampleMultiplier);
+         cfg.filtering = j.value("filtering", defaultCfg.filtering);
++        cfg.crtFilter = j.value("crtFilter", defaultCfg.crtFilter);
+         cfg.aspectRatio = j.value("aspectRatio", defaultCfg.aspectRatio);
+         cfg.aspectTarget = j.value("aspectTarget", defaultCfg.aspectTarget);
+         cfg.extAspectRatio = j.value("extAspectRatio", defaultCfg.extAspectRatio);
+@@ -71,6 +73,7 @@ namespace RT64 {
+         resolutionMultiplier = 2.0f;
+         downsampleMultiplier = 1;
+         filtering = Filtering::AntiAliasedPixelScaling;
++        crtFilter = CRTFilter::Off;
+         aspectRatio = AspectRatio::Original;
+         aspectTarget = 16.0f / 9.0f;
+         extAspectRatio = AspectRatio::Original;
+@@ -91,6 +94,7 @@ namespace RT64 {
+         clampEnum<DisplayBuffering>(displayBuffering);
+         clampEnum<Antialiasing>(antialiasing);
+         clampEnum<Filtering>(filtering);
++        clampEnum<CRTFilter>(crtFilter);
+         clampEnum<AspectRatio>(aspectRatio);
+         clampEnum<AspectRatio>(extAspectRatio);
+         clampEnum<Upscale2D>(upscale2D);
+diff --git a/src/common/rt64_user_configuration.h b/src/common/rt64_user_configuration.h
+index 4857f22..9235951 100644
+--- a/src/common/rt64_user_configuration.h
++++ b/src/common/rt64_user_configuration.h
+@@ -48,6 +48,16 @@ namespace RT64 {
+             OptionCount
+         };
+ 
++        // OGRE: a CRT filter drawn by the VI pass instead of `filtering`
++        // (VIRenderer, src/shaders/VideoInterfaceCrtPS.hlsl).
++        enum class CRTFilter {
++            Off,
++            Hyllian,
++            LottesFast,
++            Lottes,
++            OptionCount
++        };
++
+         enum class AspectRatio {
+             Original,
+             Expand,
+@@ -90,6 +100,7 @@ namespace RT64 {
+         double resolutionMultiplier;
+         int downsampleMultiplier;
+         Filtering filtering;
++        CRTFilter crtFilter;
+         AspectRatio aspectRatio;
+         double aspectTarget;
+         AspectRatio extAspectRatio;
+@@ -146,6 +157,13 @@ namespace RT64 {
+         { UserConfiguration::Filtering::AntiAliasedPixelScaling, "AntiAliasedPixelScaling" }
+     });
+ 
++    NLOHMANN_JSON_SERIALIZE_ENUM(UserConfiguration::CRTFilter, {
++        { UserConfiguration::CRTFilter::Off, "Off" },
++        { UserConfiguration::CRTFilter::Hyllian, "Hyllian" },
++        { UserConfiguration::CRTFilter::LottesFast, "LottesFast" },
++        { UserConfiguration::CRTFilter::Lottes, "Lottes" }
++    });
++
+     NLOHMANN_JSON_SERIALIZE_ENUM(UserConfiguration::Upscale2D, {
+         { UserConfiguration::Upscale2D::Original, "Original" },
+         { UserConfiguration::Upscale2D::ScaledOnly, "ScaledOnly" },
 diff --git a/src/gbi/rt64_gbi_s2dex.cpp b/src/gbi/rt64_gbi_s2dex.cpp
 index 4b41bfa..13cd3c1 100644
 --- a/src/gbi/rt64_gbi_s2dex.cpp
@@ -652,7 +742,7 @@ index d7caa12..97d80bc 100644
                      result.tileWidth = tileWidth;
                      result.lineWidth = tileLineWidth;
 diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
-index 7de5b69..8bbf97f 100644
+index 7de5b69..9b542c5 100644
 --- a/src/hle/rt64_present_queue.cpp
 +++ b/src/hle/rt64_present_queue.cpp
 @@ -4,12 +4,55 @@
@@ -754,7 +844,23 @@ index 7de5b69..8bbf97f 100644
          FramebufferManager &fbManager = ext.sharedResources->framebufferManager;
          RenderTargetManager &targetManager = ext.sharedResources->renderTargetManager;
          const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
-@@ -146,6 +208,14 @@ namespace RT64 {
+@@ -101,6 +163,7 @@ namespace RT64 {
+         bool removeBlackBorders;
+         UserConfiguration::RefreshRate refreshRate;
+         UserConfiguration::Filtering filtering;
++        UserConfiguration::CRTFilter crtFilter;
+         uint32_t viOriginalRate;
+         uint32_t targetRate;
+         {
+@@ -110,6 +173,7 @@ namespace RT64 {
+             removeBlackBorders = ext.sharedResources->enhancementConfig.presentation.removeBlackBorders;
+             refreshRate = ext.sharedResources->userConfig.refreshRate;
+             filtering = ext.sharedResources->userConfig.filtering;
++            crtFilter = ext.sharedResources->userConfig.crtFilter;
+             viOriginalRate = ext.sharedResources->viOriginalRate;
+             targetRate = ext.sharedResources->targetRate;
+         }
+@@ -146,6 +210,14 @@ namespace RT64 {
                  viFb = fbManager.find(present.screenVI.fbAddress());
              }
  
@@ -769,7 +875,7 @@ index 7de5b69..8bbf97f 100644
              Framebuffer *presentFb = viFb;
              
              // Show the framebuffer the debugger has requested instead.
-@@ -221,6 +291,46 @@ namespace RT64 {
+@@ -221,6 +293,46 @@ namespace RT64 {
              else {
                  uint32_t fbAddress = present.screenVI.fbAddress();
  
@@ -816,7 +922,7 @@ index 7de5b69..8bbf97f 100644
                  // Use a scratch framebuffer to upload the RAM to the render target.
                  scratchFb.addressStart = fbAddress;
                  scratchFb.width = fbSize.x;
-@@ -254,6 +364,7 @@ namespace RT64 {
+@@ -254,6 +366,7 @@ namespace RT64 {
                  if (!present.paused && (viHistory.top().vi != present.screenVI)) {
                      viHistory.pushVI(present.screenVI, fbSize.x);
                  }
@@ -824,7 +930,7 @@ index 7de5b69..8bbf97f 100644
              }
          }
  
-@@ -266,6 +377,36 @@ namespace RT64 {
+@@ -266,6 +379,36 @@ namespace RT64 {
                  swapChainFramebuffers[i] = ext.device->createFramebuffer(RenderFramebufferDesc(&swapChainTexture, 1));
              }
          }
@@ -861,7 +967,22 @@ index 7de5b69..8bbf97f 100644
          
          for (int32_t i = 0; i < framesToPresent; i++) {
              uint32_t frameCountersNextPresented = 0;
-@@ -342,11 +483,97 @@ namespace RT64 {
+@@ -322,6 +465,7 @@ namespace RT64 {
+                     renderParams.resolutionScale = colorTarget->resolutionScale;
+                     renderParams.downsamplingScale = 1;
+                     renderParams.filtering = filtering;
++                    renderParams.crtFilter = crtFilter;
+                     renderParams.vi = &present.screenVI;
+                     renderParams.removeBlackBorders = removeBlackBorders;
+ 
+@@ -339,14 +483,104 @@ namespace RT64 {
+                         renderParams.textureWidth = colorTarget->width;
+                         renderParams.textureHeight = colorTarget->height;
+                     }
++
++                    // OGRE: the CRT filter's compute pass, before the swap
++                    // chain framebuffer is bound.
++                    viRenderer->prepare(renderParams);
                  }
                  
                  commandList->setFramebuffer(swapChainFramebuffer);
@@ -961,7 +1082,7 @@ index 7de5b69..8bbf97f 100644
                  }
  
                  RenderHookDraw *drawHook = GetRenderHookDraw();
-@@ -354,6 +581,28 @@ namespace RT64 {
+@@ -354,6 +588,28 @@ namespace RT64 {
                      drawHook(commandList, swapChainFramebuffer);
                  }
  
@@ -990,7 +1111,7 @@ index 7de5b69..8bbf97f 100644
                  {
                      const std::scoped_lock lock(inspectorMutex);
                      if (inspector != nullptr) {
-@@ -367,6 +616,51 @@ namespace RT64 {
+@@ -367,6 +623,51 @@ namespace RT64 {
                      RenderCommandSemaphore *signalSemaphore = drawSemaphores[swapChainIndex].get();
                      ext.presentGraphicsWorker->commandQueue->executeCommandLists(&commandList, 1, &waitSemaphore, 1, &signalSemaphore, 1, ext.presentGraphicsWorker->commandFence.get());
                      ext.presentGraphicsWorker->wait();
@@ -1042,7 +1163,7 @@ index 7de5b69..8bbf97f 100644
                  }
              }
  
-@@ -427,8 +721,12 @@ namespace RT64 {
+@@ -427,8 +728,12 @@ namespace RT64 {
      }
      
      void PresentQueue::threadAdvanceBarrier() {
@@ -2292,8 +2413,94 @@ index eb944a4..4e50ede 100644
  
          static uint32_t getNativeSize(uint32_t width, uint32_t height, uint8_t siz);
      };
+diff --git a/src/render/rt64_shader_library.cpp b/src/render/rt64_shader_library.cpp
+index d1c5273..f22af18 100644
+--- a/src/render/rt64_shader_library.cpp
++++ b/src/render/rt64_shader_library.cpp
+@@ -4,6 +4,8 @@
+ 
+ #include "rt64_shader_library.h"
+ 
++#include <utility>
++
+ #include "common/rt64_common.h"
+ #include "shared/rt64_render_target_copy.h"
+ #include "shared/rt64_rsp_vertex_test_z.h"
+@@ -46,6 +48,9 @@
+ #include "shaders/TextureResolveSamples8XPS.hlsl.spirv.h"
+ #include "shaders/VideoInterfacePSRegular.hlsl.spirv.h"
+ #include "shaders/VideoInterfacePSPixel.hlsl.spirv.h"
++#include "shaders/VideoInterfaceCrtPSHyllian.hlsl.spirv.h"
++#include "shaders/VideoInterfaceCrtPSLottesFast.hlsl.spirv.h"
++#include "shaders/VideoInterfaceCrtPSLottes.hlsl.spirv.h"
+ #include "shaders/FullScreenVS.hlsl.spirv.h"
+ #include "shaders/Im3DVS.hlsl.spirv.h"
+ #include "shaders/ComposePS.hlsl.spirv.h"
+@@ -92,6 +97,9 @@
+ #   include "shaders/TextureResolveSamples8XPS.hlsl.dxil.h"
+ #   include "shaders/VideoInterfacePSRegular.hlsl.dxil.h"
+ #   include "shaders/VideoInterfacePSPixel.hlsl.dxil.h"
++#   include "shaders/VideoInterfaceCrtPSHyllian.hlsl.dxil.h"
++#   include "shaders/VideoInterfaceCrtPSLottesFast.hlsl.dxil.h"
++#   include "shaders/VideoInterfaceCrtPSLottes.hlsl.dxil.h"
+ #   include "shaders/FullScreenVS.hlsl.dxil.h"
+ #   include "shaders/Im3DVS.hlsl.dxil.h"
+ #   include "shaders/ComposePS.hlsl.dxil.h"
+@@ -137,6 +145,9 @@
+ #   include "shaders/TextureResolveSamples8XPS.hlsl.metal.h"
+ #   include "shaders/VideoInterfacePSRegular.hlsl.metal.h"
+ #   include "shaders/VideoInterfacePSPixel.hlsl.metal.h"
++#   include "shaders/VideoInterfaceCrtPSHyllian.hlsl.metal.h"
++#   include "shaders/VideoInterfaceCrtPSLottesFast.hlsl.metal.h"
++#   include "shaders/VideoInterfaceCrtPSLottes.hlsl.metal.h"
+ #   include "shaders/FullScreenVS.hlsl.metal.h"
+ #   include "shaders/Im3DVS.hlsl.metal.h"
+ #   include "shaders/ComposePS.hlsl.metal.h"
+@@ -618,6 +629,28 @@ namespace RT64 {
+             pipelineDesc.pixelShader = pixelShader.get();
+             pipelineDesc.pipelineLayout = videoInterfacePixel.pipelineLayout.get();
+             videoInterfacePixel.pipeline = device->createGraphicsPipeline(pipelineDesc);
++
++            // OGRE: the CRT filters. Same descriptor set as the linear VI pass,
++            // their own push constants (VideoInterfaceCrtCB).
++            std::unique_ptr<RenderShader> crtHyllianShader = device->createShader(CREATE_SHADER_INPUTS(VideoInterfaceCrtPSHyllianBlobDXIL, VideoInterfaceCrtPSHyllianBlobSPIRV, VideoInterfaceCrtPSHyllianBlobMSL, "PSMain", shaderFormat));
++            std::unique_ptr<RenderShader> crtLottesFastShader = device->createShader(CREATE_SHADER_INPUTS(VideoInterfaceCrtPSLottesFastBlobDXIL, VideoInterfaceCrtPSLottesFastBlobSPIRV, VideoInterfaceCrtPSLottesFastBlobMSL, "PSMain", shaderFormat));
++            std::unique_ptr<RenderShader> crtLottesShader = device->createShader(CREATE_SHADER_INPUTS(VideoInterfaceCrtPSLottesBlobDXIL, VideoInterfaceCrtPSLottesBlobSPIRV, VideoInterfaceCrtPSLottesBlobMSL, "PSMain", shaderFormat));
++            const std::pair<ShaderRecord *, RenderShader *> crtRecords[] = {
++                { &videoInterfaceCrtHyllian, crtHyllianShader.get() },
++                { &videoInterfaceCrtLottesFast, crtLottesFastShader.get() },
++                { &videoInterfaceCrtLottes, crtLottesShader.get() },
++            };
++
++            for (const auto &record : crtRecords) {
++                layoutBuilder.begin();
++                layoutBuilder.addPushConstant(0, 0, sizeof(interop::VideoInterfaceCrtCB), RenderShaderStageFlag::PIXEL);
++                layoutBuilder.addDescriptorSet(linearDescriptorSet);
++                layoutBuilder.end();
++                record.first->pipelineLayout = layoutBuilder.create(device);
++                pipelineDesc.pixelShader = record.second;
++                pipelineDesc.pipelineLayout = record.first->pipelineLayout.get();
++                record.first->pipeline = device->createGraphicsPipeline(pipelineDesc);
++            }
+         }
+     }
+ 
+diff --git a/src/render/rt64_shader_library.h b/src/render/rt64_shader_library.h
+index 641f3ec..598f872 100644
+--- a/src/render/rt64_shader_library.h
++++ b/src/render/rt64_shader_library.h
+@@ -57,6 +57,9 @@ namespace RT64 {
+         ShaderRecord videoInterfaceLinear;
+         ShaderRecord videoInterfaceNearest;
+         ShaderRecord videoInterfacePixel;
++        ShaderRecord videoInterfaceCrtHyllian;
++        ShaderRecord videoInterfaceCrtLottesFast;
++        ShaderRecord videoInterfaceCrtLottes;
+ 
+         ShaderLibrary(bool usesHDR, bool usesHardwareResolve);
+         ~ShaderLibrary();
 diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
-index b4ff4e9..44480eb 100644
+index b4ff4e9..95b13d3 100644
 --- a/src/render/rt64_vi_renderer.cpp
 +++ b/src/render/rt64_vi_renderer.cpp
 @@ -4,6 +4,9 @@
@@ -2340,7 +2547,132 @@ index b4ff4e9..44480eb 100644
      inline hlslpp::float2 computeHDSize(hlslpp::float2 sdSize, hlslpp::float2 resolutionScale, uint32_t downsamplingScale) {
          return (sdSize * resolutionScale) / float(downsamplingScale);
      }
-@@ -74,7 +104,7 @@ namespace RT64 {
+@@ -41,7 +71,124 @@ namespace RT64 {
+         return windowCenter + relativeCoordinate * relativeScale;
+     }
+ 
++    // OGRE: a framebuffer taller than this is an interlaced or high-resolution
++    // mode, and the CRT filters fold two of its lines into one scanline, so a
++    // 480-line image still shows 240 scanlines.
++    static const uint32_t CrtMaxScanlines = 288;
++
++    void VIRenderer::prepare(const RenderParams &p) {
++        crtReady = false;
++        if ((p.crtFilter == UserConfiguration::CRTFilter::Off) || (p.texture == nullptr) || (p.vi == nullptr) || (p.textureWidth == 0) || (p.textureHeight == 0)) {
++            return;
++        }
++
++        // The texture holds resolutionScale / downsamplingScale texels per
++        // framebuffer pixel. The box filter needs whole numbers; the horizontal
++        // scale is fractional when the aspect ratio is expanded, and rounding it
++        // only changes how many columns the CRT input has.
++        const hlslpp::uint2 visible = visibleFramebufferSize(*p.vi);
++        const float downsampling = float(std::max(p.downsamplingScale, 1U));
++        const uint32_t scaleX = std::max(uint32_t(lround(float(p.resolutionScale.x) / downsampling)), 1U);
++        uint32_t scaleY = std::max(uint32_t(lround(float(p.resolutionScale.y) / downsampling)), 1U);
++        if (uint32_t(visible.y) > CrtMaxScanlines) {
++            scaleY *= 2;
++        }
++
++        const uint32_t width = std::max((p.textureWidth + scaleX - 1) / scaleX, 1U);
++        const uint32_t height = std::max((p.textureHeight + scaleY - 1) / scaleY, 1U);
++        if ((crtSourceTexture == nullptr) || (crtSourceWidth != width) || (crtSourceHeight != height) || (crtSourceFormat != p.textureFormat)) {
++            crtSourceTexture = p.device->createTexture(RenderTextureDesc::Texture2D(width, height, 1, p.textureFormat, RenderTextureFlag::STORAGE | RenderTextureFlag::UNORDERED_ACCESS));
++            crtSourceTexture->setName("VI CRT Source");
++            crtSourceWidth = width;
++            crtSourceHeight = height;
++            crtSourceFormat = p.textureFormat;
++        }
++
++        if (crtFilterDescriptorSet == nullptr) {
++            crtFilterDescriptorSet = std::make_unique<BoxFilterDescriptorSet>(p.device);
++        }
++
++        crtFilterDescriptorSet->setTexture(crtFilterDescriptorSet->gInput, p.texture, RenderTextureLayout::SHADER_READ);
++        crtFilterDescriptorSet->setTexture(crtFilterDescriptorSet->gOutput, crtSourceTexture.get(), RenderTextureLayout::GENERAL);
++
++        struct BoxFilterCB {
++            interop::int2 Resolution;
++            interop::int2 ResolutionScale;
++            interop::int2 Misalignment;
++        };
++
++        BoxFilterCB boxFilterCB;
++        boxFilterCB.Resolution[0] = int32_t(p.textureWidth);
++        boxFilterCB.Resolution[1] = int32_t(p.textureHeight);
++        boxFilterCB.ResolutionScale[0] = int32_t(scaleX);
++        boxFilterCB.ResolutionScale[1] = int32_t(scaleY);
++        boxFilterCB.Misalignment[0] = 0;
++        boxFilterCB.Misalignment[1] = 0;
++
++        RenderTextureBarrier filterBarriers[] = {
++            RenderTextureBarrier(p.texture, RenderTextureLayout::SHADER_READ),
++            RenderTextureBarrier(crtSourceTexture.get(), RenderTextureLayout::GENERAL)
++        };
++
++        const uint32_t BlockSize = 8;
++        p.commandList->barriers(RenderBarrierStage::COMPUTE, filterBarriers, uint32_t(std::size(filterBarriers)));
++        p.commandList->setPipeline(p.shaderLibrary->boxFilter.pipeline.get());
++        p.commandList->setComputePipelineLayout(p.shaderLibrary->boxFilter.pipelineLayout.get());
++        p.commandList->setComputePushConstants(0, &boxFilterCB);
++        p.commandList->setComputeDescriptorSet(crtFilterDescriptorSet->get(), 0);
++        p.commandList->dispatch((width + BlockSize - 1) / BlockSize, (height + BlockSize - 1) / BlockSize, 1);
++        p.commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(crtSourceTexture.get(), RenderTextureLayout::SHADER_READ));
++
++        // The visible area in CRT input texels: the VI pass's videoResolution
++        // divided by the box size.
++        const hlslpp::float2 hdVisible = computeHDSize(hlslpp::float2(visible), p.resolutionScale, p.downsamplingScale);
++        crtVisibleWidth = std::clamp(std::floor(float(hdVisible.x) / float(scaleX)), 1.0f, float(width));
++        crtVisibleHeight = std::clamp(std::floor(float(hdVisible.y) / float(scaleY)), 1.0f, float(height));
++        crtReady = true;
++    }
++
+     void VIRenderer::render(const RenderParams &p) {
++        if (crtReady && (p.crtFilter != UserConfiguration::CRTFilter::Off)) {
++            const ShaderRecord *crtShader = nullptr;
++            switch (p.crtFilter) {
++            case UserConfiguration::CRTFilter::Hyllian:
++                crtShader = &p.shaderLibrary->videoInterfaceCrtHyllian;
++                break;
++            case UserConfiguration::CRTFilter::LottesFast:
++                crtShader = &p.shaderLibrary->videoInterfaceCrtLottesFast;
++                break;
++            case UserConfiguration::CRTFilter::Lottes:
++            default:
++                crtShader = &p.shaderLibrary->videoInterfaceCrtLottes;
++                break;
++            }
++
++            if (crtDescriptorSet == nullptr) {
++                crtDescriptorSet = std::make_unique<VideoInterfaceDescriptorSet>(p.shaderLibrary->samplerLibrary.linear.borderBorder.get(), p.device);
++            }
++
++            crtDescriptorSet->setTexture(crtDescriptorSet->gInput, crtSourceTexture.get(), RenderTextureLayout::SHADER_READ);
++
++            RenderViewport viewport;
++            RenderRect scissor;
++            getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor);
++            p.commandList->setViewports(viewport);
++            p.commandList->setScissors(scissor);
++
++            interop::VideoInterfaceCrtCB crtConstants;
++            crtConstants.sourceSize = { crtVisibleWidth, crtVisibleHeight };
++            crtConstants.outputSize = { std::max(viewport.width, 1.0f), std::max(viewport.height, 1.0f) };
++            crtConstants.gamma = p.vi->gamma();
++
++            p.commandList->setPipeline(crtShader->pipeline.get());
++            p.commandList->setGraphicsPipelineLayout(crtShader->pipelineLayout.get());
++            p.commandList->setGraphicsDescriptorSet(crtDescriptorSet->get(), 0);
++            p.commandList->setGraphicsPushConstants(0, &crtConstants);
++            p.commandList->setVertexBuffers(0, nullptr, 0, nullptr);
++            p.commandList->drawInstanced(3, 1, 0, 0);
++            return;
++        }
++
+         const ShaderRecord *shader = nullptr;
+         const RenderSampler *sampler = nullptr;
+         switch (p.filtering) {
+@@ -74,7 +221,7 @@ namespace RT64 {
          p.commandList->setScissors(scissor);
  
          interop::VideoInterfaceCB pushConstants;
@@ -2349,7 +2681,7 @@ index b4ff4e9..44480eb 100644
          pushConstants.textureResolution = { float(p.textureWidth), float(p.textureHeight) };
          pushConstants.gamma = p.vi->gamma();
  
-@@ -105,7 +135,12 @@ namespace RT64 {
+@@ -105,7 +252,12 @@ namespace RT64 {
          const hlslpp::float2 windowSize = { float(swapChain->getWidth()), float(swapChain->getHeight()) };
  
          // Query the VI for the current rendering area.
@@ -2363,6 +2695,48 @@ index b4ff4e9..44480eb 100644
          hlslpp::float4 viCropRect = vi.cropRectangle() * sdSize.xyxy;
  
          // Scale all the rectangles to the space of the Window.
+diff --git a/src/render/rt64_vi_renderer.h b/src/render/rt64_vi_renderer.h
+index 8a3782a..fc511e0 100644
+--- a/src/render/rt64_vi_renderer.h
++++ b/src/render/rt64_vi_renderer.h
+@@ -15,6 +15,18 @@ namespace RT64 {
+         std::unique_ptr<VideoInterfaceDescriptorSet> descriptorSet;
+         const RenderSampler *descriptorSetSampler = nullptr;
+ 
++        // OGRE: the CRT filter's input, the frame box-filtered to one texel per
++        // framebuffer pixel by `prepare`, and the descriptor sets that read it.
++        std::unique_ptr<RenderTexture> crtSourceTexture;
++        RenderFormat crtSourceFormat = RenderFormat::UNKNOWN;
++        uint32_t crtSourceWidth = 0;
++        uint32_t crtSourceHeight = 0;
++        float crtVisibleWidth = 0.0f;
++        float crtVisibleHeight = 0.0f;
++        bool crtReady = false;
++        std::unique_ptr<BoxFilterDescriptorSet> crtFilterDescriptorSet;
++        std::unique_ptr<VideoInterfaceDescriptorSet> crtDescriptorSet;
++
+         struct RenderParams {
+             RenderDevice *device = nullptr;
+             RenderCommandList *commandList = nullptr;
+@@ -27,12 +39,18 @@ namespace RT64 {
+             uint32_t textureWidth = 0;
+             uint32_t textureHeight = 0;
+             UserConfiguration::Filtering filtering = UserConfiguration::Filtering::Linear;
++            UserConfiguration::CRTFilter crtFilter = UserConfiguration::CRTFilter::Off;
+             const VI *vi = nullptr;
+             bool removeBlackBorders = false;
+         };
+ 
+         VIRenderer();
+         ~VIRenderer();
++
++        // OGRE: with a CRT filter on, box-filters `p.texture` into the CRT
++        // input with a compute pass. It records into `p.commandList`, so the
++        // caller runs it before it sets the swap chain framebuffer.
++        void prepare(const RenderParams &p);
+         void render(const RenderParams &p);
+         static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor);
+     };
 diff --git a/src/shaders/RasterPS.hlsl b/src/shaders/RasterPS.hlsl
 index e7895c3..b033e17 100644
 --- a/src/shaders/RasterPS.hlsl
@@ -2579,3 +2953,419 @@ index 1ceb2ce..2f1f3a7 100644
      }
  #endif
  
+diff --git a/src/shared/rt64_video_interface.h b/src/shared/rt64_video_interface.h
+index b51cf09..dcd7654 100644
+--- a/src/shared/rt64_video_interface.h
++++ b/src/shared/rt64_video_interface.h
+@@ -14,6 +14,15 @@ namespace interop {
+         float2 textureResolution;
+         float gamma;
+     };
++
++    // OGRE: the CRT filters' constants (VideoInterfaceCrtPS.hlsl). The input is
++    // the frame box-filtered to one texel per framebuffer pixel (one per two
++    // lines for a framebuffer taller than 288 lines).
++    struct VideoInterfaceCrtCB {
++        float2 sourceSize;  // the visible area of the input, in texels
++        float2 outputSize;  // the viewport, in output pixels
++        float gamma;        // the VI gamma, applied to every fetched texel
++    };
+ #ifdef HLSL_CPU
+ };
+ #endif
+\ No newline at end of file
+diff --git a/src/shaders/VideoInterfaceCrtPS.hlsl b/src/shaders/VideoInterfaceCrtPS.hlsl
+new file mode 100644
+index 0000000..97f11ab
+--- /dev/null
++++ b/src/shaders/VideoInterfaceCrtPS.hlsl
+@@ -0,0 +1,389 @@
++//
++// RT64
++//
++// OGRE: CRT filters for the VI pass.
++//
++// VIRenderer::prepare box-filters the rendered frame down to one texel per
++// framebuffer pixel (one per two lines for a framebuffer taller than 288
++// lines), so every filter below sees the game's own 240-line image whatever the
++// internal resolution is. The VI viewport then runs one of three published CRT
++// shaders, chosen when the shader is compiled:
++//
++//   CRT_HYLLIAN      crt-hyllian-fast, Hyllian (MIT license, below)
++//   CRT_LOTTES_FAST  crt-lottes-fast ("CRTS"), Timothy Lottes (public domain)
++//   CRT_LOTTES       crt-lottes, Timothy Lottes (public domain)
++//
++// Each one is a port of the libretro version (github.com/libretro/slang-shaders,
++// crt/shaders/) with that version's default parameters as constants. A texel is
++// read with Load at integer coordinates (the originals sample texel centres),
++// and a texel outside the visible area reads as black.
++//
++
++#include "shared/rt64_video_interface.h"
++
++[[vk::push_constant]] ConstantBuffer<VideoInterfaceCrtCB> gConstants : register(b0);
++Texture2D<float4> gInput : register(t1);
++SamplerState gSampler : register(s2);
++
++// One input texel, gamma-encoded as the game wrote it, with the VI gamma
++// applied the way VideoInterfacePS applies it. Black outside the visible area.
++float3 FetchTexel(int2 p) {
++    const int2 size = int2(gConstants.sourceSize);
++    if (any(p < 0) || any(p >= size)) {
++        return float3(0.0f, 0.0f, 0.0f);
++    }
++
++    return pow(max(gInput.Load(int3(p, 0)).rgb, 0.0f), gConstants.gamma);
++}
++
++float3 SrgbToLinear(float3 c) {
++    const float3 lo = c / 12.92f;
++    const float3 hi = pow((max(c, 0.0f) + 0.055f) / 1.055f, 2.4f);
++    return lerp(hi, lo, step(c, 0.04045f));
++}
++
++float3 LinearToSrgb(float3 c) {
++    const float3 lo = c * 12.92f;
++    const float3 hi = 1.055f * pow(max(c, 0.0f), 0.41666f) - 0.055f;
++    return lerp(hi, lo, step(c, 0.0031308f));
++}
++
++#if defined(CRT_HYLLIAN)
++
++// Hyllian's CRT Shader
++// with cgwg's magenta/green dotmask
++// ported to GLSL/SLANG by DariusG & hunterk
++//
++// Copyright (C) 2011-2015 Hyllian - sergiogdb@gmail.com
++//
++// Permission is hereby granted, free of charge, to any person obtaining a copy
++// of this software and associated documentation files (the "Software"), to deal
++// in the Software without restriction, including without limitation the rights
++// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++// copies of the Software, and to permit persons to whom the Software is
++// furnished to do so, subject to the following conditions:
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++// THE SOFTWARE.
++
++static const float HyllianMaskIntensity = 0.5f;
++static const float HyllianInputGamma = 2.4f;
++static const float HyllianOutputGamma = 2.2f;
++static const float HyllianBrightBoost = 1.5f;
++static const float HyllianScanlines = 0.72f;
++
++float3 CrtFilter(float2 uv, float2 outPos) {
++    // The original moves the coordinate half a texel left, so the cubic runs
++    // between the centres of texels 0 and 1 of its four taps.
++    const float2 pos = uv * gConstants.sourceSize - float2(0.5f, 0.0f);
++    const float2 cell = floor(pos);
++    const float2 fp = pos - cell;
++    const int2 tc = int2(cell);
++
++    const float3 c10 = FetchTexel(tc + int2(-1, 0));
++    const float3 c11 = FetchTexel(tc);
++    const float3 c12 = FetchTexel(tc + int2(1, 0));
++    const float3 c13 = FetchTexel(tc + int2(2, 0));
++
++    // Horizontal cubic filter, Catmull-Rom.
++    const float4 lobes = float4(fp.x * fp.x * fp.x, fp.x * fp.x, fp.x, 1.0f);
++    float4 invX;
++    invX.x = dot(float4(-0.5f, 1.0f, -0.5f, 0.0f), lobes);
++    invX.y = dot(float4(1.5f, -2.5f, 0.0f, 1.0f), lobes);
++    invX.z = dot(float4(-1.5f, 2.0f, 0.5f, 0.0f), lobes);
++    invX.w = dot(float4(0.5f, -0.5f, 0.0f, 0.0f), lobes);
++    float3 color = invX.x * c10 + invX.y * c11 + invX.z * c12 + invX.w * c13;
++    color = pow(max(color, 0.0f), HyllianInputGamma);
++
++    // One beam per line, brightest at the line's centre.
++    const float d1 = saturate(1.5f - HyllianScanlines - abs(fp.y - 0.5f));
++    const float d = d1 * d1 * (3.0f + HyllianBrightBoost - 2.0f * d1);
++    color *= d;
++
++    // Magenta/green dot mask, alternating per output column.
++    const float odd = fmod(floor(outPos.x), 2.0f);
++    const float3 maskEven = float3(1.0f, 1.0f - HyllianMaskIntensity, 1.0f);
++    const float3 maskOdd = float3(1.0f - HyllianMaskIntensity, 1.0f, 1.0f - HyllianMaskIntensity);
++    color *= lerp(maskEven, maskOdd, odd);
++
++    return pow(max(color, 0.0f), 1.0f / HyllianOutputGamma);
++}
++
++#elif defined(CRT_LOTTES_FAST)
++
++// [CRTS] PUBLIC DOMAIN CRT-STYLED SCALAR - 20180120b
++//   by Timothy Lottes
++//   adapted for RetroArch by hunterk
++//
++// The four-tap path with warp and the tonal curve, and the libretro defaults:
++// mask type 1 (one channel dimmed per column of three), mask intensity 0.5,
++// scanline intensity 0.5, sharpness 2.5, curvature 0.02, corner round 3.
++
++static const float CrtsThin = 0.75f;      // 0.5 + 0.5 * scanline intensity
++static const float CrtsBlur = -2.5f;      // -sharpness
++static const float CrtsMaskDark = 0.5f;   // 1 - mask intensity
++static const float CrtsCurvature = 0.02f;
++static const float CrtsCorner = 3.0f;
++
++float4 CrtsTone(float thin, float mask) {
++    // Mask type 1 is the lighter mask, so the tone compensates for less.
++    mask = 0.5f + mask * 0.5f;
++    const float contrast = 1.0f;
++    const float midOut = 0.18f / ((1.5f - thin) * (0.5f * mask + 0.5f));
++    const float pMidIn = pow(0.18f, contrast);
++    float4 ret;
++    ret.x = contrast;
++    ret.y = ((-pMidIn) + midOut) / ((1.0f - pMidIn) * midOut);
++    ret.z = ((-pMidIn) * midOut + pMidIn) / (midOut * (-pMidIn) + midOut);
++    ret.w = contrast;
++    return ret;
++}
++
++float3 CrtsMask(float2 pos, float dark) {
++    float3 m = float3(1.0f, 1.0f, 1.0f);
++    const float x = frac(pos.x * (1.0f / 3.0f));
++    if (x < (1.0f / 3.0f)) {
++        m.r = dark;
++    }
++    else if (x < (2.0f / 3.0f)) {
++        m.g = dark;
++    }
++    else {
++        m.b = dark;
++    }
++
++    return m;
++}
++
++float3 CrtsFetch(float x, float y) {
++    return SrgbToLinear(FetchTexel(int2(floor(float2(x, y)))));
++}
++
++float3 CrtFilter(float2 uv, float2 outPos) {
++    const float2 inputSize = gConstants.sourceSize;
++    const float2 warp = float2(CrtsCurvature, CrtsCurvature * 0.75f);
++    const float4 tone = CrtsTone(CrtsThin, CrtsMaskDark);
++
++    // Warp the scanlines (not the mask) and fade the rounded corners.
++    float2 pos = outPos * (2.0f / gConstants.outputSize) - float2(1.0f, 1.0f);
++    pos *= float2(1.0f + (pos.y * pos.y) * warp.x, 1.0f + (pos.x * pos.x) * warp.y);
++    float vin = (1.0f - (1.0f - saturate(pos.x * pos.x)) * (1.0f - saturate(pos.y * pos.y))) * (0.998f + 0.001f * CrtsCorner);
++    vin = saturate((-vin) * inputSize.y + inputSize.y);
++    pos = pos * (0.5f * inputSize) + 0.5f * inputSize;
++
++    // Centres of the first scanline and of the first of four texels.
++    const float y0 = floor(pos.y - 0.5f) + 0.5f;
++    const float x0 = floor(pos.x - 1.5f) + 0.5f;
++    const float3 colA0 = CrtsFetch(x0, y0);
++    const float3 colA1 = CrtsFetch(x0 + 1.0f, y0);
++    const float3 colA2 = CrtsFetch(x0 + 2.0f, y0);
++    const float3 colA3 = CrtsFetch(x0 + 3.0f, y0);
++    const float3 colB0 = CrtsFetch(x0, y0 + 1.0f);
++    const float3 colB1 = CrtsFetch(x0 + 1.0f, y0 + 1.0f);
++    const float3 colB2 = CrtsFetch(x0 + 2.0f, y0 + 1.0f);
++    const float3 colB3 = CrtsFetch(x0 + 3.0f, y0 + 1.0f);
++
++    // Vertical filter: a sine-shaped beam per scanline.
++    const float off = pos.y - y0;
++    const float pi2 = 6.28318530717958f;
++    float scanA = cos(min(0.5f, off * CrtsThin) * pi2) * 0.5f + 0.5f;
++    float scanB = cos(min(0.5f, (-off) * CrtsThin + CrtsThin) * pi2) * 0.5f + 0.5f;
++
++    // Horizontal filter: a Gaussian over the four texels.
++    const float off0 = pos.x - x0;
++    const float off1 = off0 - 1.0f;
++    const float off2 = off0 - 2.0f;
++    const float off3 = off0 - 3.0f;
++    const float pix0 = exp2(CrtsBlur * off0 * off0);
++    const float pix1 = exp2(CrtsBlur * off1 * off1);
++    const float pix2 = exp2(CrtsBlur * off2 * off2);
++    const float pix3 = exp2(CrtsBlur * off3 * off3);
++    const float pixT = vin / (pix0 + pix1 + pix2 + pix3);
++    scanA *= pixT;
++    scanB *= pixT;
++
++    float3 color =
++        (colA0 * pix0 + colA1 * pix1 + colA2 * pix2 + colA3 * pix3) * scanA +
++        (colB0 * pix0 + colB1 * pix1 + colB2 * pix2 + colB3 * pix3) * scanB;
++
++    color *= CrtsMask(outPos, CrtsMaskDark);
++
++    // Tonal curve on the peak channel, which restores the brightness the mask
++    // and the scanlines take away.
++    float peak = max(1.0f / (256.0f * 65536.0f), max(color.r, max(color.g, color.b)));
++    const float3 ratio = color / peak;
++    peak = peak / (peak * tone.y + tone.z);
++    return LinearToSrgb(ratio * peak);
++}
++
++#elif defined(CRT_LOTTES)
++
++// PUBLIC DOMAIN CRT STYLED SCAN-LINE SHADER
++//
++//   by Timothy Lottes
++//
++// This is more along the style of a really good CGA arcade monitor.
++// With RGB inputs instead of NTSC.
++// The shadow mask example has the mask rotated 90 degrees for less chromatic aberration.
++//
++// It is an example what I personally would want as a display option for pixel art games.
++// Please take and use, change, or whatever.
++//
++// The libretro defaults: hardScan -8, hardPix -3, warp 0.031/0.041, mask
++// 0.5..1.5 with the stretched VGA shadow mask (type 3), bloom 0.15 with
++// hardBloomPix -1.5 and hardBloomScan -2, kernel shape 2 (a Gaussian).
++
++static const float LottesHardScan = -8.0f;
++static const float LottesHardPix = -3.0f;
++static const float2 LottesWarp = float2(0.031f, 0.041f);
++static const float LottesMaskDark = 0.5f;
++static const float LottesMaskLight = 1.5f;
++static const float LottesHardBloomPix = -1.5f;
++static const float LottesHardBloomScan = -2.0f;
++static const float LottesBloomAmount = 0.15f;
++
++// Nearest emulated sample given floating point position and texel offset.
++float3 LottesFetch(float2 pos, float2 off) {
++    const float2 p = floor(pos * gConstants.sourceSize + off);
++    return SrgbToLinear(FetchTexel(int2(p)));
++}
++
++// Distance in emulated pixels to nearest texel.
++float2 LottesDist(float2 pos) {
++    pos = pos * gConstants.sourceSize;
++    return -((pos - floor(pos)) - float2(0.5f, 0.5f));
++}
++
++// 1D Gaussian (kernel shape 2).
++float LottesGaus(float pos, float scale) {
++    return exp2(scale * pos * pos);
++}
++
++float3 LottesHorz3(float2 pos, float off) {
++    const float3 b = LottesFetch(pos, float2(-1.0f, off));
++    const float3 c = LottesFetch(pos, float2(0.0f, off));
++    const float3 d = LottesFetch(pos, float2(1.0f, off));
++    const float dst = LottesDist(pos).x;
++    const float wb = LottesGaus(dst - 1.0f, LottesHardPix);
++    const float wc = LottesGaus(dst + 0.0f, LottesHardPix);
++    const float wd = LottesGaus(dst + 1.0f, LottesHardPix);
++    return (b * wb + c * wc + d * wd) / (wb + wc + wd);
++}
++
++float3 LottesHorz5(float2 pos, float off) {
++    const float3 a = LottesFetch(pos, float2(-2.0f, off));
++    const float3 b = LottesFetch(pos, float2(-1.0f, off));
++    const float3 c = LottesFetch(pos, float2(0.0f, off));
++    const float3 d = LottesFetch(pos, float2(1.0f, off));
++    const float3 e = LottesFetch(pos, float2(2.0f, off));
++    const float dst = LottesDist(pos).x;
++    // The original uses hardPix here also when Bloom calls it.
++    const float scale = LottesHardPix;
++    const float wa = LottesGaus(dst - 2.0f, scale);
++    const float wb = LottesGaus(dst - 1.0f, scale);
++    const float wc = LottesGaus(dst + 0.0f, scale);
++    const float wd = LottesGaus(dst + 1.0f, scale);
++    const float we = LottesGaus(dst + 2.0f, scale);
++    return (a * wa + b * wb + c * wc + d * wd + e * we) / (wa + wb + wc + wd + we);
++}
++
++float3 LottesHorz7(float2 pos, float off) {
++    const float3 a = LottesFetch(pos, float2(-3.0f, off));
++    const float3 b = LottesFetch(pos, float2(-2.0f, off));
++    const float3 c = LottesFetch(pos, float2(-1.0f, off));
++    const float3 d = LottesFetch(pos, float2(0.0f, off));
++    const float3 e = LottesFetch(pos, float2(1.0f, off));
++    const float3 f = LottesFetch(pos, float2(2.0f, off));
++    const float3 g = LottesFetch(pos, float2(3.0f, off));
++    const float dst = LottesDist(pos).x;
++    const float scale = LottesHardBloomPix;
++    const float wa = LottesGaus(dst - 3.0f, scale);
++    const float wb = LottesGaus(dst - 2.0f, scale);
++    const float wc = LottesGaus(dst - 1.0f, scale);
++    const float wd = LottesGaus(dst + 0.0f, scale);
++    const float we = LottesGaus(dst + 1.0f, scale);
++    const float wf = LottesGaus(dst + 2.0f, scale);
++    const float wg = LottesGaus(dst + 3.0f, scale);
++    return (a * wa + b * wb + c * wc + d * wd + e * we + f * wf + g * wg) / (wa + wb + wc + wd + we + wf + wg);
++}
++
++float LottesScan(float2 pos, float off) {
++    return LottesGaus(LottesDist(pos).y + off, LottesHardScan);
++}
++
++float LottesBloomScan(float2 pos, float off) {
++    return LottesGaus(LottesDist(pos).y + off, LottesHardBloomScan);
++}
++
++// Allow nearest three lines to affect pixel.
++float3 LottesTri(float2 pos) {
++    const float3 a = LottesHorz3(pos, -1.0f);
++    const float3 b = LottesHorz5(pos, 0.0f);
++    const float3 c = LottesHorz3(pos, 1.0f);
++    return a * LottesScan(pos, -1.0f) + b * LottesScan(pos, 0.0f) + c * LottesScan(pos, 1.0f);
++}
++
++// Small bloom.
++float3 LottesBloom(float2 pos) {
++    const float3 a = LottesHorz5(pos, -2.0f);
++    const float3 b = LottesHorz7(pos, -1.0f);
++    const float3 c = LottesHorz7(pos, 0.0f);
++    const float3 d = LottesHorz7(pos, 1.0f);
++    const float3 e = LottesHorz5(pos, 2.0f);
++    return a * LottesBloomScan(pos, -2.0f) + b * LottesBloomScan(pos, -1.0f) + c * LottesBloomScan(pos, 0.0f) +
++           d * LottesBloomScan(pos, 1.0f) + e * LottesBloomScan(pos, 2.0f);
++}
++
++// Distortion of scanlines.
++float2 LottesWarpPos(float2 pos) {
++    pos = pos * 2.0f - 1.0f;
++    pos *= float2(1.0f + (pos.y * pos.y) * LottesWarp.x, 1.0f + (pos.x * pos.x) * LottesWarp.y);
++    return pos * 0.5f + 0.5f;
++}
++
++// Stretched VGA style shadow mask.
++float3 LottesMask(float2 pos) {
++    float3 mask = float3(LottesMaskDark, LottesMaskDark, LottesMaskDark);
++    pos.x += pos.y * 3.0f;
++    pos.x = frac(pos.x * 0.166666666f);
++    if (pos.x < 0.333f) {
++        mask.r = LottesMaskLight;
++    }
++    else if (pos.x < 0.666f) {
++        mask.g = LottesMaskLight;
++    }
++    else {
++        mask.b = LottesMaskLight;
++    }
++
++    return mask;
++}
++
++float3 CrtFilter(float2 uv, float2 outPos) {
++    const float2 pos = LottesWarpPos(uv);
++    if (any(pos < 0.0f) || any(pos > 1.0f)) {
++        return float3(0.0f, 0.0f, 0.0f);
++    }
++
++    float3 color = LottesTri(pos);
++    color += LottesBloom(pos) * LottesBloomAmount;
++    color *= LottesMask(outPos * 1.000001f);
++    return LinearToSrgb(color);
++}
++
++#endif
++
++float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
++    // `uv` runs 0..1 across the VI viewport (FullScreenVS); `outPos` is the
++    // output pixel inside it, at pixel centres.
++    const float2 outPos = uv * gConstants.outputSize;
++    return float4(CrtFilter(uv, outPos), 1.0f);
++}

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <deque>
 #include <vector>
 
 #include "settings.hpp"
@@ -167,6 +168,18 @@ RadioLayout layout_resolution(const Font& font, int scale, int max_width, int cu
     return layout_radio(font, scale, max_width, resolution_labels(), current);
 }
 
+std::vector<std::string> crt_filter_labels() {
+    std::vector<std::string> labels;
+    for (int i = 0; i < kCrtFilterModeCount; i++) {
+        labels.push_back(crt_filter_mode_label(i));
+    }
+    return labels;
+}
+
+RadioLayout layout_crt_filter(const Font& font, int scale, int max_width, int current) {
+    return layout_radio(font, scale, max_width, crt_filter_labels(), current);
+}
+
 std::vector<std::string> antialias_labels() {
     std::vector<std::string> labels;
     for (int i = 0; i < kAntialiasModeCount; i++) {
@@ -216,8 +229,8 @@ RadioLayout layout_mouse(const Font& font, int scale, int max_width, int current
 }
 
 // --- radio rows ---------------------------------------------------------------
-// Seven row kinds draw as a radio group (GAME SPEED, WIDESCREEN, RESOLUTION,
-// MSAA, WINDOW, SOUNDS, MOUSE ENABLED). The measure, draw, step, click and pad
+// Eight row kinds draw as a radio group (GAME SPEED, WIDESCREEN, RESOLUTION,
+// CRT FILTER, MSAA, WINDOW, SOUNDS, MOUSE ENABLED). The measure, draw, step, click and pad
 // paths each need the layout and the live option, so both are looked up in one
 // place: a kind added to the table is handled by all of them.
 
@@ -226,6 +239,7 @@ bool is_radio_row(Panel::RowKind kind) {
         case Panel::RowKind::GameSpeed:
         case Panel::RowKind::Widescreen:
         case Panel::RowKind::Resolution:
+        case Panel::RowKind::CrtFilter:
         case Panel::RowKind::Antialias:
         case Panel::RowKind::Display:
         case Panel::RowKind::Sound:
@@ -246,6 +260,8 @@ int radio_row_current(Panel::RowKind kind) {
             return widescreen_mode_index();
         case Panel::RowKind::Resolution:
             return resolution_mode_index();
+        case Panel::RowKind::CrtFilter:
+            return crt_filter_mode_index();
         case Panel::RowKind::Antialias:
             return antialias_mode_index();
         case Panel::RowKind::Display:
@@ -264,6 +280,7 @@ int radio_row_count(Panel::RowKind kind) {
         case Panel::RowKind::GameSpeed:   return kGameSpeedCount;
         case Panel::RowKind::Widescreen:  return kWidescreenModeCount;
         case Panel::RowKind::Resolution:  return kResolutionModeCount;
+        case Panel::RowKind::CrtFilter:   return kCrtFilterModeCount;
         case Panel::RowKind::Antialias:   return kAntialiasModeCount;
         case Panel::RowKind::Display:     return kDisplayModeCount;
         case Panel::RowKind::Sound:       return kSoundModeCount;
@@ -281,6 +298,8 @@ RadioLayout radio_row_layout(Panel::RowKind kind, const Font& font, int scale, i
             return layout_widescreen(font, scale, max_width, current);
         case Panel::RowKind::Resolution:
             return layout_resolution(font, scale, max_width, current);
+        case Panel::RowKind::CrtFilter:
+            return layout_crt_filter(font, scale, max_width, current);
         case Panel::RowKind::Antialias:
             return layout_antialias(font, scale, max_width, current);
         case Panel::RowKind::Display:
@@ -308,6 +327,9 @@ RowAction store_radio_row(Panel::RowKind kind, int option) {
             break;
         case Panel::RowKind::Resolution:
             set_resolution_mode(static_cast<ResolutionMode>(option));
+            break;
+        case Panel::RowKind::CrtFilter:
+            set_crt_filter_mode(static_cast<CrtFilterMode>(option));
             break;
         case Panel::RowKind::Antialias:
             set_antialias_mode(static_cast<AntialiasMode>(option));
@@ -463,6 +485,34 @@ RowsLayout layout_rows(const Font& font, const Panel& panel, const std::vector<P
 }
 
 }  // namespace
+
+// --- FrameText ----------------------------------------------------------------
+// The panel's text runs for one frame, each in its own texture, all kept until
+// the panel has been drawn. One reused TextLayer destroyed each run's texture
+// right after queueing its draw, and in the overlay a run went missing from
+// the frame: the CRT FILTER row's LOTTES label was absent while RESOLUTION or
+// CRT FILTER was the selected row and present while WINDOW was, with the same
+// draw calls for that row (2026-10-31). With every texture kept to the end of
+// the frame the label is drawn in both of those cases.
+class FrameText {
+public:
+    void build(SDL_Renderer* renderer, const Font& font, const std::string& text, int scale,
+               SDL_Color color) {
+        layers_.emplace_back();
+        layers_.back().build(renderer, font, text, scale, color);
+    }
+
+    void draw(SDL_Renderer* renderer, int center_x, int left, int top, bool centered) const {
+        if (!layers_.empty()) {
+            layers_.back().draw(renderer, center_x, left, top, centered);
+        }
+    }
+
+    int width() const { return layers_.empty() ? 0 : layers_.back().width(); }
+
+private:
+    std::deque<TextLayer> layers_;
+};
 
 // --- TextLayer ----------------------------------------------------------------
 
@@ -774,6 +824,7 @@ std::vector<Panel::Row> Panel::build_rows(Tab tab) const {
             rows.push_back(Row{RowKind::Section, "DISPLAY", 0, 0, -1});
             rows.push_back(Row{RowKind::Widescreen, {}, 0, 0, -1});
             rows.push_back(Row{RowKind::Resolution, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::CrtFilter, {}, 0, 0, -1});
             // MSAA is experimental and off unless the run asks for it, so its row
             // is absent by default rather than present and inert (settings.hpp ->
             // display_experiments_enabled).
@@ -976,6 +1027,8 @@ std::string Panel::left_text(size_t index) const {
             return "WIDESCREEN";
         case RowKind::Resolution:
             return "RESOLUTION";
+        case RowKind::CrtFilter:
+            return "CRT FILTER";
         case RowKind::Antialias:
             return "MSAA";
         case RowKind::Display:
@@ -1028,6 +1081,8 @@ std::string Panel::right_text_for(const Row& row) const {
             return widescreen_mode_text();
         case RowKind::Resolution:
             return resolution_mode_text();
+        case RowKind::CrtFilter:
+            return crt_filter_mode_text();
         case RowKind::Antialias:
             return antialias_mode_text();
         case RowKind::Display:
@@ -1149,6 +1204,7 @@ RowAction Panel::activate(size_t index, int direction) {
         case RowKind::GameSpeed:
         case RowKind::Widescreen:
         case RowKind::Resolution:
+        case RowKind::CrtFilter:
         case RowKind::Antialias:
         case RowKind::Display:
         case RowKind::Sound:
@@ -1357,7 +1413,7 @@ PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, Panel& panel,
     const int description_width = panel_left + panel_width - description_x;
     const int left_width = description_x - panel_left - px(16);
 
-    TextLayer layer;
+    FrameText layer;
     Panel::Geometry geometry;
 
     // The panel background is drawn first: the tab bar and the rows both sit on

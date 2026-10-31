@@ -107,6 +107,10 @@ installed (so a shipped mod can always be turned off). It has five tabs:
                      gamepad button bound to it, and what the button does
     [ SETTINGS ]     GAME SPEED: [ ] 1  [ ] 2  [x] 4. The game runs that many
                      times faster than real time; 1 is normal speed.
+                     CRT FILTER draws the picture like a CRT television:
+                     HYLLIAN (sharp, lightest on the GPU), CRTS (balanced,
+                     slight curve) or LOTTES (shadow mask, bloom and curve;
+                     heaviest).
 
     TAB / SHIFT+TAB  switch tab
     UP / DOWN        select a row
@@ -201,3 +205,27 @@ data. Supply your own legally obtained dump.
 
 The executable includes SDL2 (https://libsdl.org), Copyright (C) 1997-2025
 Sam Lantinga, under the zlib license — see SDL2-LICENSE.txt in this folder.
+
+The CRT FILTER options are ports of Timothy Lottes' public domain CRT shaders
+(crt-lottes and crt-lottes-fast) and of Hyllian's CRT shader, which is under
+this license:
+
+    Copyright (C) 2011-2015 Hyllian - sergiogdb@gmail.com
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to
+    deal in the Software without restriction, including without limitation the
+    rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+    sell copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+    IN THE SOFTWARE.

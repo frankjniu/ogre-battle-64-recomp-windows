@@ -28,6 +28,7 @@
 #include "renderer.hpp"
 #include "gbi.hpp"
 #include "hd_backgrounds.hpp"
+#include "settings.hpp"
 #include "ram_key.hpp"
 #include "sdl_platform.hpp"
 #include "widescreen.hpp"
@@ -1533,6 +1534,28 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         return true;
     }
 
+    // CRT FILTER (settings.hpp) is not part of GraphicsConfig, so the renderer
+    // polls it once per screen update and hands a change to RT64's user
+    // configuration, which the present queue reads for the VI pass.
+    void apply_crt_filter() {
+        const int mode = ogre::crt_filter_applied();
+        if (mode == applied_crt_filter_) {
+            return;
+        }
+        applied_crt_filter_ = mode;
+        RT64::UserConfiguration::CRTFilter filter = RT64::UserConfiguration::CRTFilter::Off;
+        switch (static_cast<ogre::CrtFilterMode>(mode)) {
+            case ogre::CrtFilterMode::Hyllian:    filter = RT64::UserConfiguration::CRTFilter::Hyllian; break;
+            case ogre::CrtFilterMode::LottesFast: filter = RT64::UserConfiguration::CRTFilter::LottesFast; break;
+            case ogre::CrtFilterMode::Lottes:     filter = RT64::UserConfiguration::CRTFilter::Lottes; break;
+            default: break;
+        }
+        app_->userConfig.crtFilter = filter;
+        app_->updateUserConfig(false);
+        fprintf(stderr, "[renderer] crt filter %s\n", ogre::crt_filter_mode_label(mode));
+        fflush(stderr);
+    }
+
     void enable_instant_present() override {
         if (app_ == nullptr) {
             return;
@@ -1843,6 +1866,7 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
             return;
         }
         ++present_count_;
+        apply_crt_filter();
         // OGRE_VI_TRACE=1: report the VI state RT64 is about to present. The
         // presenter only draws when the decoded VI is visible and has a nonzero
         // size (rt64_present_queue.cpp: viVisible/fbSize), so a black canvas is
@@ -2018,6 +2042,8 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
     // files by the same count, so the `[njread]` line's present index says which
     // capture to look at for a given njpeg pass.
     uint32_t present_count_ = 0;
+    // The CRT FILTER mode last handed to RT64 (apply_crt_filter); -1 = none yet.
+    int applied_crt_filter_ = -1;
 };
 
 }  // namespace

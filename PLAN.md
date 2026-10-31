@@ -33,7 +33,7 @@ ending and the attract loop.
 - **Saves:** cartridge battery (SRAM) works; Controller Pak menus render.
 - **Player features:** launcher and in-game `ESC` overlay (MAIN, MODS, CONTROLS,
   SETTINGS, DEBUG), rebindable keyboard and pad, GAME SPEED 1/2/4/8, WIDESCREEN
-  for the mission field, mouse support on the world map and the mission field
+  for the mission field, CRT FILTER (HYLLIAN, CRTS, LOTTES), mouse support on the world map and the mission field
   (off by default), mods (`exp-overflow`, `skip-boot-logos`, `item-randomizer`),
   replacement dialogue backdrops with HD strips (`mods/backgrounds/`, RT64
   texture pack in `mods/backgrounds/hd/`).

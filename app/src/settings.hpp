@@ -29,7 +29,9 @@
 //   changed under the Esc overlay takes effect on the next frame. `widescreen.cpp`
 //   owns `ar_option` and this file owns `res_option`, `msaa_option` and
 //   `wm_option`; each writer starts from the live config, so neither loses the
-//   other's value.
+//   other's value. CRT FILTER sits between RESOLUTION and MSAA; it is not part
+//   of `GraphicsConfig`, and the renderer polls it every frame
+//   (`crt_filter_applied`).
 // * AUDIO: SOUNDS and VOLUME.
 // * INPUT: MOUSE ENABLED, off by default, which is what lets the pointer drive
 //   the world map's and the mission field's cursors. See `MouseMode` below.
@@ -161,6 +163,53 @@ void set_resolution_mode(ResolutionMode mode);
 
 // The RESOLUTION row's options as one string (radio markers and labels).
 std::string resolution_mode_text();
+
+// The CRT FILTER row: a CRT look drawn by RT64's VI pass. The frame is first
+// box-filtered to the game's own resolution (one texel per framebuffer pixel),
+// then one of three published CRT shaders draws it to the window
+// (tools/RT64/src/shaders/VideoInterfaceCrtPS.hlsl, ported from libretro's
+// slang-shaders with their default parameters):
+//
+// * `Hyllian`: crt-hyllian-fast (MIT). 4 texel reads per pixel: a sharp cubic
+//   filter, one beam per line, a magenta/green dot mask. The cheapest.
+// * `LottesFast`, shown as CRTS: crt-lottes-fast, Timothy Lottes' CRTS (public
+//   domain; the label is his name for it, and fits the row on one line). 8 reads
+//   per pixel: two sine-shaped beams, an RGB mask with a tone curve that keeps
+//   the brightness, slight curvature and rounded corners.
+// * `Lottes`: crt-lottes (public domain). 31 distinct reads per pixel: Gaussian
+//   beams over three lines, a strong shadow mask, bloom and curvature. The
+//   heaviest and the closest to an arcade monitor.
+//
+// `Off` is the default and draws the frame as before. Stored as `crt_filter`.
+enum class CrtFilterMode {
+    Off = 0,
+    Hyllian = 1,
+    LottesFast = 2,
+    Lottes = 3,
+};
+
+constexpr int kCrtFilterModeCount = 4;
+
+// "OFF", "HYLLIAN", "CRTS" or "LOTTES" for the radio row's `index`-th
+// option.
+const char* crt_filter_mode_label(int index);
+
+// The live mode.
+CrtFilterMode crt_filter_mode();
+
+// The index of the live mode in the radio row.
+int crt_filter_mode_index();
+
+// Stores `mode` and writes `<config>/settings.cfg`. The renderer picks it up on
+// its next frame.
+void set_crt_filter_mode(CrtFilterMode mode);
+
+// The CRT FILTER row's options as one string (radio markers and labels).
+std::string crt_filter_mode_text();
+
+// The live mode as an int, for the renderer thread (an atomic, as
+// `audio_gain_percent` is).
+int crt_filter_applied();
 
 // The MSAA row: RT64's multisample antialiasing on the render target. `Off` is
 // the default and what the port did before the row existed. MSAA affects 3D
@@ -318,7 +367,7 @@ std::filesystem::path settings_path(const std::filesystem::path& pref_dir);
 
 // Loads `<config>/settings.cfg` if it exists, applies the result to the
 // runtime, and remembers the directory for later writes. `OGRE_SPEED`,
-// `OGRE_WIDESCREEN`, `OGRE_RESOLUTION`, `OGRE_MSAA`, `OGRE_WINDOW`,
+// `OGRE_WIDESCREEN`, `OGRE_RESOLUTION`, `OGRE_CRT`, `OGRE_MSAA`, `OGRE_WINDOW`,
 // `OGRE_SOUNDS` and `OGRE_VOLUME` win over the file, and
 // `OGRE_DISPLAY_EXPERIMENTS` gates the two experimental rows. Call once at
 // startup, after `resolve_pref_dir()`.
