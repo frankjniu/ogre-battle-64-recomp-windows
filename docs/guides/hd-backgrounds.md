@@ -104,12 +104,17 @@ The game's backdrop is a **496x384 canvas** tiled by four `njpeg` sub-images:
 |---|---|---|---|
 | 0 | `0x801AAE90` | 320x240 | `(0, 0)` |
 | 1 | `0x801D06B0` | 176x240 | `(320, 0)` |
-| 2 | `0x801E50D0` | 320x144 | `(0, 240)` |
-| 3 | `0x801FB8F0` | 176x144 | `(320, 240)` |
+| 2 | `0x801E50D0` | 320x144 | `(0, 239)` |
+| 3 | `0x801FB8F0` | 176x144 | `(320, 239)` |
 
-The rects are the asset's own chunk positions (ROM `0x7CADB4` and following: the
-chunk headers hold `(-229,-235)`, `(90,-235)`, `(-229,4)` and `(90,4)` with those
-sizes, which is the same tiling with the canvas origin at `(-229,-235)`).
+The rects are where the game draws each chunk on screen, measured with a pack
+whose pixels encode their own canvas row and column: the right chunks start at
+column 320, and the bottom chunks start at row 239, over the top chunks' last
+row. The asset's chunk headers (ROM `0x7CADB4` and following) hold
+`(-229,-235)`, `(90,-235)`, `(-229,4)` and `(90,4)`, which space the rows 239
+apart and the columns 319 apart. Canvas row 383 is never drawn. Until
+2026-10-31 the bottom chunks were placed at row 240, and the screen skipped
+canvas row 239: a one-row break across the whole backdrop.
 
 Author the PNG as the whole backdrop. The port box-filters it to 496x384,
 splits it by those rects, and writes each part over the pass's pixels. Author the
@@ -129,11 +134,59 @@ rows are off-screen in practice. `mods/backgrounds/01-wide.png` is the example;
 its round rose window is also the aspect check. Without the variant, the plain
 image is used in both modes.
 
-The replacement is at the game's resolution. RT64 renders 2D at
-`upscale2D = ScaledOnly`, so the port's internal resolution setting still scales
-the result, but no detail beyond the game's 320x240 backdrop survives. True HD
-needs the renderer to sample a larger texture (RT64 texture replacement), which
-this feature does not do.
+The pack writes the backdrop at the game's resolution. The detail above it
+comes from the HD strips (next section), which are cut from the same PNG; the
+larger the PNG, the more detail survives (author at 1984x1536 for 4x).
+
+## HD strips (`mods/backgrounds/hd/`)
+
+The game draws the composed backdrop with the F3DEX2 ucode `0x8009F540` as
+textured quads, not texture rectangles. The four canvas chunks sit as RGBA16
+images at `0x80243E28` (320x240), `0x80269660` (176x240), `0x8027E090`
+(320x144) and `0x802948C0` (176x144), and each quad loads one strip with
+`G_LOADTILE`: 320x6 or 176x11 texels, 5 or 10 new rows plus one overlap row.
+That is 116 loads per frame, measured at the cathedral. The last strip of a
+240-row chunk loads one row past the chunk's end.
+
+RT64 replaces a texture by the hash of the TMEM it was loaded into, so each
+strip is replaced separately. `tools/backgrounds.py hd <id>` (or
+`make bg-hd BG_ID=<id>`) builds the replacements:
+
+```sh
+tools/backgrounds.py hd 01 --rom <rom>       # plain and, if present, -wide
+tools/backgrounds.py hd 01 --scale 4         # force 4x (default: PNG width / 496, rounded)
+tools/backgrounds.py hd 01 --dump D          # keep RT64's texture dumps in D
+tools/backgrounds.py hd 01 --from D          # rebuild from D without running
+```
+
+1. It runs the app on the mapping's route with the pack applied and
+   `OGRE_DUMP_TEX` set, once with WIDESCREEN off and once with it on when a
+   `<id>-wide.png` exists (the wide image writes other pixels, so its strips
+   have other hashes).
+2. From RT64's dump it reads each strip's hash, source address and rows
+   (`<hash>.v5.rice.json`) and its size (`.tile.json`), and names the chunk by
+   its size.
+3. It checks each strip's dumped pixels against the canvas the pack wrote (the
+   same box filter as `hd_backgrounds.cpp`) and stops when fewer than 98 % of the
+   texels match, which is what a different chunk layout produces. The cathedral
+   matches 100 %.
+4. It resamples the PNG to an integer multiple of the canvas with Lanczos
+   (the `-wide` image placed as `to_canvas_fit` places it), cuts each strip's
+   rectangle, and writes `hd/<id>/<hash>.png`, `hd/<id>-wide/<hash>.png` and
+   `hd/rt64.json`, keeping other mappings' entries.
+
+The app loads `<pack>/hd` as an RT64 texture pack at renderer start when the
+pack is loaded and `hd/rt64.json` exists, and logs `[hdbg] texture pack <dir>`.
+`OGRE_BG_HD=0` skips it for one run and keeps the game-resolution write. The
+replacements use RT64's defaults: `stream` (a strip can show at game
+resolution for the first frames while its PNG loads) and the half-texel shift.
+`mods/backgrounds/hd/` is generated and gitignored. Rebuild it after changing a
+PNG or `chunk_rect`.
+
+Strips that are identical at game resolution have one hash, so RT64 draws one HD
+strip at every such place. This happens in slow vertical gradients and flat
+areas; the tool lists the places whose HD art differs by at least 1/255 on
+average (the placeholder pair: four groups, up to 2.9/255).
 
 ## Widescreen
 
@@ -243,5 +296,7 @@ not the composed screen.
 * Only the four-chunk layout above is recognized. A backdrop with different
   chunk sizes or positions is left alone (the log says `no canvas rect`).
 * The pack replaces the backdrop only, not the dialogue box or the portraits.
-* The image is downscaled to the canvas, so this is a reskin at the game's
-  resolution, not an HD texture replacement. See "What the image should be".
+* The HD strips need one capture run per mapping and per variant, and a run
+  reaches only the backdrops its route assembles (`OGRE_STEP` for scene `0x0D`).
+* Strips that are identical at game resolution share one HD image (see "HD
+  strips").

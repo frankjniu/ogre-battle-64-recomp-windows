@@ -301,6 +301,16 @@ example-mods: mod-syms
 bg-extract:
 	python3 tools/backgrounds.py extract $(or $(BG_ID),01)
 
+# The HD strips for one mapping: an RT64 texture pack in mods/backgrounds/hd/,
+# cut from the mapping's PNG (and its -wide variant) by the hash of each strip
+# the game draws. Needs a built app, the ROM and Pillow; gitignored output.
+#
+#   make bg-hd                   # id 01 (the cathedral)
+#   make bg-hd BG_ID=02 BG_ROM=<rom>
+.PHONY: bg-hd
+bg-hd:
+	python3 tools/backgrounds.py hd $(or $(BG_ID),01) $(if $(BG_ROM),--rom "$(BG_ROM)")
+
 # ---------------------------------------------------------------------------
 # Streamed-overlay bank units (Phase 4). Independent splat + link + N64Recomp
 # runs for the streamed overlay records the game loads into RAM that overlay C

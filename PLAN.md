@@ -35,7 +35,8 @@ ending and the attract loop.
   SETTINGS, DEBUG), rebindable keyboard and pad, GAME SPEED 1/2/4/8, WIDESCREEN
   for the mission field, mouse support on the world map and the mission field
   (off by default), mods (`exp-overflow`, `skip-boot-logos`, `item-randomizer`),
-  HD dialogue backdrops (`mods/backgrounds/`).
+  replacement dialogue backdrops with HD strips (`mods/backgrounds/`, RT64
+  texture pack in `mods/backgrounds/hd/`).
 - **Performance:** the game's idle thread sleeps instead of spinning a core
   (`config/config.toml` hook), RT64's queue producers block instead of spinning,
   and a stock run prints no per-task or per-frame log lines. A 30 s boot uses
@@ -56,11 +57,18 @@ known and what the next step is.
 
 ### Features and mods
 
-1. **True HD backgrounds.** `mods/backgrounds/` repaints the backdrop at the
-    game's own resolution. Higher detail needs RT64 texture replacement keyed by
-    the drawn texture's hash (`TextureCache::loadReplacementDirectory`). The
-    four-chunk canvas layout is hardcoded to the cathedral's chunk sizes. See
-    `docs/guides/hd-backgrounds.md`.
+1. **HD backgrounds beyond the cathedral.** `mods/backgrounds/` writes a
+    backdrop at the game's resolution, and `tools/backgrounds.py hd` (`make
+    bg-hd`) cuts RT64 replacement strips from the same PNG, one per `G_LOADTILE`
+    strip hash (`docs/guides/hd-backgrounds.md`). Only the cathedral (scene
+    `0x0D`, step 2) is mapped, and its art is the placeholder pair. The canvas
+    layout is hardcoded: four chunks 320/176 wide and 240/144 tall, the right
+    chunks at column 320 and the bottom chunks at row 239. The tool stops when a
+    backdrop's strips do not match that layout. Strips that are identical at
+    game resolution share one HD image. Next step: the developer names the next
+    backdrop (scene and step) and supplies art; map it in `backgrounds.txt`, run
+    `make bg-extract` and `make bg-hd`, and generalise `chunk_rect` if the check
+    fails.
 
 ### Parked
 

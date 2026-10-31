@@ -27,6 +27,7 @@
 
 #include "renderer.hpp"
 #include "gbi.hpp"
+#include "hd_backgrounds.hpp"
 #include "ram_key.hpp"
 #include "sdl_platform.hpp"
 #include "widescreen.hpp"
@@ -1450,6 +1451,14 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         // renderer actually samples for a suspect tile.
         if (const char* texdir = getenv("OGRE_DUMP_TEX")) {
             app_->state->dumpingTexturesDirectory = texdir;
+        }
+        // HD backgrounds: the RT64 texture pack that `tools/backgrounds.py hd`
+        // writes beside the `mods/backgrounds/` pack. Its strips replace the
+        // backdrop's 320x6 and 176x11 texture loads by their TMEM hash
+        // (docs/guides/hd-backgrounds.md).
+        if (const std::filesystem::path hd = ogre::hd_backgrounds_texture_pack(); !hd.empty()) {
+            const bool ok = app_->textureCache->loadReplacementDirectory(RT64::ReplacementDirectory(hd));
+            fprintf(stderr, "[hdbg] texture pack %s%s\n", hd.string().c_str(), ok ? "" : " (failed to load)");
         }
         // OGRE_FB_GPU_COPY=0: turn off RT64's GPU framebuffer copies. A texture
         // load whose RDRAM source is covered by a framebuffer RT64 has on record

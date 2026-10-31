@@ -19,7 +19,14 @@ background that shows part of the previous screen.
 4. **CPU readback** — `func_ovlE_8019976C` (bankE) copies the drawn framebuffer
    out, **four passes per assembly**, each with its own decode+draw, into four
    fixed heap buffers.
-5. **Blit** — the game draws the assembled image.
+5. **Blit** — the game draws the assembled backdrop with the F3DEX2 ucode
+   `0x8009F540` as textured quads, one `G_LOADTILE` strip per quad, from four
+   RGBA16 images: `0x80243E28` (320x240, after the `'B5'` header at
+   `0x80243E10`), `0x80269660` (176x240), `0x8027E090` (320x144) and
+   `0x802948C0` (176x144). A strip is 320x6 or 176x11 texels (5 or 10 new rows
+   plus one overlap row); the cathedral draws 116 strips per frame. On screen the
+   right chunks start at column 320 and the bottom chunks at row 239, over the
+   top chunks' last row (`docs/guides/hd-backgrounds.md`).
 
 Session 57's fix lives in step 4: the copy's source must be the **game's own
 `state[0x64]`** (its framebuffer-table choice), never RT64's scratch word, which
@@ -89,20 +96,27 @@ backgrounds). All of them go through the same decode/draw/readback path.
 `func_ovlE_8019976C`'s row loop is
 `memcpy(state[0x70], state[0x64], 2*state[0x78])` per row, `state[0x7A]` rows,
 source stride a fixed `0x280` (640 bytes = 320 px), destination stride
-`2*state[0x78]`. Four passes per assembly, into four fixed buffers:
+`2*state[0x78]`. `state[0x78]` is the width in pixels: `lh a2,0x78(state)` at
+`0x80199884` with `sll a2,a2,1` in the delay slot is the `memcpy` length, and
+`lh v1,0x7A(state)` at `0x801998b4` bounds the row count. Four passes per
+assembly, into four fixed buffers:
 
-| pass | destination | `state[0x78]` x `state[0x7A]` |
-|---|---|---|
-| 0 | `0x801AAE90` | 240 x 320 |
-| 1 | `0x801D06B0` | 240 x 176 |
-| 2 | `0x801E50D0` | 144 x 320 |
-| 3 | `0x801FB8F0` | 144 x 176 |
+| pass | destination | `state[0x78]` x `state[0x7A]` (width x rows) | canvas position |
+|---|---|---|---|
+| 0 | `0x801AAE90` | 320 x 240 | top left `(0, 0)` |
+| 1 | `0x801D06B0` | 176 x 240 | top right `(320, 0)` |
+| 2 | `0x801E50D0` | 320 x 144 | bottom left `(0, 239)` |
+| 3 | `0x801FB8F0` | 176 x 144 | bottom right `(320, 239)` |
+
+The session-57 version of this table had the two halfwords swapped (`240 x 320`
+for pass 0). The canvas positions were measured on 2026-10-31 with a
+`mods/backgrounds/` pack whose pixels encode their own row and column: each
+pass's pixels appear at that position on screen.
 
 **Pass 0 is the one that goes stale** — it is the first pass after a step change,
 so RT64's scratch word still names the previous step's target. The developer
-reports the broken on-screen tile as the **top-left** of the scene's four-image
-2x2 composition, and pass 0 is the only stale pass, so they are almost certainly
-the same tile — but note that this is *inferred*, not verified from the blit.
+reported the broken on-screen tile as the **top-left** of the scene's four-image
+2x2 composition, and pass 0 is the top-left chunk (table above).
 
 **Do not read the framebuffer as the scene.** At the cathedral step
 `0x80000400` contains four background chunks in a 2x2 arrangement with black
@@ -154,16 +168,6 @@ To inspect the *result*, drive the live console from game state (a wall-clock
 
 ## Open questions (for whoever needs them)
 
-* **Which on-screen position each pass feeds.** The four destination buffers are
-  refreshed per assembly and are not live long enough to dump with the console,
-  so the mapping has to be read out of the blit that consumes them (it walks the
-  buffer pointers the pipeline leaves in its state object, `0x8019A680`). Until
-  that is done, do not assert "pass 0 is the top-left" — the framebuffer's own
-  chunk order is scrambled relative to the screen (developer, session 57).
-* The measured pairs are the **transposes** of four asset sizes that exist in the
-  ROM (320x240, 176x240, 320x144, 176x144) — 320x240 is the dominant one — so each
-  pass plausibly reads one of those assets, but the copy's row-length/row-count
-  reading of `state[0x78]`/`state[0x7A]` is not pinned down here either.
 * Whether every one of the 75 assets reaches `func_ovlE_8019976C`, or some take a
   different (non-readback) path; the step table
   (session 44 §1 in git history) maps the opening's steps to assets.

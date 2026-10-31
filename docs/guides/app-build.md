@@ -1052,6 +1052,7 @@ All knobs default to off. Settings overrides apply for one run and never write
 | `OGRE_BG=0`, `OGRE_BG_DIR=<dir>` | run without the `mods/backgrounds/` pack / use only that folder (`docs/guides/hd-backgrounds.md`) |
 | `OGRE_BG_LOG=1`, `OGRE_BG_DEBUG=1` | `[hdbg]` per pass and chunk / paint the four passes in solid colours |
 | `OGRE_BG_DUMP=<dir>` | write the game's 496x384 backdrop as `original-step<NNNN>.png` (`tools/backgrounds.py`, `make bg-extract`) |
+| `OGRE_BG_HD=0` | keep the pack's game-resolution backdrop and skip its HD strips (`mods/backgrounds/hd/`, `make bg-hd`) |
 
 ## Scripted runs and captures
 

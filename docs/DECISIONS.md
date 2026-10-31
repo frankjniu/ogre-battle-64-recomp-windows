@@ -283,7 +283,15 @@ this file.
 - **The runtime accepts a stored mod config without `mod_id`** (session 123).
 - **A background pack (`mods/backgrounds/NN.png`) replaces a whole njpeg backdrop at the readback.**
   `app/src/hd_backgrounds.cpp` matches on the step `D_8018F1C0`, scales the PNG to the 496x384
-  canvas and splits it across the four passes (session 114).
+  canvas and splits it across the four passes (session 114). The bottom chunks start at canvas row
+  239 and the right chunks at column 320: that is where the game draws them, measured with a
+  row- and column-coded pack (2026-10-31).
+- **HD detail comes from an RT64 texture pack keyed by strip hash, generated from the same PNG.**
+  The game draws the backdrop as 116 `G_LOADTILE` strips (320x6, 176x11) per frame;
+  `tools/backgrounds.py hd <id>` reads each strip's hash and rows from an `OGRE_DUMP_TEX` run with the
+  pack applied, cuts the matching rectangle of the PNG at an integer scale, and writes
+  `mods/backgrounds/hd/`, which the renderer loads with `loadReplacementDirectory`. Strips identical
+  at game resolution share one hash and one HD image (2026-10-31).
 
 ## Releases and packaging
 

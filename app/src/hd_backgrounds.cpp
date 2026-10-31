@@ -279,10 +279,12 @@ const Entry* find_entry(uint16_t scene, uint16_t next_scene, uint16_t step) {
 
 // Which part of the canvas a readback pass wrote, from the pass's dimensions.
 // The four passes are the four chunks of the 'B5' asset in order, and the sizes
-// name the column and the row of the tiling above. The x offsets are 1 less than
-// the column width in the asset's own header (a 1px overlap), and the y offsets
-// are 1 less than the row height; the rounded values below are what the draw
-// uses.
+// name the column and the row of the tiling above. The values are where the
+// game draws each chunk, measured with a pack whose pixels encode their canvas
+// row and column: the right chunks start at column 320, and the bottom chunks
+// start at row 239, over the top chunks' last row (the asset's header spaces the
+// rows 239 apart and the columns 319 apart). With 240 the screen skipped canvas
+// row 239, a one-row break across the whole backdrop.
 bool chunk_rect(uint32_t w, uint32_t h, int& x, int& y) {
     if (w == 320 && h == 240) {
         x = 0;
@@ -294,11 +296,11 @@ bool chunk_rect(uint32_t w, uint32_t h, int& x, int& y) {
     }
     else if (w == 320 && h == 144) {
         x = 0;
-        y = 240;
+        y = 239;
     }
     else if (w == 176 && h == 144) {
         x = 320;
-        y = 240;
+        y = 239;
     }
     else {
         return false;
@@ -464,6 +466,24 @@ void hd_backgrounds_init(const std::filesystem::path& pref_dir) {
 }
 
 }  // namespace ogre
+
+std::filesystem::path ogre::hd_backgrounds_texture_pack() {
+    if (!g_pack.loaded) {
+        return {};
+    }
+    if (const char* value = std::getenv("OGRE_BG_HD"); value != nullptr &&
+        (std::strcmp(value, "0") == 0 || std::strcmp(value, "off") == 0 ||
+         std::strcmp(value, "false") == 0 || std::strcmp(value, "no") == 0)) {
+        std::fprintf(stderr, "[hdbg] texture pack disabled (OGRE_BG_HD=%s)\n", value);
+        return {};
+    }
+    const std::filesystem::path hd = g_pack.dir / "hd";
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(hd / "rt64.json", ec)) {
+        return {};
+    }
+    return hd;
+}
 
 bool ogre::hd_backgrounds_covers_scene(uint16_t scene) {
     for (const Entry& e : g_pack.entries) {
