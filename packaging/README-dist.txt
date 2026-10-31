@@ -111,6 +111,10 @@ installed (so a shipped mod can always be turned off). It has five tabs:
                      HYLLIAN (sharp, lightest on the GPU), CRTS (balanced,
                      slight curve) or LOTTES (shadow mask, bloom and curve;
                      heaviest).
+    [ CHEATS ]       MAX GOTH holds your goth at 9,999,999 and MAX ITEM COUNTS
+                     holds every item you own at 99, for as long as the row is
+                     ON. Saving while a cheat is ON keeps the cheated values in
+                     your save.
 
     TAB / SHIFT+TAB  switch tab
     UP / DOWN        select a row
@@ -126,8 +130,13 @@ installed (so a shipped mod can always be turned off). It has five tabs:
 
 Bindings are saved in `controls.cfg` in this folder, and the game speed in
 `settings.cfg`. **ESC** opens the same panel over the running game, with the ROM
-and MODS tabs disabled and CONTROLS and SETTINGS active, so bindings and the
-game speed can be changed mid-game; **ESC** closes it again.
+and MODS tabs disabled and CONTROLS, SETTINGS and CHEATS active, so bindings,
+settings and cheats can be changed mid-game; **ESC** closes it again.
+
+During play, **F5** (quick save) copies your save, as of the last time you
+saved in the game, to a quick slot. **F9** (quick load), pressed twice, puts the
+quick slot back as your save and restarts the game; choose Continue at the
+title. The save it replaced is kept as `saves/ogrebattle64-us-rev1.bin.bak`.
 
 A mod's own options live in `mod_config/<mod id>.json`; the start screen is the
 normal way to change them.

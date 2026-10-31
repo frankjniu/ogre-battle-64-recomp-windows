@@ -682,6 +682,63 @@ MOUSE ENABLED   [x] OFF [ ] ON
 published to `ogre_map_cursor_set_enabled` and `ogre_mission_cursor_set_enabled`
 on every change. Saved as `mouse = off|on`.
 
+### The CHEATS tab
+
+```
+WHILE ON, A CHEAT IS RESTORED EVERY FRAME. SAVING KEEPS THE CHEATED VALUES.
+MAX GOTH          [x] OFF [ ] ON
+MAX ITEM COUNTS   [x] OFF [ ] ON
+```
+
+A tab between SETTINGS and DEBUG, in the launcher and the `ESC` overlay. While a
+row is `ON`, `cheats_tick()` (`app/src/cheats.cpp`, called once per frame from
+the frame callback in `main.cpp`) writes its value into RDRAM, like a GameShark
+constant write; `OFF` stops the writes and leaves the current values.
+
+| row | what it holds | evidence |
+|---|---|---|
+| `MAX GOTH` | goth, the u32 at `0x80196A8C`, at 9,999,999 | the shop compares it with the price (`lw` at `0x8021564C`, bank AB); the battle reward adds to it and clamps at the game's cap `0x0098967F` (bank N, `0x801E53B0`) |
+| `MAX ITEM COUNTS` | the count byte (`+0x03`) of every non-empty slot (u16 id at `+0x00` not 0) of the owned-item lists `0x80196B20` (278 slots) and `0x80193AE0` (40 slots), at 99 | the game's own debug cheat `func_ovlS_801C214C` walks the same two lists with the same test and sets 98 (`0x801C25B0`); 99 is the cap the grant routine keeps (`docs/notes-item-re.md`) |
+
+Each starts logging one line when it first changes the game
+(`[cheats] max goth: 0 -> 9999999`). Saved as `cheat_max_goth` and
+`cheat_max_items` (`off|on`). The published GameShark codes for the USA release
+target another revision: their goth address `0x80196A6C` is never read in this
+ROM, and their roster and goth addresses sit 0x20 bytes below this ROM's
+(`docs/symbols.md`).
+
+### Quick save (F5) and quick load (F9)
+
+The quick slot is a copy of the battery save, `<config>/saves/<game id>-quick.bin`
+beside the battery `<config>/saves/<game id>.bin` (`app/src/quick_save.cpp`).
+Both keys act while the game window exists and the `ESC` panel is closed.
+
+- `F5` copies the battery file to the slot. The runtime's saving thread writes
+  the battery file within about 10 ms of the game's last write, so the slot holds
+  what the game last saved at one of its save points. With no battery yet (or an
+  all-zero one) it shows `NO SAVE YET`.
+- `F9` shows `PRESS F9 AGAIN TO LOAD`; a second `F9` within 3 s puts the slot
+  back through the runtime's save buffer (`save_write_ptr`, librecomp
+  `pi.cpp`), waits until the battery file equals the slot (the saving thread
+  keeps the previous file as `.bak`), and ends the run through the normal exit
+  path. After the teardown `main()` starts the executable again with the same
+  command line and `OGRE_RELAUNCH=1`, which boots past the start screen with the
+  mods as they stand (the variable is cleared in the new process). The game boots
+  to the title, and Continue reads the restored battery.
+
+The result shows in the speed badge window (`speed_badge_message`; not in
+fullscreen) and as a `[quicksave]` log line. `OGRE_QUICK_KEYS=<ms>:<f5|f9>,...`
+delivers scripted presses through the event pump for a test run; the relaunch
+removes it from the new process's environment.
+
+Two other designs were rejected. A RAM snapshot (the console's `save`/`load`,
+"Checkpoints") is only safe to restore while every game thread is at the same
+place in the code, because the call stacks are native. A jump to the title
+inside the running game (`0x8004` into `D_800C4C26`) entered the title from the
+cutscene scene `0x0D`, and then the frame pump (N64 thread 4) called the cutscene
+engine's code after the title's bank had replaced it: six `[lookup]` lines, then
+an access violation. The game never goes from `0x0D` to the title itself.
+
 ### The in-game overlay
 
 `ESC` during play opens a borderless, always-on-top SDL window over the game
@@ -999,6 +1056,7 @@ All knobs default to off. Settings overrides apply for one run and never write
 | `OGRE_WINDOW=windowed\|fullscreen` | WINDOW |
 | `OGRE_SOUNDS=off\|on`, `OGRE_VOLUME=<0..100>` | SOUNDS, VOLUME |
 | `OGRE_MOUSE=off\|on` | MOUSE ENABLED |
+| `OGRE_CHEAT_MAX_GOTH=off\|on`, `OGRE_CHEAT_MAX_ITEMS=off\|on` | the CHEATS rows |
 | `OGRE_GRAPHICS_API=<auto\|d3d12\|vulkan>` | pin RT64's backend. RT64 switches D3D12 to Vulkan on an old driver (NVIDIA ≤ 475.14, AMD ≤ Jan 2019, Intel 6th-gen ≤ 31.0.101.2115); the boot log names the GPU and whether the fallback ran |
 
 ### Logs, traces and dumps

@@ -335,6 +335,21 @@ void set_mouse_mode(MouseMode mode);
 // The MOUSE ENABLED row's options as one string (radio markers and labels).
 std::string mouse_mode_text();
 
+// The CHEATS tab: MAX GOTH and MAX ITEM COUNTS, two OFF/ON rows. While ON,
+// cheats.cpp writes the value every frame (cheats.hpp has the addresses and
+// the evidence). Both are OFF by default and saved as `cheat_max_goth` and
+// `cheat_max_items`; `OGRE_CHEAT_MAX_GOTH` and `OGRE_CHEAT_MAX_ITEMS` override
+// them for one run. The rows use the OFF/ON labels of `mouse_mode_label`.
+bool cheat_max_goth();
+int cheat_max_goth_index();
+void set_cheat_max_goth(bool on);
+std::string cheat_max_goth_text();
+
+bool cheat_max_items();
+int cheat_max_items_index();
+void set_cheat_max_items(bool on);
+std::string cheat_max_items_text();
+
 // The VOLUME row: a slider over 0..100 percent, drawn as `kVolumeCells`
 // characters with the handle on one of them.
 constexpr int kVolumeStepPercent = 5;

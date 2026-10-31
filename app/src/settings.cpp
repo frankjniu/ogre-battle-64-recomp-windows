@@ -40,6 +40,8 @@ DisplayMode g_display = DisplayMode::Windowed;
 SoundMode g_sound = SoundMode::On;
 int g_volume = kVolumeDefaultPercent;
 MouseMode g_mouse = MouseMode::Off;
+bool g_cheat_max_goth = false;
+bool g_cheat_max_items = false;
 
 // Defined below, after the gate that decides whether the two experimental values
 // are applied at all.
@@ -350,6 +352,13 @@ MouseMode parse_mouse(const std::string& text) {
     return MouseMode::Off;
 }
 
+// `<key> = off|on` (or 0/1, false/true, no/yes) for a cheat row. A missing or
+// unparsable value is the default, off.
+bool parse_cheat(const std::string& text, const char* key) {
+    const std::string value = lowercase(setting_value(text, key));
+    return value == "on" || value == "1" || value == "true" || value == "yes";
+}
+
 // `volume = <n>` in percent, clamped to 0..100. A missing or unparsable value
 // is the default, 100.
 int parse_volume(const std::string& text) {
@@ -410,7 +419,11 @@ void write_settings() {
         "volume = " + std::to_string(g_volume) + "\n"
         "# mouse: off or on. on lets the pointer drive the world map's and the\n"
         "# mission field's cursors, including the click and the edge scroll.\n"
-        "mouse = " + lowercase(mouse_mode_label(static_cast<int>(g_mouse))) + "\n";
+        "mouse = " + lowercase(mouse_mode_label(static_cast<int>(g_mouse))) + "\n"
+        "# cheat_max_goth, cheat_max_items: off or on. While on, the value is held\n"
+        "# every frame (goth at 9,999,999; every owned item at 99).\n"
+        "cheat_max_goth = " + std::string(g_cheat_max_goth ? "on" : "off") + "\n"
+        "cheat_max_items = " + std::string(g_cheat_max_items ? "on" : "off") + "\n";
     std::fwrite(text.data(), 1, text.size(), file);
     std::fclose(file);
 }
@@ -790,6 +803,48 @@ std::string mouse_mode_text() {
     return text;
 }
 
+bool cheat_max_goth() {
+    return g_cheat_max_goth;
+}
+
+int cheat_max_goth_index() {
+    return g_cheat_max_goth ? 1 : 0;
+}
+
+void set_cheat_max_goth(bool on) {
+    if (on == g_cheat_max_goth) {
+        return;
+    }
+    g_cheat_max_goth = on;
+    write_settings();
+    std::fprintf(stderr, "[settings] cheat max goth %s\n", on ? "on" : "off");
+}
+
+std::string cheat_max_goth_text() {
+    return radio_text(mouse_mode_label, kMouseModeCount, cheat_max_goth_index());
+}
+
+bool cheat_max_items() {
+    return g_cheat_max_items;
+}
+
+int cheat_max_items_index() {
+    return g_cheat_max_items ? 1 : 0;
+}
+
+void set_cheat_max_items(bool on) {
+    if (on == g_cheat_max_items) {
+        return;
+    }
+    g_cheat_max_items = on;
+    write_settings();
+    std::fprintf(stderr, "[settings] cheat max item counts %s\n", on ? "on" : "off");
+}
+
+std::string cheat_max_items_text() {
+    return radio_text(mouse_mode_label, kMouseModeCount, cheat_max_items_index());
+}
+
 int volume_percent() {
     return g_volume;
 }
@@ -846,6 +901,8 @@ void load_settings(const std::filesystem::path& pref_dir) {
     SoundMode sound = SoundMode::On;
     int volume = kVolumeDefaultPercent;
     MouseMode mouse = MouseMode::Off;
+    bool max_goth = false;
+    bool max_items = false;
     bool have_file = false;
     const std::string text = read_file(settings_path(pref_dir), have_file);
     if (have_file) {
@@ -860,6 +917,8 @@ void load_settings(const std::filesystem::path& pref_dir) {
         sound = parse_sound(text);
         volume = parse_volume(text);
         mouse = parse_mouse(text);
+        max_goth = parse_cheat(text, "cheat_max_goth");
+        max_items = parse_cheat(text, "cheat_max_items");
     }
     if (const int env = env_game_speed(); env != 0) {
         // A developer run names its speed on the command line; the value is
@@ -913,7 +972,19 @@ void load_settings(const std::filesystem::path& pref_dir) {
         mouse = parse_mouse(std::string("mouse = ") + env);
         std::fprintf(stderr, "[settings] OGRE_MOUSE=%s overrides the saved mouse mode\n", env);
     }
+    // OGRE_CHEAT_MAX_GOTH and OGRE_CHEAT_MAX_ITEMS=off|on: the same one-run
+    // rule, for the CHEATS tab.
+    if (const char* env = std::getenv("OGRE_CHEAT_MAX_GOTH"); env != nullptr && env[0] != '\0') {
+        max_goth = parse_cheat(std::string("cheat_max_goth = ") + env, "cheat_max_goth");
+        std::fprintf(stderr, "[settings] OGRE_CHEAT_MAX_GOTH=%s overrides the saved cheat\n", env);
+    }
+    if (const char* env = std::getenv("OGRE_CHEAT_MAX_ITEMS"); env != nullptr && env[0] != '\0') {
+        max_items = parse_cheat(std::string("cheat_max_items = ") + env, "cheat_max_items");
+        std::fprintf(stderr, "[settings] OGRE_CHEAT_MAX_ITEMS=%s overrides the saved cheat\n", env);
+    }
     g_game_speed = speed;
+    g_cheat_max_goth = max_goth;
+    g_cheat_max_items = max_items;
     g_widescreen = widescreen;
     g_resolution = resolution;
     g_antialias = antialias;
@@ -938,7 +1009,7 @@ void load_settings(const std::filesystem::path& pref_dir) {
     }
     std::fprintf(stderr,
                  "[settings] game speed x%d, widescreen %s, resolution %s, crt filter %s, "
-                 "msaa %s, window %s, sounds %s, volume %d%%, mouse %s%s\n",
+                 "msaa %s, window %s, sounds %s, volume %d%%, mouse %s, cheats goth %s items %s%s\n",
                  speed, lowercase(widescreen_mode_label(static_cast<int>(widescreen))).c_str(),
                  lowercase(resolution_mode_label(static_cast<int>(resolution_mode()))).c_str(),
                  crt_filter_key(crt),
@@ -946,6 +1017,7 @@ void load_settings(const std::filesystem::path& pref_dir) {
                  lowercase(display_mode_label(static_cast<int>(display))).c_str(),
                  lowercase(sound_mode_label(static_cast<int>(sound))).c_str(), volume,
                  lowercase(mouse_mode_label(static_cast<int>(mouse))).c_str(),
+                 max_goth ? "on" : "off", max_items ? "on" : "off",
                  experiments ? " (display experiments on)" : "");
 }
 

@@ -508,7 +508,7 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
     bool test_drop_pending = test_drop != nullptr && test_drop[0] != '\0';
     const uint64_t test_drop_at = SDL_GetTicks64() + 300;
 
-    // OGRE_LAUNCHER_TAB=<start|mods|controls|settings>: open the screen on that
+    // OGRE_LAUNCHER_TAB=<start|mods|controls|settings|cheats>: open the screen on that
     // tab, so a screenshot or a scripted run reaches it without input.
     if (const char* tab = std::getenv("OGRE_LAUNCHER_TAB")) {
         const std::string name = lowercase(tab);
@@ -520,6 +520,9 @@ std::filesystem::path run_launcher(const LauncherContext& context) {
         }
         else if (name == "settings" || name == "setting") {
             panel.set_tab(ui::Tab::Settings);
+        }
+        else if (name == "cheats" || name == "cheat") {
+            panel.set_tab(ui::Tab::Cheats);
         }
     }
 

@@ -115,7 +115,7 @@ std::string truncate_to_width(const Font& font, const std::string& text, int sca
 
 // --- the tabbed panel ---------------------------------------------------------
 
-enum class Tab { Main, Mods, Controls, Settings, Debug, Count };
+enum class Tab { Main, Mods, Controls, Settings, Cheats, Debug, Count };
 
 constexpr int kTabCount = static_cast<int>(Tab::Count);
 
@@ -161,6 +161,8 @@ public:
         Sound,
         Mouse,
         Volume,
+        CheatMaxGoth,
+        CheatMaxItems,
         ChaosFrame,
     };
 

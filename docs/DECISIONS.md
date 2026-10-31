@@ -188,6 +188,17 @@ this file.
 
 ## App, settings and UI
 
+- **Quick save is a slot of the battery save, and quick load restarts the program.** F5 copies
+  `<game id>.bin` to `<game id>-quick.bin`; F9 (pressed twice) writes the slot through the runtime's
+  save buffer, waits for the file, and relaunches with `OGRE_RELAUNCH=1`. A RAM snapshot is unsafe
+  because the game's call stacks are native, and an in-game jump to the title from scene `0x0D`
+  crashed in the frame pump on the cutscene engine's stale code (developer chose save slots,
+  2026-10-31).
+- **Cheats are built-in toggles at addresses read from this ROM's code, held every frame while ON.**
+  The CHEATS tab offers MAX GOTH (`0x80196A8C`) and MAX ITEM COUNTS (the lists `0x80196B20` and
+  `0x80193AE0`); `cheats_tick()` writes them once per frame from the main thread. The published
+  GameShark codes target another revision and sit 0x20 bytes off in this block, and there is no
+  custom-code file (developer, 2026-10-31).
 - **UI text is drawn through `ui::TextCache`, and the start screen's renderer has vsync.** A cached
   run keeps its texture across frames and at least to the end of the frame that drew it; one
   `TextLayer` rebuilt for several runs in a frame lost the overlay's LOTTES label. The launcher and
@@ -195,7 +206,8 @@ this file.
   SETTINGS used 170% of one core, 122% with the cache, 7% with vsync (2026-10-31).
 - **Player settings live in `<config>/settings.cfg`, and an `OGRE_*` variable overrides a key for
   one run without writing it back.** The keys are `game_speed`, `widescreen`, `sounds`, `volume`,
-  `render_resolution`, `msaa`, `window` and `mouse` (sessions 93, 102, 121).
+  `render_resolution`, `crt_filter`, `msaa`, `window`, `mouse`, `cheat_max_goth` and
+  `cheat_max_items` (sessions 93, 102, 121; 2026-10-31).
 - **RESOLUTION defaults to `auto` (RT64 `WindowIntegerScale`) under the key `render_resolution`.**
   Files written while the row was hidden carry a `resolution = native` no player chose, so that key
   is ignored. Integer scales keep 2D pixels even (session 145).

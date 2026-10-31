@@ -410,7 +410,7 @@ void overlay_init(Platform& platform, const std::filesystem::path& pref_dir,
     g_overlay.game_pad_count = 4;
     g_overlay.panel = std::make_unique<ui::Panel>(ui::Panel::Mode::Overlay, mod_game_id,
                                                   std::filesystem::path{});
-    // OGRE_OVERLAY_TAB=<main|controls|settings|debug>: open the panel on that
+    // OGRE_OVERLAY_TAB=<main|controls|settings|cheats|debug>: open the panel on that
     // tab, so a scripted run or a screenshot reaches it without input.
     if (const char* tab = std::getenv("OGRE_OVERLAY_TAB")) {
         const std::string name = tab;
@@ -422,6 +422,9 @@ void overlay_init(Platform& platform, const std::filesystem::path& pref_dir,
         }
         else if (name == "controls" || name == "controller") {
             g_overlay.panel->set_tab(ui::Tab::Controls);
+        }
+        else if (name == "cheats" || name == "cheat") {
+            g_overlay.panel->set_tab(ui::Tab::Cheats);
         }
         else if (name == "debug") {
             g_overlay.panel->set_tab(ui::Tab::Debug);

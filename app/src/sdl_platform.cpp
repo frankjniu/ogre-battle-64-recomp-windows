@@ -7,6 +7,7 @@
 #include "map_cursor.hpp"
 #include "mission_cursor.hpp"
 #include "overlay.hpp"
+#include "quick_save.hpp"
 #include "settings.hpp"
 #include "speed_badge.hpp"
 #include "widescreen.hpp"
@@ -890,7 +891,11 @@ void pump_sdl_events(Platform& platform, bool* quit) {
         // window exists belongs to the launcher.
         if (event.type == SDL_KEYDOWN && !event.key.repeat && platform.window != nullptr &&
             !overlay_visible()) {
-            handle_speed_key(event.key.keysym.sym);
+            // F5 / F9: quick save and quick load (quick_save.hpp), under the same
+            // conditions as the speed keys.
+            if (!ogre::quick_save_handle_key(event.key.keysym.sym)) {
+                handle_speed_key(event.key.keysym.sym);
+            }
         }
         // The same rule for the pad's R3, which cycles the table.
         else if (event.type == SDL_CONTROLLERBUTTONDOWN && platform.window != nullptr &&

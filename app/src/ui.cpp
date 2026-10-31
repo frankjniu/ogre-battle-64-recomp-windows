@@ -227,9 +227,14 @@ RadioLayout layout_mouse(const Font& font, int scale, int max_width, int current
     return layout_radio(font, scale, max_width, mouse_labels(), current);
 }
 
+// The CHEATS rows are OFF/ON toggles with MOUSE ENABLED's labels.
+RadioLayout layout_toggle(const Font& font, int scale, int max_width, int current) {
+    return layout_radio(font, scale, max_width, mouse_labels(), current);
+}
+
 // --- radio rows ---------------------------------------------------------------
-// Eight row kinds draw as a radio group (GAME SPEED, WIDESCREEN, RESOLUTION,
-// CRT FILTER, MSAA, WINDOW, SOUNDS, MOUSE ENABLED). The measure, draw, step, click and pad
+// Ten row kinds draw as a radio group (GAME SPEED, WIDESCREEN, RESOLUTION,
+// CRT FILTER, MSAA, WINDOW, SOUNDS, MOUSE ENABLED, and the two CHEATS rows). The measure, draw, step, click and pad
 // paths each need the layout and the live option, so both are looked up in one
 // place: a kind added to the table is handled by all of them.
 
@@ -243,6 +248,8 @@ bool is_radio_row(Panel::RowKind kind) {
         case Panel::RowKind::Display:
         case Panel::RowKind::Sound:
         case Panel::RowKind::Mouse:
+        case Panel::RowKind::CheatMaxGoth:
+        case Panel::RowKind::CheatMaxItems:
             return true;
         default:
             return false;
@@ -269,6 +276,10 @@ int radio_row_current(Panel::RowKind kind) {
             return sound_mode_index();
         case Panel::RowKind::Mouse:
             return mouse_mode_index();
+        case Panel::RowKind::CheatMaxGoth:
+            return cheat_max_goth_index();
+        case Panel::RowKind::CheatMaxItems:
+            return cheat_max_items_index();
         default:
             return -1;
     }
@@ -284,6 +295,8 @@ int radio_row_count(Panel::RowKind kind) {
         case Panel::RowKind::Display:     return kDisplayModeCount;
         case Panel::RowKind::Sound:       return kSoundModeCount;
         case Panel::RowKind::Mouse:       return kMouseModeCount;
+        case Panel::RowKind::CheatMaxGoth:
+        case Panel::RowKind::CheatMaxItems: return kMouseModeCount;
         default:                          return 0;
     }
 }
@@ -305,6 +318,9 @@ RadioLayout radio_row_layout(Panel::RowKind kind, const Font& font, int scale, i
             return layout_display(font, scale, max_width, current);
         case Panel::RowKind::Mouse:
             return layout_mouse(font, scale, max_width, current);
+        case Panel::RowKind::CheatMaxGoth:
+        case Panel::RowKind::CheatMaxItems:
+            return layout_toggle(font, scale, max_width, current);
         default:
             return layout_sound(font, scale, max_width, sound_mode_index());
     }
@@ -341,6 +357,12 @@ RowAction store_radio_row(Panel::RowKind kind, int option) {
             break;
         case Panel::RowKind::Mouse:
             set_mouse_mode(static_cast<MouseMode>(option));
+            break;
+        case Panel::RowKind::CheatMaxGoth:
+            set_cheat_max_goth(option == 1);
+            break;
+        case Panel::RowKind::CheatMaxItems:
+            set_cheat_max_items(option == 1);
             break;
         default:
             return RowAction::None;
@@ -749,6 +771,8 @@ std::string Panel::tab_label(Tab tab) const {
             return "CONTROLS";
         case Tab::Settings:
             return "SETTINGS";
+        case Tab::Cheats:
+            return "CHEATS";
         case Tab::Debug:
             return "DEBUG";
         default:
@@ -873,6 +897,17 @@ std::vector<Panel::Row> Panel::build_rows(Tab tab) const {
             rows.push_back(Row{RowKind::Volume, {}, 0, 0, -1});
             rows.push_back(Row{RowKind::Section, "INPUT", 0, 0, -1});
             rows.push_back(Row{RowKind::Mouse, {}, 0, 0, -1});
+            break;
+
+        case Tab::Cheats:
+            // Each cheat is held every frame while ON (cheats.hpp). The note is a
+            // section row, so it wraps across the panel and is not selectable.
+            rows.push_back(Row{RowKind::Section,
+                               "WHILE ON, A CHEAT IS RESTORED EVERY FRAME. SAVING KEEPS THE "
+                               "CHEATED VALUES.",
+                               0, 0, -1});
+            rows.push_back(Row{RowKind::CheatMaxGoth, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::CheatMaxItems, {}, 0, 0, -1});
             break;
 
         case Tab::Debug:
@@ -1075,6 +1110,10 @@ std::string Panel::left_text(size_t index) const {
             return "MOUSE ENABLED";
         case RowKind::Volume:
             return "VOLUME";
+        case RowKind::CheatMaxGoth:
+            return "MAX GOTH";
+        case RowKind::CheatMaxItems:
+            return "MAX ITEM COUNTS";
         case RowKind::ChaosFrame:
             return "Chaos Frame";
     }
@@ -1129,6 +1168,10 @@ std::string Panel::right_text_for(const Row& row) const {
             return mouse_mode_text();
         case RowKind::Volume:
             return volume_text(volume_percent());
+        case RowKind::CheatMaxGoth:
+            return cheat_max_goth_text();
+        case RowKind::CheatMaxItems:
+            return cheat_max_items_text();
         case RowKind::ChaosFrame: {
             if (!chaos_frame_known_) {
                 return "GAME NOT RUNNING";
@@ -1245,6 +1288,8 @@ RowAction Panel::activate(size_t index, int direction) {
         case RowKind::Display:
         case RowKind::Sound:
         case RowKind::Mouse:
+        case RowKind::CheatMaxGoth:
+        case RowKind::CheatMaxItems:
             // Left/Right and Space step the radio group, wrapping at the ends
             // like a mod option row. Each setting applies itself (the runtime for
             // GAME SPEED, `widescreen.cpp` or the renderer for the DISPLAY rows),

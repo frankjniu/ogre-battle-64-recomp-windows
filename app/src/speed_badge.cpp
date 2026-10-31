@@ -67,7 +67,7 @@ struct BadgeState {
     // The live multiplier as of the previous frame. -1 until the first frame
     // has read it, so the value a run starts on does not draw a badge.
     int last_speed = -1;
-    int shown_speed = 0;
+    std::string shown_text;
     uint64_t hide_at_ms = 0;
     bool up = false;
     bool fullscreen_reported = false;
@@ -269,9 +269,8 @@ bool place(int width, int height) {
     return true;
 }
 
-void show(int multiplier) {
-    g_badge.shown_speed = multiplier;
-    const std::string text = speed_text(multiplier);
+void show(const std::string& text) {
+    g_badge.shown_text = text;
     if (g_badge.window == nullptr && !create_window()) {
         return;
     }
@@ -322,7 +321,7 @@ void draw() {
         return;
     }
     place(width, height);
-    const std::string text = speed_text(g_badge.shown_speed);
+    const std::string& text = g_badge.shown_text;
 
     SDL_SetRenderDrawColor(g_badge.renderer, kBackground.r, kBackground.g, kBackground.b, 235);
     SDL_RenderClear(g_badge.renderer);
@@ -433,7 +432,7 @@ void speed_badge_tick() {
             }
         }
         else {
-            show(speed);
+            show(speed_text(speed));
         }
     }
 
@@ -454,6 +453,18 @@ void speed_badge_tick() {
         return;
     }
     draw();
+}
+
+void speed_badge_message(const char* text) {
+    if (!g_badge.initialized || text == nullptr) {
+        return;
+    }
+    if (game_is_fullscreen()) {
+        std::fprintf(stderr, "[badge] fullscreen: \"%s\" is not drawn\n", text);
+        std::fflush(stderr);
+        return;
+    }
+    show(text);
 }
 
 void speed_badge_shutdown() {
