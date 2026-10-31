@@ -175,7 +175,8 @@ address, the N64 thread call chain and the last lines of the app's own log (the
 
 `error.log` is overwritten by the next crash. Closing the window normally writes
 nothing. A developer can also make the app crash on demand to check the file:
-set `OGRE_CRASH_TEST=segv` in the environment before launching.
+set `OGRE_CRASH_TEST=segv` in the environment before launching, or start the
+app with the argument `--crash-test=segv` (on Windows, from a shortcut).
 
 If the game does not start at all, the `[boot]` lines name the resolved ROM,
 the renderer and the folder where saves are written. On macOS they are not

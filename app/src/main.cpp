@@ -325,9 +325,21 @@ int main(int argc, char** argv) {
         return EXIT_SUCCESS;
     }
 
-    // OGRE_CRASH_TEST=<segv|bus|abrt|fpe|ill>: raise that signal now, so a
-    // packaged build's error.log can be checked without provoking a real crash.
-    if (const char* crash = getenv("OGRE_CRASH_TEST")) {
+    // OGRE_CRASH_TEST=<segv|bus|abrt|fpe|ill>, or the argument
+    // --crash-test=<name>: raise that signal now, so a packaged build's
+    // error.log can be checked without provoking a real crash. The argument is
+    // for a launch that cannot carry an environment variable: Explorer starts a
+    // shortcut's target with Explorer's own environment, and that launch is the
+    // only one with no standard handles (tools/smoke-dist.sh, check 5).
+    const char* crash = getenv("OGRE_CRASH_TEST");
+    const char* crash_source = "OGRE_CRASH_TEST";
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--crash-test=", 13) == 0) {
+            crash = argv[i] + 13;
+            crash_source = "--crash-test";
+        }
+    }
+    if (crash != nullptr) {
         int sig = 0;
         if (strcmp(crash, "segv") == 0) sig = SIGSEGV;
         else if (strcmp(crash, "abrt") == 0) sig = SIGABRT;
@@ -337,13 +349,19 @@ int main(int argc, char** argv) {
         else if (strcmp(crash, "bus") == 0) sig = SIGBUS;
 #endif
         if (sig != 0) {
-            fprintf(stderr, "[boot] OGRE_CRASH_TEST=%s: raising signal %d\n", crash, sig);
+            fprintf(stderr, "[boot] crash test %s=%s: raising signal %d\n", crash_source, crash, sig);
             // Let the capture threads drain the line above into the ring before
             // the report is written; otherwise the smoke test's check of the
             // report races them.
             std::fflush(nullptr);
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             std::raise(sig);
+        }
+        else if (crash_source[0] == '-') {
+            // An unknown name in the argument must not fall through to the ROM
+            // selection, which reads argv[1] as the ROM path.
+            fprintf(stderr, "[boot] --crash-test=%s: unknown signal name\n", crash);
+            return EXIT_FAILURE;
         }
     }
 

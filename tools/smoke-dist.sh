@@ -6,7 +6,7 @@
 #
 #   tools/smoke-dist.sh [dist-dir]        # default: dist/ogre-battle-64-recomp
 #
-# Three checks:
+# Five checks:
 #
 #   1. the app binary, its companion files and the packaged example mods exist;
 #      the mods are part of the package (`packaging/README-dist.txt` lists them)
@@ -26,8 +26,12 @@
 #      dialog or a hang cannot stall a release run. The same run asserts that the
 #      presented-frame capture is off, which is the v0.4.0 Windows crash
 #      (session 107);
+#   4. a run with OGRE_CRASH_TEST=segv writes an error.log that holds the
+#      [boot] line printed before the raise;
+#   5. Windows: the same report from a launch with no standard handles (a
+#      double-click), made through Explorer and a temporary shortcut.
 #
-# `SMOKE_TIMEOUT` (seconds, default 90) bounds check 3.
+# `SMOKE_TIMEOUT` (seconds, default 90) bounds checks 3 and 5.
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "$0")/.." && pwd)
@@ -123,15 +127,22 @@ log="$work/smoke.log"
 
 OGRE_SMOKE=1 OGRE_PREF_DIR="$work" "$app" >"$log" 2>&1 &
 pid=$!
-# A watchdog, because a loader failure can raise a dialog and wait for a click.
-( sleep "$timeout_seconds"; kill -9 "$pid" 2>/dev/null ) &
-watchdog=$!
+# A deadline, because a loader failure can raise a dialog and wait for a click.
+# It polls in this shell: a background `sleep` watchdog outlived its subshell
+# when that was killed, held the caller's output pipe open, and made every
+# piped run take the full SMOKE_TIMEOUT.
+deadline=$((SECONDS + timeout_seconds))
+while kill -0 "$pid" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+        kill -9 "$pid" 2>/dev/null || true
+        break
+    fi
+    sleep 0.2
+done
 set +e
 wait "$pid"
 code=$?
 set -e
-kill "$watchdog" 2>/dev/null || true
-wait "$watchdog" 2>/dev/null || true
 
 if [ "$code" -ne 0 ]; then
     echo "smoke-dist: the app exited $code" >&2
@@ -178,12 +189,55 @@ set -e
 if [ ! -f "$report_file" ]; then
     fail "OGRE_CRASH_TEST=segv wrote no error.log"
 fi
-if ! grep -q "OGRE_CRASH_TEST" "$report_file"; then
+if ! grep -q "crash test OGRE_CRASH_TEST=segv" "$report_file"; then
     echo "--- error.log ---" >&2
     cat "$report_file" >&2
     fail "the crash report did not contain the captured boot log"
 fi
 echo "smoke-dist: the crash report captured the boot log"
 rm -f "$report_file"
+
+# --- 5. Windows: the same report from a launch with no standard handles ------
+# A double-click starts the exe from Explorer with no standard handles and no
+# console. main.cpp then reopens stdout and stderr on NUL as fds 1 and 2; the
+# report holds the boot line only if those streams land on the descriptors that
+# crash_log's capture reads (session 145). Check 4 cannot see this, because its
+# launch passes the shell's handles. Explorer is the launcher used here: other
+# ways to start a process with no handles (cleared handles with
+# DETACHED_PROCESS, thread injection) were quarantined by Defender
+# (session 119). Explorer starts a shortcut's target with Explorer's own
+# environment, so the crash is requested by the --crash-test argument stored in
+# a temporary .lnk. A host with no Explorer shell (a service, a hosted runner)
+# skips the check.
+if [ "$kind" = windows ]; then
+    run_ps() { powershell.exe -NoProfile -NonInteractive -Command "$1" | tr -d '\r'; }
+    explorers=$(run_ps "@(Get-Process explorer -ErrorAction SilentlyContinue).Count")
+    if [ "${explorers:-0}" -eq 0 ]; then
+        echo "smoke-dist: no Explorer shell on this host; skipping the no-handle launch check"
+    else
+        app_win=$(cygpath -w "$app")
+        dist_win=$(cygpath -w "$dist")
+        lnk_win=$(cygpath -w "$work/crash-test.lnk")
+        run_ps "\$s = (New-Object -ComObject WScript.Shell).CreateShortcut('$lnk_win'); \$s.TargetPath = '$app_win'; \$s.Arguments = '--crash-test=segv'; \$s.WorkingDirectory = '$dist_win'; \$s.Save()"
+        [ -f "$work/crash-test.lnk" ] || fail "could not write the crash-test shortcut"
+        running="@(Get-Process ogrebattle64 -ErrorAction SilentlyContinue | Where-Object { \$_.Path -eq '$app_win' }).Count"
+        [ "$(run_ps "$running")" -eq 0 ] || fail "$app is already running; close it and run the check again"
+        rm -f "$report_file"
+        # explorer.exe hands the file to the running shell and exits 1.
+        explorer.exe "$lnk_win" || true
+        deadline=$((SECONDS + timeout_seconds))
+        until [ -f "$report_file" ] && [ "$(run_ps "$running")" -eq 0 ]; do
+            [ "$SECONDS" -lt "$deadline" ] || fail "the Explorer launch wrote no error.log within ${timeout_seconds}s"
+            sleep 1
+        done
+        if ! grep -q "crash test --crash-test=segv" "$report_file"; then
+            echo "--- error.log ---" >&2
+            cat "$report_file" >&2
+            fail "the crash report of a launch with no standard handles did not contain the boot log"
+        fi
+        echo "smoke-dist: the crash report of a launch with no standard handles captured the boot log"
+        rm -f "$report_file"
+    fi
+fi
 
 echo "smoke-dist: PASS"

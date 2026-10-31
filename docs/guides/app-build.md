@@ -152,9 +152,12 @@ file or pipe. A double-clicked launch has no standard handles; its log still
 reaches `error.log` on a crash.
 
 To test a launch with no standard handles, start the exe through
-`explorer.exe <exe>`. Scripts that cleared the handles and used
-`DETACHED_PROCESS|CREATE_NO_WINDOW`, or thread injection, got the exe
-quarantined by Defender.
+`explorer.exe <exe>`, or through `explorer.exe <shortcut.lnk>` to pass
+arguments; `tools/smoke-dist.sh` check 5 does the latter with
+`--crash-test=segv`. Explorer starts the program with its own environment, so
+an `OGRE_*` variable set in the calling shell does not reach it. Scripts that
+cleared the handles and used `DETACHED_PROCESS|CREATE_NO_WINDOW`, or thread
+injection, got the exe quarantined by Defender.
 
 ### 8. Per-thread CPU
 
@@ -351,7 +354,15 @@ release workflow runs it before collecting the archive. It checks:
 3. the exe reaches `main` with `OGRE_SMOKE=1` within `SMOKE_TIMEOUT` seconds
    (default 90);
 4. a run with `OGRE_CRASH_TEST=segv` writes an `error.log` that contains the
-   `[boot]` line printed just before the raise.
+   `[boot]` line printed just before the raise;
+5. on a host with an Explorer shell, a launch with no standard handles writes
+   the same report: the script writes a `.lnk` that passes `--crash-test=segv`,
+   opens it with `explorer.exe`, and waits for the process to exit. A host with
+   no Explorer (a hosted runner, a service) prints a skip line.
+
+`SMOKE_TIMEOUT` bounds checks 3 and 5. The script resolves `python3` for
+`tools/pe_imports.py`; the Microsoft Store stub fails check 2 (see "Traps on this
+machine").
 
 ### Crash reports — `error.log`
 
@@ -928,7 +939,7 @@ All knobs default to off. Settings overrides apply for one run and never write
 | `OGRE_FORCE_SCENE=<hex>` | the original hex-only spelling of `OGRE_SCENE`; `_AFTER_MS` likewise |
 | `OGRE_STEP=<n>` | seed the New Game step word `D_8018F1C0` once when the target scene is active, released when the step moves or after 1500 ms. It changes the sequence's state: entering `0x0D` at step 2 without step 1 makes the exit re-enter at step 0, the movie-mode branch, and crash. Drive the title with taps for a real New Game |
 | `OGRE_SMOKE=1` | print `[smoke] main reached`, try SDL once, exit 0 |
-| `OGRE_CRASH_TEST=<segv\|bus\|abrt\|fpe\|ill>` | raise that signal right after the crash logger is armed |
+| `OGRE_CRASH_TEST=<segv\|bus\|abrt\|fpe\|ill>` | raise that signal right after the crash logger is armed. The argument `--crash-test=<name>` does the same for a launch that cannot carry the variable (a shortcut started by Explorer); an unknown name in the argument exits 1 |
 | `OGRE_CONSOLE=1` | `AllocConsole()` for the standard streams |
 | `OGRE_LIVE_CONSOLE=1` | the live console; see "The live console" |
 | `OGRE_TAP_MS=<n>` | controller 0 presses Start (or `OGRE_TAP_BUTTON`) for 150 ms every `n` ms |

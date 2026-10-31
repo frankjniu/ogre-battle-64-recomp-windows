@@ -162,7 +162,11 @@ this file.
   consumed slots of untouched framebuffers and dereferenced null (session 53).
 - **A framebuffer tile copy is served only when the source framebuffer was written in the current
   workload and the tile lies inside its `lastWriteRect`; otherwise the load reads RDRAM.** Stale and
-  depth framebuffer records drew sprite parts as flat ENV colour (sessions 134, 136).
+  depth framebuffer records drew sprite parts as flat ENV colour (sessions 134, 136). The writers of
+  the two leftover records are not named, and the guard does not need them: no instruction in any
+  ELF builds `0x32AF40` or `0x2E6840` (no `lui` of `0x8025..0x803F` or `0xA025..0xA03F`, no low half
+  `0xAF40`, neither word in the ROM), so both are computed at run time; `0x32AF40` is
+  `0x2E6840 + 0x44700`, row 219 of a 640-wide 16-bit image at `0x2E6840`.
 - **RT64's "Fix LR with Scissor" (`enhancementConfig.rect.fixRectLR`) is off.** It widened the
   Organize Screen's font rectangles by a column; it is set after `Application::setup`, and
   `OGRE_RECT_LR_FIX=1` restores it (session 101).
@@ -295,7 +299,10 @@ this file.
   tree; `tools/rt64-plume-sdl.patch` counts for coverage only (sessions 117, 120).
 - **`tools/smoke-dist.sh` (`make smoke`) gates every package.** It checks PE imports, launches with
   `OGRE_SMOKE=1`, requires an `OGRE_CRASH_TEST=segv` `error.log` that holds the `[boot]` line, and
-  fails on an empty log or a `mods/` with no `.nrm`. The workflow's `platforms=windows` input builds
+  fails on an empty log or a `mods/` with no `.nrm`. On a Windows host with an Explorer shell it also
+  launches the exe through `explorer.exe` and a temporary `.lnk` that passes `--crash-test=segv`
+  (a launch with no standard handles; Explorer passes its own environment, not the script's) and
+  requires the same `[boot]` line in that report. The workflow's `platforms=windows` input builds
   Windows alone (sessions 94c, 94d, 108, 145).
 
 ## Diagnostics and process

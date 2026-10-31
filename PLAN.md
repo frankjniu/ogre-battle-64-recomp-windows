@@ -41,7 +41,8 @@ ending and the attract loop.
   and a stock run prints no per-task or per-frame log lines. A 30 s boot uses
   about 4 s of CPU.
 - **Logging on Windows:** `ogrebattle64.exe > run.log 2>&1` keeps its log, and a
-  double-clicked launch still fills `error.log`'s captured sections on a crash.
+  double-clicked launch still fills `error.log`'s captured sections on a crash
+  (`tools/smoke-dist.sh` check 5 launches through Explorer to prove it).
 - **Releases:** the last published release is v0.8.3. None of the 2026-10-30
   work is released; `make release` needs write access to the private data
   repository.
@@ -53,30 +54,9 @@ ending and the attract loop.
 Ordered by how much each item affects a Windows player. Each item says what is
 known and what the next step is.
 
-### Robustness
-
-1. **A NULL-handle check in `tools/smoke-dist.sh`.** The package check runs the
-    app with inherited handles only. A launch with no standard handles (the
-    Explorer case) should assert that `error.log` captures the boot line.
-    `main.cpp` reopens handle-less `stdout`/`stderr` on `NUL` as fds 1 and 2,
-    and `OGRE_CRASH_TEST=segv` writes the report the check reads. Open problem:
-    `explorer.exe <exe>` starts the exe from the running Explorer, so it does
-    not inherit the script's environment (`OGRE_CRASH_TEST`, `OGRE_PREF_DIR`);
-    a User environment variable set for the launch and removed afterwards is
-    the known workaround. Other no-handle launch styles get quarantined by
-    Defender. Next step: decide whether the check runs on the hosted runner
-    (no Explorer session there) or only locally.
-2. **Framebuffer tile-copy freshness.** RT64 serves a tile copy only when the
-    source framebuffer was written in the current workload. The writers of two
-    leftover framebuffer records (`0x802E6840`, `0x32AF40`) are not identified,
-    and a test against `fb->RAMHash` alone is unreliable. `0x2E6840` is one of
-    the world map's three 640-wide targets (AGENTS.md). Next step: an
-    `OGRE_DL_TRACE` run on the world map from a save, logging each
-    `G_SETCIMG` address, to name the writer of `0x32AF40`.
-
 ### Features and mods
 
-3. **True HD backgrounds.** `mods/backgrounds/` repaints the backdrop at the
+1. **True HD backgrounds.** `mods/backgrounds/` repaints the backdrop at the
     game's own resolution. Higher detail needs RT64 texture replacement keyed by
     the drawn texture's hash (`TextureCache::loadReplacementDirectory`). The
     four-chunk canvas layout is hardcoded to the cathedral's chunk sizes. See
