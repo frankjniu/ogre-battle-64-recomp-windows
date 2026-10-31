@@ -33,8 +33,9 @@ ending and the attract loop.
 - **Saves:** cartridge battery (SRAM) works; Controller Pak menus render.
 - **Player features:** launcher and in-game `ESC` overlay (MAIN, MODS, CONTROLS,
   SETTINGS, DEBUG), rebindable keyboard and pad, GAME SPEED 1/2/4/8, WIDESCREEN
-  for the mission field, CRT FILTER (HYLLIAN, CRTS, LOTTES), mouse support on the world map and the mission field
-  (off by default), mods (`exp-overflow`, `skip-boot-logos`, `item-randomizer`),
+  for the mission field, CRT FILTER (HYLLIAN, CRTS, LOTTES), mouse support on
+  the world map and the mission field (off by default), mods (`exp-overflow`,
+  `skip-boot-logos`, `item-randomizer`),
   replacement dialogue backdrops with HD strips (`mods/backgrounds/`, RT64
   texture pack in `mods/backgrounds/hd/`).
 - **Performance:** the game's idle thread sleeps instead of spinning a core
@@ -55,20 +56,74 @@ ending and the attract loop.
 Ordered by how much each item affects a Windows player. Each item says what is
 known and what the next step is.
 
+### Display
+
+1. **CRT FILTER on the world map and on weaker GPUs.** The three filters are
+    checked on the New Game cathedral, in 4:3 and widescreen, on an RTX 5070 Ti
+    at 2880x2160 and 3840x2160 (`docs/guides/app-build.md` → "CRT filters").
+    Two paths are unobserved. A framebuffer taller than 288 lines is folded to
+    240 scanlines (`VIRenderer::prepare`); the world map's 640-wide targets
+    (AGENTS.md) may be such a framebuffer. No per-filter GPU time is measured,
+    and LOTTES reads about 31 texels per output pixel. Next step: the developer
+    turns each filter on at the world map from a save and reports the picture;
+    time the VI pass per filter (PIX on D3D12) on the machine's AMD integrated
+    GPU at 1080p.
+2. **CRT FILTER and the HD detail.** The filters read the frame averaged to one
+    texel per framebuffer pixel, so with a filter on, RESOLUTION AUTO and the HD
+    background strips only add anti-aliasing. This is the usual CRT behaviour.
+    Next step: ask the developer whether a filter should keep the horizontal
+    HD detail (sample the HD frame across a scanline instead of the averaged
+    texel), and whether the rows need tunables (scanline strength, mask
+    strength, curvature on or off), which today are the libretro defaults.
+
 ### Features and mods
 
-1. **HD backgrounds beyond the cathedral.** `mods/backgrounds/` writes a
+3. **HD backgrounds beyond the cathedral.** `mods/backgrounds/` writes a
     backdrop at the game's resolution, and `tools/backgrounds.py hd` (`make
     bg-hd`) cuts RT64 replacement strips from the same PNG, one per `G_LOADTILE`
     strip hash (`docs/guides/hd-backgrounds.md`). Only the cathedral (scene
     `0x0D`, step 2) is mapped, and its art is the placeholder pair. The canvas
     layout is hardcoded: four chunks 320/176 wide and 240/144 tall, the right
     chunks at column 320 and the bottom chunks at row 239. The tool stops when a
-    backdrop's strips do not match that layout. Strips that are identical at
-    game resolution share one HD image. Next step: the developer names the next
-    backdrop (scene and step) and supplies art; map it in `backgrounds.txt`, run
-    `make bg-extract` and `make bg-hd`, and generalise `chunk_rect` if the check
-    fails.
+    backdrop's strips do not match that layout. Next step: the developer names
+    the next backdrop (scene and step) and supplies art; map it in
+    `backgrounds.txt`, run `make bg-extract` and `make bg-hd`, and generalise
+    `chunk_rect` if the check fails.
+4. **HD strips that share a hash, and the first frames.** Strips that are
+    identical at game resolution have one RT64 hash and show one HD image at
+    every such place; the placeholder pair has four groups that differ by up to
+    2.9/255 in HD (slow gradients). The pack writes the game-resolution pixels
+    itself, so it can make every strip unique: change the lowest bit of one
+    texel in each duplicate strip in `ogre_hd_background` (an invisible step of
+    1/31 in one channel), then rebuild the strips. Separately, the strips use
+    RT64's `stream` operation, so a strip can draw at game resolution for the
+    first frames of a scene. Next step: implement the bit change and require the
+    tool's shared-hash report to be empty; compare the cathedral's first frames
+    with `defaultOperation` `stream` against `stall`.
+
+### Robustness
+
+5. **The launcher's error screen reuses one text layer per frame.**
+    `launcher.cpp:782-791` rebuilds `body` for the title, each line and the
+    hint in one frame. The same pattern lost the overlay's LOTTES label until
+    the settings panel switched to `FrameText` (`app/src/ui.cpp`). Next step:
+    give each run its own layer, as `FrameText` does, and check the error
+    screen with a missing ROM.
+6. **`tools/smoke-dist.sh` and the Microsoft Store `python3` stub.** On a stock
+    Windows machine `python3` resolves to the Store stub, check 2 runs it, and
+    the check fails with "Python was not found" (`docs/guides/app-build.md` →
+    "Traps on this machine"). Next step: accept a candidate only when
+    `"$candidate" -c "import sys"` succeeds, so `py` or a real `python` is used.
+
+### Performance
+
+7. **The settings panel builds one texture per text run per frame.** While the
+    launcher or the `ESC` overlay is open, `FrameText` creates and destroys an
+    SDL texture for every run, about sixty per frame on the SETTINGS tab (the
+    single reused layer before it created as many).
+    Next step: cache the textures by text, colour and scale across frames, and
+    compare the overlay thread's CPU time before and after (per-thread CPU:
+    `docs/guides/app-build.md` → "Windows setup" step 8).
 
 ### Parked
 
