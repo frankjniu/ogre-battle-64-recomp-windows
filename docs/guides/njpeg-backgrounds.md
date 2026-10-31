@@ -138,7 +138,7 @@ buffers, not from this render.
 ## Checking another background
 
 ```sh
-OGRE_NJREAD_LOG=1 OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=1000   OGRE_TAP_BUTTON="start,a,start,a,start,a,start,a,start,a,a,a,a"   OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=25000 ./build-app/ogrebattle64 assets/ogre64.z64   > /dev/null 2> /tmp/njread.log
+OGRE_NJREAD_LOG=1 OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=2500   OGRE_TAP_BUTTON="start,a,start,a,start,a,start,a,start,a,a,a,a"   OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=25000 ./build-app/ogrebattle64 assets/ogre64.z64   > /dev/null 2> /tmp/njread.log
 grep njread /tmp/njread.log
 ```
 

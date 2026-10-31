@@ -93,6 +93,18 @@ this file.
 - **`get_function` returns a logging stub for an unknown streamed address.** The log lines
   `[overlays] streamed function stub called @` and `[bank] UNKNOWN module` name a missing module;
   `tools/stubmap.py` answers it statically (sessions 6, 68, 83).
+- **A streamed lookup runs the body whose ROM bytes are resident.** `lookup_check`
+  (`app/src/bank_overlays.cpp`, hooked into `get_function`) compares the resident words with the
+  mapped body's ROM words up to its first `jr ra`. On a mismatch or a miss it calls the body, from
+  any bank record or main-ELF section, that matches, and logs `[lookup]` once per address; with no
+  match the map's answer stands. This executes the code the CPU would execute, so it is not
+  fabricated state (AGENTS.md rule 7). It covers dispatched calls and indirect `jalr`, and not
+  direct calls (2026-10-31).
+- **The main unit's direct calls into swappable RAM are bound correctly as of 2026-10-31.** 919
+  stay inside their own streamed section; the other 30 (`.streamedB` into `.streamedC`'s range)
+  target entries of `.streamedC`, and `stubmap.py target` finds every other module at those
+  addresses never loaded with the caller's record. A new one is checked the same way, and is
+  dispatched with `cross_bank.py dispatch --only` if another module can be resident.
 
 ## Runtime (N64ModernRuntime)
 
@@ -115,7 +127,13 @@ this file.
   `ultramodern::set_speed_multiplier()`.** The clock is piecewise linear with seqlock-published
   anchors, so `osGetTime` and pending timers stay continuous across a change (session 93).
 - **The periodic `[snap]` queue snapshot is opt-in (`OGRE_SNAP`).** Each dump costs about 1.6 s on
-  Windows (100 sleeps at the 15.6 ms timer resolution) (sessions 116, 145).
+  Windows (100 sleeps at the 15.6 ms timer resolution) (sessions 116, 145). A stalled frame
+  counter runs it once and writes `error.log` (`app/src/hang_watch.cpp`, `OGRE_HANG_MS`).
+- **The audio task's reply on `0x800C49E8` comes only from the game's scheduler.**
+  `func_80089200` sends it after the RSP task completes (`0x80089324`). The runtime's bring-up dummy
+  reply was removed (2026-10-31): it left a spare message in the 1-slot queue, so the game-flow
+  thread ran one audio task ahead of the RSP while every task reuses the command list at
+  `0x80136110`.
 - **Closing the window is a hard exit.** The runtime never joins the game threads, so RDRAM is freed
   only when the run did not exit through `ultramodern::quit()`, and `main.cpp` ends with
   `crash_log::flush()` and `_Exit` (session 94b).

@@ -25,6 +25,7 @@ app/
     input_map.{hpp,cpp}   the rebindable controller map
     settings.{hpp,cpp}    player settings (GAME SPEED)
     crash_log.{hpp,cpp}   `error.log` and the fatal-signal handlers
+    hang_watch.{hpp,cpp}  `error.log` when the game's frame counter stops
     gbi.cpp, font.cpp, save_import.cpp, synth_frame.cpp
     null_renderer.cpp, main_web.cpp, web_platform.cpp, web_renderer.cpp
 ```

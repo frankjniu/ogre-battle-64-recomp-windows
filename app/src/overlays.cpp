@@ -56,6 +56,19 @@ void register_streamed_overlays() {
     printf("[overlays] registered boot streamed overlays A+B+C\n");
 }
 
+// Every function of the main ELF's code sections: (ram, rom, size, body). The
+// lookup check (bank_overlays.cpp) compares resident code against these bytes.
+void for_each_main_function(void (*visit)(uint32_t ram, uint32_t rom, uint32_t size,
+                                          recomp_func_t* func)) {
+    for (const SectionTableEntry& section : section_table) {
+        for (size_t i = 0; i < section.num_funcs; i++) {
+            const FuncEntry& entry = section.funcs[i];
+            visit(section.ram_addr + entry.offset, section.rom_addr + entry.offset,
+                  entry.rom_size, entry.func);
+        }
+    }
+}
+
 }  // namespace ogre
 
 // Called on every pass of the game's idle loop (thread 1, func_8007F8E4 at

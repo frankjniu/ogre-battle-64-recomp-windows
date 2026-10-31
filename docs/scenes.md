@@ -508,7 +508,7 @@ sequence's own state: a step entered with no step-1 visit makes the exit take it
 crashes. **For the real opening use the title route** (session 54):
 
 ```sh
-OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=1000 \
+OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=2500 \
   OGRE_TAP_BUTTON="start,a,start,a,start,a,start,a,start,a,start,a,start,a,start,a" \
   OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=200000 ./build-app/ogrebattle64
 ```

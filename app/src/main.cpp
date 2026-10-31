@@ -38,6 +38,7 @@
 
 #include "game.hpp"
 #include "crash_log.hpp"
+#include "hang_watch.hpp"
 #include "hd_backgrounds.hpp"
 #include "launcher.hpp"
 #include "input_map.hpp"
@@ -127,6 +128,8 @@ static void update_gfx(void*) {
     // window's corner, on the same main thread, shown for a couple of seconds
     // after the multiplier changes.
     ogre::speed_badge_tick();
+    // A game that stops producing frames gets one error.log (hang_watch.cpp).
+    ogre::hang_watch_tick(ogre::g_platform.window);
     // The overlay's MAIN tab carries EXIT GAME. It records the request instead
     // of ending the run itself, so this one exit path prints the dumps below and
     // calls ultramodern::quit for both the close button and the panel. The

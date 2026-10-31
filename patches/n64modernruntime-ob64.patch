@@ -49,7 +49,7 @@ index 37556bd..eefe64b 100644
  };
  
 diff --git a/librecomp/include/librecomp/overlays.hpp b/librecomp/include/librecomp/overlays.hpp
-index 35703bd..be20d5b 100644
+index 35703bd..d8625bf 100644
 --- a/librecomp/include/librecomp/overlays.hpp
 +++ b/librecomp/include/librecomp/overlays.hpp
 @@ -6,6 +6,7 @@
@@ -76,7 +76,7 @@ index 35703bd..be20d5b 100644
          recomp_func_t* get_base_export(const std::string& export_name);
          recomp_func_ext_t* get_ext_base_export(const std::string& export_name);
          size_t get_base_event_index(const std::string& event_name);
-@@ -45,6 +55,59 @@ namespace recomp {
+@@ -45,6 +55,66 @@ namespace recomp {
  
          void add_loaded_function(int32_t ram_addr, recomp_func_t* func);
  
@@ -112,6 +112,13 @@ index 35703bd..be20d5b 100644
 +        // resolved it against its own section table. `rom_offset` is a ROM byte
 +        // offset, `ram_addr` the RDRAM destination.
 +        void set_streamed_dma_hook(void (*hook)(uint32_t rom_offset, uint32_t ram_addr, uint32_t size));
++
++        // Installed by the app; get_function calls it for every address in the
++        // streamed window, with the function the map holds there (nullptr on a
++        // miss). It returns the function to call instead, or nullptr to keep
++        // the map's answer (or the stub on a miss).
++        using lookup_check_t = recomp_func_t* (*)(int32_t addr, recomp_func_t* mapped);
++        void set_lookup_check(lookup_check_t check);
 +
 +        // Called by recomp::do_rom_read(): loads/relocates the streamed section
 +        // covering the DMA, then forwards to the app hook.
@@ -441,7 +448,7 @@ index 0f7de83..856225c 100644
      }
  
 diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
-index 8c8e5d1..6ad498c 100644
+index 8c8e5d1..ec5ea27 100644
 --- a/librecomp/src/overlays.cpp
 +++ b/librecomp/src/overlays.cpp
 @@ -1,6 +1,12 @@
@@ -493,7 +500,7 @@ index 8c8e5d1..6ad498c 100644
  static std::unordered_map<std::string, recomp_func_t*> base_exports{};
  static std::unordered_map<std::string, recomp_func_ext_t*> ext_base_exports{};
  static std::unordered_map<std::string, size_t> base_events;
-@@ -271,8 +299,305 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
+@@ -271,8 +299,311 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
      }
  }
  
@@ -589,6 +596,12 @@ index 8c8e5d1..6ad498c 100644
 +
 +void recomp::overlays::set_streamed_dma_hook(void (*hook)(uint32_t, uint32_t, uint32_t)) {
 +    streamed_dma_hook = hook;
++}
++
++static recomp::overlays::lookup_check_t lookup_check = nullptr;
++
++void recomp::overlays::set_lookup_check(lookup_check_t check) {
++    lookup_check = check;
 +}
 +
 +// ---------------------------------------------------------------------------
@@ -799,7 +812,7 @@ index 8c8e5d1..6ad498c 100644
      section_addresses = (int32_t *)calloc(sections_info.total_num_sections, sizeof(int32_t));
  
      // Sort the executable sections by rom address
-@@ -361,14 +686,68 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
+@@ -361,14 +692,77 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
      return get_func_by_section_index_function_offset(find_section_it->second, func_offset);
  }
  
@@ -830,16 +843,24 @@ index 8c8e5d1..6ad498c 100644
 -        fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
 -        assert(false);
 -        std::exit(EXIT_FAILURE);
--    }
++    recomp_func_t* mapped = (func_find != func_map.end()) ? func_find->second : nullptr;
++    uint32_t a = (uint32_t)addr;
++    // OB64: the app checks a streamed address against the code resident in
++    // RDRAM (app/src/bank_overlays.cpp, lookup_check).
++    if (lookup_check != nullptr && a >= 0x8016A000 && a < 0x80400000) {
++        recomp_func_t* checked = lookup_check(addr, mapped);
++        if (checked != nullptr) {
++            return checked;
++        }
+     }
 -    return func_find->second;
-+    if (func_find != func_map.end()) {
-+        return func_find->second;
++    if (mapped != nullptr) {
++        return mapped;
 +    }
 +
 +    // Bring-up fallback: streamed overlays are loaded into RDRAM by the game's
 +    // DMA but are not yet all recompiled/registered (Phase 4). Log and return a
 +    // no-op stub so the boot can proceed instead of hard-failing.
-+    uint32_t a = (uint32_t)addr;
 +    if ((a >= 0x8016A000 && a < 0x80400000) || (a >= 0x84000000 && a < 0x84200000)) {
 +        last_streamed_stub_addr.store(a);
 +        // Temporary diagnostic: dump the calling thread's recompiled call chain
@@ -3998,7 +4019,7 @@ index 9944a02..7379c21 100644
      return true;
  }
  
-@@ -137,11 +672,33 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -137,11 +672,13 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
          }
      } else {
          // Otherwise, yield this thread in a loop until the queue is no longer full
@@ -4006,26 +4027,6 @@ index 9944a02..7379c21 100644
          while (MQ_IS_EMPTY(mq)) {
 -            debug_printf("[Message Queue] Thread %d is blocked on receive\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
 +            OGRE_TRACE("[mq] T=%llu Thread %d BLOCKED on receive from queue 0x%08X\n", (unsigned long long)ultramodern::trace_millis(), TO_PTR(OSThread, ultramodern::this_thread())->id, (uint32_t)mq_);
-+            // Bring-up emulation: the game's audio driver blocks on 0x800C49E8
-+            // waiting for the audio task's buffer to finish playing, which
-+            // requires the RSP audio ucode to produce output and the AI DMA to
-+            // complete — neither of which is emulated yet. Auto-respond with a
-+            // dummy message so the boot can proceed (audio will be silent until
-+            // the ucode is recompiled).
-+            if (mq_ == (PTR(OSMesgQueue))(int32_t)0x800C49E8) {
-+                std::lock_guard lock{pending_direct_mutex};
-+                bool already = false;
-+                for (const auto& pd : pending_direct_sends) {
-+                    if (pd.mq == (int32_t)0x800C49E8) {
-+                        already = true;
-+                        break;
-+                    }
-+                }
-+                if (!already) {
-+                    printf("[dbg] audio-response queue 0x800C49E8 blocked; queuing dummy response\n");
-+                    pending_direct_sends.push_back({(int32_t)0x800C49E8, 0, false, 4});
-+                }
-+            }
              ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv), ultramodern::this_thread());
              ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
          }
@@ -4033,7 +4034,7 @@ index 9944a02..7379c21 100644
      }
  
      if (msg_ != NULLPTR) {
-@@ -152,10 +709,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+@@ -152,10 +689,7 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
      mq->validCount--;
  
      // If any threads were blocked on sending to this message queue, pop the first one and schedule it.

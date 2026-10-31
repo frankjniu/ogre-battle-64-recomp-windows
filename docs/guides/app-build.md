@@ -375,6 +375,20 @@ skips the runtime's printf-based call-chain dump. Only the first report is
 written. `OGRE_DUMP_RDRAM=<path>` adds the 8 MiB image. `crash_log::flush()`
 restores the descriptors; `atexit` and the `_Exit` paths call it.
 
+A hang writes `error.log` too. `app/src/hang_watch.cpp` runs from `update_gfx`
+on the main thread and reads the game's frame counter `D_800AEFA4` (the VI count
+copied at the end of each game frame, `0x800726C4`). When the counter stays
+still for `OGRE_HANG_MS` (default 5000; `0` turns the watch off), it prints a
+`[hang]` line with the frame counter, the VI count `D_800C4BCC` and the scene
+`D_800E810E`, runs the `[snap]` queue snapshot once (the main thread stalls about
+1.6 s) and writes `error.log` with the reason `hang: …`. The stdout section then
+holds the `[hang]` line and the snapshot. It reports once per stall and prints
+`[hang] frames resumed …` if frames come back. The boot (until the counter has
+changed twice), time with the game window minimized or hidden, and any gap over
+1 s between two main-thread calls do not count. With `OGRE_HANG_MS=150` the
+scene loads at `0x09`, `0x0A` and `0x04` trigger it, which is a quick way to see
+a report.
+
 The runtime's `message_box` errors also write `error.log`.
 `report_boot_failure()` (`app/src/sdl_platform.cpp`) writes `error.log` and
 shows a message box when SDL init, the game window or the start screen's window
@@ -910,8 +924,8 @@ All knobs default to off. Settings overrides apply for one run and never write
 | `OGRE_LAUNCHER=1` | force the start screen |
 | `OGRE_TEST_DROP=<path>` | one synthetic ROM drop to the start screen |
 | `OGRE_SCENE=<name\|hex>` | boot into a scene; see "Scene forcing" |
-| `OGRE_SCENE_AFTER_MS=<n>` | delay before the first scene poke (default 0); past ~1500 ms the jump is a silent no-op |
-| `OGRE_FORCE_SCENE=<hex>` | poke the scene id (`*(u16*)(D_800C4BBC+4)`) until `D_800E810E` reports it; `_AFTER_MS` (default 3000) |
+| `OGRE_SCENE_AFTER_MS=<n>` | delay before the first scene request (default 0) |
+| `OGRE_FORCE_SCENE=<hex>` | the original hex-only spelling of `OGRE_SCENE`; `_AFTER_MS` likewise |
 | `OGRE_STEP=<n>` | seed the New Game step word `D_8018F1C0` once when the target scene is active, released when the step moves or after 1500 ms. It changes the sequence's state: entering `0x0D` at step 2 without step 1 makes the exit re-enter at step 0, the movie-mode branch, and crash. Drive the title with taps for a real New Game |
 | `OGRE_SMOKE=1` | print `[smoke] main reached`, try SDL once, exit 0 |
 | `OGRE_CRASH_TEST=<segv\|bus\|abrt\|fpe\|ill>` | raise that signal right after the crash logger is armed |
@@ -953,6 +967,8 @@ All knobs default to off. Settings overrides apply for one run and never write
 | `OGRE_RSP_LOG=1` | two `[rsp]` lines per RSP task (~58 tasks/s). `tools/runlog.py` needs them |
 | `OGRE_DL_TRACE=1` | one `[renderer] display list N at t=…ms entries=<n>` line per list plus RT64's time for it |
 | `OGRE_DEBUG_TRACES=1` | `[ev]`/`[mq]`/`[sch]`/`[vi-debug]`, and `[pi] inline DMA` per streamed load; `OGRE_DEBUG_VI=1` adds every `osViSetMode` and VI geometry change |
+| `OGRE_HANG_MS=<ms>` | the hang watch threshold (default 5000; `0` = off): no game frame for that long prints `[hang]`, runs the `[snap]` snapshot once and writes `error.log`. See "Crash reports" |
+| `OGRE_LOOKUP_CHECK=0` | turns off the check of streamed lookups against resident code (`[lookup]` lines). See "The lookup check" |
 | `OGRE_SNAP=1\|<frames>` | the periodic message-queue snapshot `[snap]` (default every 90 VI frames), for a boot whose threads are all parked. It runs on the Critical-priority VI thread and sleeps 100 x 200 us; on Windows each sleep takes ~16 ms (the 15.6 ms timer), so one snapshot stalls the VI ~1.6 s |
 | `OGRE_CHAIN_HISTORY=<tid>` | the sequence of live call chains thread `<tid>` goes through |
 | `OGRE_SCHED_TRACE=1` | scheduler traces and the `[sched-ring]` event ring at exit; `_TID=<tid>` filters it |
@@ -1040,15 +1056,21 @@ grep -A 12 "per-thread last" C:/tmp/ogre.out
 
 `OGRE_SCENE` names: `title` (0x04), `intro` (0x09), `publishers` (0x0A),
 `story` (0x0B), `unit-info` (0x0C), `tutorial` (0x17), `menu` (0x18), `new-game`
-(0x02), or a hex id. The poke is only seen before the boot enters its first scene
-(~1.1 s), so it runs from the streamed-DMA hook and a per-frame retry until
-`D_800E810E` reports the target. A forced scene enters without the pre-state a
+(0x02), or a hex id. The app stores the game's own scene request,
+`0x8000 | id` into `D_800C4C26`, once a scene after the boot's `0x00` runs with
+no request pending (`0xFFFF`). The dispatcher `func_80075BC0` then runs the
+running scene's leave hook and replaces it with the target (`0x800760A0`), as
+in a natural transition. The request is repeated, from the per-frame poll and
+the streamed-DMA hook, until `D_800E810E` reports the target. `OGRE_SCENE=title`
+reaches `0x04` at about 1.25 s, from the intro `0x09`. The root id
+`D_800E8214`, which the old poke wrote, is read only at the dispatcher's loop
+top, so that poke had no effect. A forced scene enters without the pre-state a
 natural path builds, so a forced scene that misbehaves is not by itself a
 finding; forced `menu` and `new-game` were recorded as crashing.
 
 ```sh
 OGRE_NO_AUDIO=1 OGRE_SCENE=title OGRE_SCENE_TRACE=1 OGRE_EXIT_AFTER_MS=6000 "$APP" "$ROM"
-OGRE_NO_AUDIO=1 OGRE_SCENE=title OGRE_TAP_MS=1000 \
+OGRE_NO_AUDIO=1 OGRE_SCENE=title OGRE_TAP_MS=2500 \
   OGRE_TAP_BUTTON="start,a,start,a,start,a,a,a,a,a,a,a,a" "$APP" "$ROM"   # New Game
 ```
 
@@ -1204,8 +1226,11 @@ tools/dlgaps.py C:/tmp/run.log --period 3000
 ```
 
 It skips the first 3 s (`--after`) and counts a gap above `--spike` x p50 as a
-spike. `--check` fails when 5 or more spikes put 60% of themselves in one tenth
-of `--period`, the signature of the `[snap]` snapshot and of a
+spike. Spikes less than three median frames apart merge into one stall event.
+The period is the median spacing between events unless `--period` names one, so
+a periodic stall that stretches its own wall-clock period stays in one phase
+bin. `--check` fails when 5 or more events put 60% of themselves in one tenth of
+the period, the signature of the `[snap]` snapshot and of a
 `yield_work_loop_branches` misfire. Spread-out slow frames report
 `not periodic`, so read the p90 and the spike count too.
 
@@ -1324,16 +1349,47 @@ tools/stubmap.py pointers               # data words pointing at risky targets (
 It reads the registration tables (`app/src/bank_funcs.inc`,
 `RecompiledFuncs/recomp_overlays.inl`) and the generated C's `jal` comments.
 Buckets: DEFINITE (no module registers the address), MISSING FUNCTION (a
-resident-capable bank lacks the entry and its bytes open like a prologue; act on
+resident-capable bank lacks the entry and its bytes start a function; act on
 these first), UNRESOLVABLE (no compiled code covers it), BANK SELECTION (a body
 interior in the missing bank), INERT (never co-resident with the caller), RSP
-IMEM. Last measurement: 985 static targets, 0 definite, 0 unresolvable, 129
-missing-function, 152 bank-selection, 369 inert; 288 `jalr` sites unmeasured.
+IMEM. A MISSING FUNCTION needs the code before the address to end in `jr ra`
+plus its delay slot, no branch in the containing body to reach the address, no
+word of the module to hold the address (a jump-table case), and a frame or a
+leaf return at the address. The old test also accepted `lui`, `sw`, `j`, `jal`
+and `jr` as openers; its 131 candidates were mid-function code, switch cases
+and data. Last measurement (2026-10-31): 988 static targets, 0 definite, 0
+missing-function, 0 unresolvable, 284 bank-selection, 369 inert, 332
+resolvable, 3 IMEM; 288 `jalr` sites. The runtime's lookup check (below)
+verifies the bank-selection targets and the `jalr` sites as they run.
 `log` matches the live words the runtime prints at a stub
 (`[overlays] @0xADDR: …`) against every module's ROM image, names the resident
 module, and says whether its load bypassed `on_streamed_dma` or the caller
 dispatched an address the bank does not have; bytes that match nothing compiled
 are a bank the port has no record for, and the tool names the ROM record.
+
+### The lookup check — `[lookup]` lines
+
+`get_function` asks `lookup_check` (`app/src/bank_overlays.cpp`) about every
+address in `0x8016A000..0x80400000`, which covers every `LOOKUP_FUNC` and every
+indirect `jalr` into streamed RAM. It compares the resident words with the
+mapped body's ROM words, from the entry to the delay slot of the first `jr ra`
+(at most 256 bytes). On a mismatch, or on a miss, it calls the body from any
+bank record or main-ELF section whose ROM words are the resident ones, and logs
+once per address:
+
+```
+[lookup] 0x8019A884: the map has the body at rom 0x…; the resident code is rom 0x…, so that body runs
+[lookup] 0x8019A884: not in the map; the resident code is rom 0x…, so that body runs
+[lookup] 0x8019A884: the resident code matches no compiled body; the map's body (rom 0x…) runs
+```
+
+The first two are a bank load `on_streamed_dma` did not recognise; the third is
+a module the port has not compiled. `tools/guestmap.py` names the unit of a ROM
+offset. A verdict is cached per address until the next DMA into the window; a
+30 s run costs the same CPU with and without it. `OGRE_LOOKUP_CHECK=0` turns it
+off. Direct calls bypass it: `make cross-bank-check` lists the main unit's
+direct calls into another section's swappable RAM (30 on 2026-10-31, each bound
+to the only module `stubmap.py target` finds resident with the caller).
 
 ### `tools/recompcov.py`
 

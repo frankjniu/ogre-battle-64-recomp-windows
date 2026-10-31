@@ -304,6 +304,7 @@ else()
         src/launcher.cpp
         src/overlay.cpp
         src/speed_badge.cpp
+        src/hang_watch.cpp
         src/hd_backgrounds.cpp
         src/map_cursor.cpp
         src/mission_cursor.cpp

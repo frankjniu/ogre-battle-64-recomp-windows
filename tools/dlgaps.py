@@ -15,11 +15,18 @@ work is data-dependent.
 needs: session 116's stutter was the runtime's periodic `[snap]` queue
 snapshot, one 33 -> 59 ms frame every 1500 ms.
 
+The phase-histogram period is the median spacing between stall events unless
+`--period` names one. A stall event is a run of spike gaps closer together than
+three median frames, so a two-frame stall counts once. A periodic stall that
+also lengthens the wall-clock period (each stall adds its own duration) keeps
+its spikes in one phase bin this way; a fixed 1500 ms period lets them drift
+out of it.
+
 Usage:
     tools/dlgaps.py run.log                      # summary + periodicity
     tools/dlgaps.py run.log --after 3000         # skip boot (the default)
     tools/dlgaps.py run.log --spike 1.5          # tail threshold (x p50)
-    tools/dlgaps.py run.log --period 1500        # phase histogram period
+    tools/dlgaps.py run.log --period 1500        # fixed phase histogram period
     tools/dlgaps.py run.log --check              # exit 1 when periodic
 """
 
@@ -52,6 +59,17 @@ def percentile(sorted_values: list[int], fraction: float) -> int:
     return sorted_values[index]
 
 
+def stall_events(spikes: list[tuple[int, int]], merge_ms: float) -> list[int]:
+    """Start times of stall events: spikes less than `merge_ms` apart are one."""
+    events: list[int] = []
+    last = None
+    for t, _ in spikes:
+        if last is None or t - last >= merge_ms:
+            events.append(t)
+        last = t
+    return events
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -61,8 +79,9 @@ def main(argv: list[str] | None = None) -> int:
                          "the boot's module streaming is not a stutter)")
     ap.add_argument("--spike", type=float, default=1.5, metavar="FACTOR",
                     help="a gap counts as a spike above FACTOR x p50 (default 1.5)")
-    ap.add_argument("--period", type=int, default=1500, metavar="MS",
-                    help="phase-histogram period in ms (default 1500)")
+    ap.add_argument("--period", type=int, default=None, metavar="MS",
+                    help="phase-histogram period in ms (default: the median spacing "
+                         "between stall events, or 1500 with fewer than three events)")
     ap.add_argument("--check", action="store_true",
                     help="exit 1 when the spikes repeat at a fixed period")
     args = ap.parse_args(argv)
@@ -93,24 +112,31 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  spikes above {args.spike:g}x p50 ({median * args.spike:.0f} ms): "
           f"{len(spikes)}")
 
-    # Phase histogram: a clockwork stutter puts its spikes in one bin of the
-    # period. The bin width is a tenth of the period, so a period several
-    # percent off still lands in one bin.
+    # Phase histogram: a clockwork stutter puts its stall events in one bin of
+    # the period. The bin width is a tenth of the period.
     if spikes:
-        width = max(1, args.period // 10)
-        phases = Counter((t % args.period) // width for t, _ in spikes)
+        events = stall_events(spikes, median * 3)
+        intervals = [b - a for a, b in zip(events, events[1:])]
+        if args.period is not None:
+            period, source = args.period, "--period"
+        elif len(intervals) >= 2:
+            period, source = max(1, round(statistics.median(intervals))), "median event spacing"
+        else:
+            period, source = 1500, "default, fewer than three events"
+        width = max(1, period // 10)
+        phases = Counter((t % period) // width for t in events)
         bin_index, bin_count = phases.most_common(1)[0]
-        shared = bin_count / len(spikes)
+        shared = bin_count / len(events)
         lo, hi = bin_index * width, (bin_index + 1) * width - 1
-        print(f"  phase mod {args.period} ms: {shared * 100:.0f}% of the spikes "
-              f"in the {lo}-{hi} ms bin ({bin_count}/{len(spikes)})")
-        intervals = [b - a for (a, _), (b, _) in zip(spikes, spikes[1:])]
+        print(f"  stall events (spikes within {median * 3:.0f} ms merged): {len(events)}")
         if intervals:
-            print(f"  spike spacing ms: p50={statistics.median(intervals):.0f} "
+            print(f"  event spacing ms: p50={statistics.median(intervals):.0f} "
                   f"min={min(intervals)} max={max(intervals)}")
-        periodic = len(spikes) >= 5 and shared >= 0.6
+        print(f"  phase mod {period} ms ({source}): {shared * 100:.0f}% of the events "
+              f"in the {lo}-{hi} ms bin ({bin_count}/{len(events)})")
+        periodic = len(events) >= 5 and shared >= 0.6
         print(f"  {'PERIODIC' if periodic else 'not periodic'}: "
-              f"{'at least 60% of 5+ spikes share one phase bin' if periodic else 'no repeated phase'}")
+              f"{'at least 60% of 5+ stall events share one phase bin' if periodic else 'no repeated phase'}")
         if args.check and periodic:
             return 1
     else:

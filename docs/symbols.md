@@ -65,6 +65,10 @@ These are read in dozens of places; a name here makes whole functions readable.
 | `0x802282D8` | `step_descriptor_interp` | walks `g_step_descriptor[g_step_desc_pc]`; opcodes `0x8000000x` | high |
 | `0x80227030` | `step_enter_run` | resets on mode 0, then `func_802282D8` | high |
 | `0x802329D0` | `step_alloc_0x960` | malloc + bzero, stored at `D_802395D0` | high |
+| `0x80080DC0` | `audio_task_init` | fills the static `OSScTask` at `0x800C4B50`: `OSTask` at `+0x10` type 2 (`M_AUDTASK`), boot ucode `0x8009ECB0`/`0xD0`, `ucode_data_size` `0x800`; `msgQ` (`+0x50`) = `0x800C49E8` (`0x80080DEC`), `msg` (`+0x54`) = 0 | high |
+| `0x80080F78` | `audio_task_submit` | copies `data_ptr`/`data_size`/`ucode`/`ucode_data` from `a0` into the static task, `osSendMesg(0x800E8B14, 0x800C4B50, BLOCK)` (`0x80080FD4`), then `osRecvMesg(0x800C49E8, NULL, BLOCK)` (`0x80080FE8`). Every task's command list is the one buffer `0x80136110`, so the wait is what keeps the CPU from rewriting a list the RSP is still reading | high |
+| `0x80089200` | `audio_task_sched` | thread loop on `osRecvMesg(0x800E8B14)`; with a gfx task running it calls `osSpTaskYield` (`0x80089284`) and waits on the SP-done queue `0x800E8BBC`; runs the audio task, waits on `0x800E8BBC`, restarts a yielded gfx task or re-posts the SP message it consumed (`0x80089310`), then replies `osSendMesg(task+0x50, task+0x54, BLOCK)` (`0x80089324`) | high |
+| `0x800893C0` | `gfx_task_sched` | thread loop on `0x800E8B4C`; hands the task to the RSP thread's queue `0x800B9C40`, waits on SP-done `0x800E8BBC`, then on DP-done `0x800E8BF4` unless task flag `0x2`, replies to `task+0x50` | medium |
 | `0x8009DAF4` | `asset_size` | reads the u32 at `(id & 0x0FFFFFFF) + 0x594250` | high |
 | `0x8009DBB8` | `asset_load` | copies the payload (that u32 bytes) from `rom + 4` | high |
 | `0x8007A7E0` | `lz_size` | returns the u32 at the payload start (decompressed size) | high |

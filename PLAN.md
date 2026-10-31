@@ -44,7 +44,7 @@ ending and the attract loop.
   double-clicked launch still fills `error.log`'s captured sections on a crash.
 - **Releases:** the last published release is v0.8.3. None of the 2026-10-30
   work is released; `make release` needs write access to the private data
-  repository (see "Releases" below).
+  repository.
 
 ---
 
@@ -53,87 +53,37 @@ ending and the attract loop.
 Ordered by how much each item affects a Windows player. Each item says what is
 known and what the next step is.
 
-### Player-facing
-
-1. **Check HD on the world map, the mission field and in battle.** Presented
-   frames were compared at `native` and `auto` for the intro, publishers, title,
-   attract loop and the New Game courtyard movie, and the developer approved
-   them. The 3D scenes and the map unit sprites were not captured at HD. RT64's
-   framebuffer tile copies (the map unit head sprite path) are the most likely
-   place for an HD-only defect. Next step: the developer plays those scenes at
-   the default resolution and saves a screenshot of anything wrong.
-2. **MSAA.** Still behind `OGRE_DISPLAY_EXPERIMENTS=1`. A run with it showed
-   artifacts that were never characterised. Next step: capture one 3D screen at
-   MSAA off and `4x` and decide whether to fix or drop the row.
-3. **Credits screen (scene `0x11`) background artifacts.** The scrolling credits
-   play; some njpeg/S2DEX2 backgrounds show artifacts. Not investigated. Needs a
-   save near the ending.
-4. **GAME SPEED tops out near 4x.** At the title the display-list rate is 29 /
-   59 / 119 / 111 per second at 1x / 2x / 4x / 8x. The limit is downstream of
-   RT64's workload and present queues (the GPU workload or the present). Next
-   step: find which one, then decide whether presents can be dropped at speed.
-5. **The speed badge is not drawn in fullscreen and hides when the pointer is
-   over it.** It is a second borderless SDL window; fullscreen has no room for
-   it and SDL2 has no click-through hit test. A badge that survives both has to
-   be drawn inside RT64's frame.
-
 ### Robustness
 
-6. **Latent static backlog.** `tools/stubmap.py report` classifies 986 static
-    dispatch targets (130 missing-function candidates, 152 bank-selection
-    candidates); the main unit makes 951 direct calls into swappable RAM across
-    236 targets (`make cross-bank-check`). `cross_bank.py dispatch --only` fixes
-    one target at a time. 288 indirect `jalr` sites are outside any static
-    measurement; a run's stub log is the only check.
-7. **Audio auto-response shim.** The runtime answers the audio queue
-    `0x800C49E8` with a dummy message when it blocks
-    (`[dbg] audio-response queue … queuing dummy response`). Firing the real
-    `OS_EVENT_AI` when a buffer drains would let it be deleted.
-8. **A NULL-handle check in `tools/smoke-dist.sh`.** The package check runs the
+1. **A NULL-handle check in `tools/smoke-dist.sh`.** The package check runs the
     app with inherited handles only. A launch with no standard handles (the
-    Explorer case) should assert that `error.log` captures the boot line. Use an
-    Explorer launch; other no-handle launch styles get quarantined by Defender.
-9. **A hang dump with no periodic cost.** The `[snap]` queue snapshot is off by
-    default (`OGRE_SNAP`), so a hang prints nothing. A frame-counter-triggered
-    dump (no frame advanced for ~3 s) would keep the diagnosis.
-10. **`tools/dlgaps.py` assumes a 1500 ms period.** A stall that stretches the
-    period reads as "not periodic". Estimate the period from the spike spacing.
-11. **Framebuffer tile-copy freshness.** RT64 serves a tile copy only when the
+    Explorer case) should assert that `error.log` captures the boot line.
+    `main.cpp` reopens handle-less `stdout`/`stderr` on `NUL` as fds 1 and 2,
+    and `OGRE_CRASH_TEST=segv` writes the report the check reads. Open problem:
+    `explorer.exe <exe>` starts the exe from the running Explorer, so it does
+    not inherit the script's environment (`OGRE_CRASH_TEST`, `OGRE_PREF_DIR`);
+    a User environment variable set for the launch and removed afterwards is
+    the known workaround. Other no-handle launch styles get quarantined by
+    Defender. Next step: decide whether the check runs on the hosted runner
+    (no Explorer session there) or only locally.
+2. **Framebuffer tile-copy freshness.** RT64 serves a tile copy only when the
     source framebuffer was written in the current workload. The writers of two
     leftover framebuffer records (`0x802E6840`, `0x32AF40`) are not identified,
-    and a test against `fb->RAMHash` alone is unreliable.
-
-### Releases
-
-12. **Ship the 2026-10-30 work.** A release needs the generated-code bundle in
-    the private data repository regenerated for the commit being built
-    (`make release`; the hosted Windows job refuses a bundle whose recorded
-    commit differs). The `gh` account on the developer's Windows machine
-    (`frankjniu`) has pull access to the public repository only. Next step:
-    give it access to the data repository, or run `make release` where the
-    access exists. The Windows job's smoke test now fails on an empty log, which
-    the 2026-10-30 stdio fix provides.
+    and a test against `fb->RAMHash` alone is unreliable. `0x2E6840` is one of
+    the world map's three 640-wide targets (AGENTS.md). Next step: an
+    `OGRE_DL_TRACE` run on the world map from a save, logging each
+    `G_SETCIMG` address, to name the writer of `0x32AF40`.
 
 ### Features and mods
 
-13. **True HD backgrounds.** `mods/backgrounds/` repaints the backdrop at the
+3. **True HD backgrounds.** `mods/backgrounds/` repaints the backdrop at the
     game's own resolution. Higher detail needs RT64 texture replacement keyed by
     the drawn texture's hash (`TextureCache::loadReplacementDirectory`). The
     four-chunk canvas layout is hardcoded to the cathedral's chunk sizes. See
     `docs/guides/hd-backgrounds.md`.
-14. **Item randomizer.** Map pickups and battle rewards are randomized and
-    verified. Open: the `+0x02` used-count correction has never run in game
-    (no acquisition inherited a non-zero count); hooks on streamed-bank
-    functions would let the mod hook the grant routine directly
-    (`docs/notes-bank-hooks.md`). A hook on `func_8016B774` crashes the save
-    load.
-15. **Controller Pak copy/backup** (battery ↔ Pak `Save`/`Load`/`Erase`). The
-    screen renders; the device half (`osPfs*`, a flat 32 KiB `.mpk`) is
-    implemented; the copy flow is deferred. Low priority (developer).
 
 ### Parked
 
-- Audio above 1x game speed is untested.
 - The `ESC` overlay does not pause the game (developer's choice).
 - Gamepad rebinding is verified by code reading only.
 - `0x801936A9`, the community's Chaos Frame address, is in the saved flags block
