@@ -84,7 +84,7 @@ the bank configs set `base_path: ../..`.
 
 ## AI disclaimer
 
-This project is mostly an experiment of checking "How far can DeepSeek go?". So far,
+This project is mostly an experiment of checking "How far can DeepSeek and Claude Code go?". So far,
 the results are quite impressive!
 
 ## Legal

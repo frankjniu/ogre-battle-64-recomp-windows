@@ -634,7 +634,7 @@ int main(int argc, char** argv) {
 
     // --- runtime configuration --------------------------------------------------
     recomp::Configuration cfg;
-    cfg.project_version = recomp::Version(0, 1, 0);
+    cfg.project_version = recomp::Version(0, 9, 0);
     cfg.window_handle = window_handle;
     cfg.rsp_callbacks = ogre::make_rsp_callbacks();
     cfg.renderer_callbacks = {.create_render_context = ogre::create_renderer};
