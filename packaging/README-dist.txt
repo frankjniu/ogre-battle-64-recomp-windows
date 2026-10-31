@@ -57,9 +57,10 @@ HOW TO PLAY
 2. The start screen appears:
 
        OGRE BATTLE 64: RECOMP
-       [ START GAME ] [ ROM ] [ MODS ] [ CONTROLS ] [ SETTINGS ]
+       [ MAIN ] [ MODS ] [ CONTROLS ] [ SETTINGS ] [ CHEATS ] [ DEBUG ]
 
-   - Select the **ROM** tab and press SPACE to pick your ROM, or
+   - On the **MAIN** tab, select the **ROM** row and press SPACE to pick your
+     ROM, or
    - drag the ROM file onto the window, or
    - just put the ROM in this folder and launch the app again (it finds
      `ogre64.z64`, or any `.z64`/`.n64`/`.v64` next to the executable).
@@ -95,26 +96,33 @@ START SCREEN
 ------------
 
 The start screen appears when no ROM is loaded, and whenever at least one mod is
-installed (so a shipped mod can always be turned off). It has five tabs:
+installed (so a shipped mod can always be turned off). It has six tabs:
 
-    [ START GAME ]   [x] Start Game starts the game. It reads [ ] and cannot be
-                     selected until a ROM is loaded.
-    [ ROM ]          [x] Loaded! and the ROM's file name, or [ ] No ROM.
-                     Selecting it opens the file picker; the chosen ROM comes
-                     back here as loaded, with START GAME ready.
+    [ MAIN ]         START GAME starts the game; it cannot be selected until a
+                     ROM is loaded. ROM shows the loaded ROM's file name, and
+                     selecting it opens the file picker. EXIT GAME quits.
     [ MODS ]         one row per installed mod, with its short description
     [ CONTROLS ]     one row per N64 button, showing the keyboard key and the
                      gamepad button bound to it, and what the button does
-    [ SETTINGS ]     GAME SPEED: [ ] 1  [ ] 2  [x] 4. The game runs that many
-                     times faster than real time; 1 is normal speed.
+    [ SETTINGS ]     GAME SPEED: 1, 2, 4 or 8. The game runs that many times
+                     faster than real time; 1 is normal speed. During play,
+                     = and - (or R3 on a gamepad) change it.
+                     WIDESCREEN: 16:9 on the mission field and in cutscene
+                     dialogues; other screens keep 4:3 with side bars.
+                     RESOLUTION: NATIVE (320x240), 2X, or AUTO (the largest
+                     whole multiple of 320x240 that fits the window).
                      CRT FILTER draws the picture like a CRT television:
                      HYLLIAN (sharp, lightest on the GPU), CRTS (balanced,
                      slight curve) or LOTTES (shadow mask, bloom and curve;
                      heaviest).
+                     WINDOW: windowed or fullscreen. SOUNDS and VOLUME.
+                     MOUSE ENABLED: the pointer drives the world map's and the
+                     mission field's cursors.
     [ CHEATS ]       MAX GOTH holds your goth at 9,999,999 and MAX ITEM COUNTS
                      holds every item you own at 99, for as long as the row is
                      ON. Saving while a cheat is ON keeps the cheated values in
                      your save.
+    [ DEBUG ]        the running game's Chaos Frame value.
 
     TAB / SHIFT+TAB  switch tab
     UP / DOWN        select a row
@@ -129,9 +137,9 @@ installed (so a shipped mod can always be turned off). It has five tabs:
                      number to select that speed, elsewhere to start
 
 Bindings are saved in `controls.cfg` in this folder, and the game speed in
-`settings.cfg`. **ESC** opens the same panel over the running game, with the ROM
-and MODS tabs disabled and CONTROLS, SETTINGS and CHEATS active, so bindings,
-settings and cheats can be changed mid-game; **ESC** closes it again.
+`settings.cfg`. **ESC** opens the same panel over the running game, so bindings,
+settings and cheats can be changed mid-game; the MODS tab is disabled there,
+because mods load before the game starts. **ESC** closes it again.
 
 During play, **F5** (quick save) copies your save, as of the last time you
 saved in the game, to a quick slot. **F9** (quick load), pressed twice, puts the
@@ -150,6 +158,9 @@ package carries the example mods:
 
     mods/skip-boot-logos.nrm    Skip Boot Logos (boots straight to the title)
     mods/exp-overflow.nrm       EXP Overflow (keeps a level-up's leftover EXP)
+    mods/item-randomizer.nrm    Item Randomizer (EXPERIMENTAL: an item won from
+                                an enemy unit or found on the map becomes a
+                                random item; back up your save before using it)
 
 They ship **off**, so the game plays exactly as it did on the console until you
 turn one on: open the **MODS** tab, select its row and press SPACE. The setting
@@ -184,7 +195,7 @@ into this folder, next to the save. The file holds the reason, the fault
 address, the N64 thread call chain and the last lines of the app's own log (the
 `[boot]`, `[bank]` and `[overlays]` lines). Attach the whole file to a bug report:
 
-    https://github.com/lfarroco/ogre-battle-64-decomp/issues
+    https://github.com/frankjniu/ogre-battle-64-recomp-windows/issues
 
 `error.log` is overwritten by the next crash. Closing the window normally writes
 nothing. A developer can also make the app crash on demand to check the file:
@@ -200,7 +211,7 @@ Linux, run the app from a terminal.
 Troubleshooting, build instructions from source, and the full list of
 environment options are in the repository:
 
-    https://github.com/lfarroco/ogre-battle-64-decomp
+    https://github.com/frankjniu/ogre-battle-64-recomp-windows
 
 See docs/guides/app-build.md there for the diagnostics toolkit.
 
