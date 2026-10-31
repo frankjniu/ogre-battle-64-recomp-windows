@@ -19,13 +19,13 @@
 //                pixels start at `state[0x74]`
 //
 // The current step and scene are read from the scripted-sequence words; the pack
-// maps (scene, step) to a PNG. Only the 320x240 pass is replaced, which is the
-// pass the cathedral backdrop uses (`docs/HANDOFF-2026-09-15-session50.md`,
-// `docs/guides/njpeg-backgrounds.md`).
+// maps (scene, step) to a PNG. Each of the four passes gets its rectangle of the
+// 496x384 canvas (`chunk_rect`; `docs/guides/hd-backgrounds.md`).
 //
-// The PNG is decoded once at startup, box-filtered to 320x240 and converted to
+// The PNG is decoded once at startup, box-filtered to the canvas and converted to
 // big-endian RGBA5551, then written over the pass's pixels in the runtime byte
-// order (`MEM_H`/`MEM_B` in `recomp.h`).
+// order (`MEM_H`/`MEM_B` in `recomp.h`). HD detail comes from the RT64 texture
+// pack in `<pack>/hd`, which `tools/backgrounds.py hd` cuts from the same PNG.
 
 #pragma once
 
@@ -44,5 +44,12 @@ void hd_backgrounds_init(const std::filesystem::path& pref_dir);
 // expand the scenes whose backdrop comes from the pack, so the replacement fills
 // the wide window instead of being pillarboxed (`widescreen.cpp`).
 bool hd_backgrounds_covers_scene(uint16_t scene);
+
+// The RT64 texture pack generated for the pack's backgrounds
+// (`tools/backgrounds.py hd`): `<pack>/hd` when the pack is loaded and that
+// folder holds an `rt64.json`, else empty. `OGRE_BG_HD=0` returns empty, which
+// keeps the game-resolution write and drops the HD strips. The renderer loads
+// it with `TextureCache::loadReplacementDirectory`.
+std::filesystem::path hd_backgrounds_texture_pack();
 
 }  // namespace ogre

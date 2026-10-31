@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #if !defined(__EMSCRIPTEN__)
@@ -167,6 +168,68 @@ std::vector<uint16_t> to_canvas_fit(const uint8_t* rgba, int sw, int sh) {
     return canvas;
 }
 
+// The strips the game draws the backdrop with, one G_LOADTILE per quad
+// (docs/guides/njpeg-backgrounds.md -> the pipeline, step 5): a 320-wide chunk
+// loads 6 rows every 5 rows, a 176-wide chunk 11 rows every 10. The chunks are
+// chunk_rect's, in pass order.
+struct StripChunk {
+    int x;
+    int y;
+    int w;
+    int h;
+    int stride;
+};
+
+constexpr StripChunk kStripChunks[] = {
+    {0, 0, 320, 240, 5},
+    {320, 0, 176, 240, 10},
+    {0, 239, 320, 144, 5},
+    {320, 239, 176, 144, 10},
+};
+
+// RT64 replaces a strip by the hash of its texels, so strips with the same
+// game-resolution pixels share one HD image (tools/backgrounds.py hd). This
+// makes every strip of the canvas unique, in strip order: a strip that repeats
+// an earlier one gets the lowest blue bit of one texel flipped, in its third
+// row. No other strip loads that row (neighbours share a strip's first and
+// last rows), and it is never canvas row 239, where the top and bottom chunks
+// meet. The first column that makes the strip unique is used, so every strip
+// carries at most one changed texel: a step of 1/31 in one channel, drawn only
+// when the HD strips are not loaded. tools/backgrounds.py repeats this pass,
+// so the pixels it checks are these.
+void make_strips_unique(std::vector<uint16_t>& canvas) {
+    std::unordered_set<std::string> seen;
+    for (const StripChunk& c : kStripChunks) {
+        for (int top = 0; top < c.h; top += c.stride) {
+            const int rows = std::min(c.stride + 1, c.h - top);
+            const int mark_row = c.y + top + std::min(2, rows - 1);
+            auto key = [&]() {
+                std::string k;
+                k.reserve(8 + size_t(rows) * c.w * 2);
+                k += std::to_string(c.w) + "x" + std::to_string(rows) + ":";
+                for (int r = 0; r < rows; ++r) {
+                    const uint16_t* row = &canvas[size_t(c.y + top + r) * kCanvasW + c.x];
+                    k.append(reinterpret_cast<const char*>(row), size_t(c.w) * sizeof(uint16_t));
+                }
+                return k;
+            };
+            std::string k = key();
+            int col = -1;
+            while (!seen.insert(k).second) {
+                uint16_t* row = &canvas[size_t(mark_row) * kCanvasW + c.x];
+                if (col >= 0) {
+                    row[col] ^= 0x0002;  // undo the previous try
+                }
+                if (++col >= c.w) {
+                    break;
+                }
+                row[col] ^= 0x0002;
+                k = key();
+            }
+        }
+    }
+}
+
 // Load one image file into the canvas form, or leave `out` empty. `fit` picks
 // the aspect-preserving mapping used for the widescreen variant.
 bool load_canvas(const std::filesystem::path& png, const char* what, bool fit,
@@ -183,6 +246,7 @@ bool load_canvas(const std::filesystem::path& png, const char* what, bool fit,
         return false;
     }
     out = fit ? to_canvas_fit(data, w, h) : to_canvas(data, w, h);
+    make_strips_unique(out);
     stbi_image_free(data);
     std::fprintf(stderr, "[hdbg]   %-13s <- %s (%dx%d -> %s)\n", what,
                  png.filename().string().c_str(), w, h,
@@ -279,10 +343,12 @@ const Entry* find_entry(uint16_t scene, uint16_t next_scene, uint16_t step) {
 
 // Which part of the canvas a readback pass wrote, from the pass's dimensions.
 // The four passes are the four chunks of the 'B5' asset in order, and the sizes
-// name the column and the row of the tiling above. The x offsets are 1 less than
-// the column width in the asset's own header (a 1px overlap), and the y offsets
-// are 1 less than the row height; the rounded values below are what the draw
-// uses.
+// name the column and the row of the tiling above. The values are where the
+// game draws each chunk, measured with a pack whose pixels encode their canvas
+// row and column: the right chunks start at column 320, and the bottom chunks
+// start at row 239, over the top chunks' last row (the asset's header spaces the
+// rows 239 apart and the columns 319 apart). With 240 the screen skipped canvas
+// row 239, a one-row break across the whole backdrop.
 bool chunk_rect(uint32_t w, uint32_t h, int& x, int& y) {
     if (w == 320 && h == 240) {
         x = 0;
@@ -294,11 +360,11 @@ bool chunk_rect(uint32_t w, uint32_t h, int& x, int& y) {
     }
     else if (w == 320 && h == 144) {
         x = 0;
-        y = 240;
+        y = 239;
     }
     else if (w == 176 && h == 144) {
         x = 320;
-        y = 240;
+        y = 239;
     }
     else {
         return false;
@@ -464,6 +530,24 @@ void hd_backgrounds_init(const std::filesystem::path& pref_dir) {
 }
 
 }  // namespace ogre
+
+std::filesystem::path ogre::hd_backgrounds_texture_pack() {
+    if (!g_pack.loaded) {
+        return {};
+    }
+    if (const char* value = std::getenv("OGRE_BG_HD"); value != nullptr &&
+        (std::strcmp(value, "0") == 0 || std::strcmp(value, "off") == 0 ||
+         std::strcmp(value, "false") == 0 || std::strcmp(value, "no") == 0)) {
+        std::fprintf(stderr, "[hdbg] texture pack disabled (OGRE_BG_HD=%s)\n", value);
+        return {};
+    }
+    const std::filesystem::path hd = g_pack.dir / "hd";
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(hd / "rt64.json", ec)) {
+        return {};
+    }
+    return hd;
+}
 
 bool ogre::hd_backgrounds_covers_scene(uint16_t scene) {
     for (const Entry& e : g_pack.entries) {

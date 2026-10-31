@@ -28,6 +28,7 @@
 // an identical redefinition is harmless.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <io.h>
 #endif
 
 #include "recomp.h"
@@ -37,6 +38,9 @@
 
 #include "game.hpp"
 #include "crash_log.hpp"
+#include "cheats.hpp"
+#include "quick_save.hpp"
+#include "hang_watch.hpp"
 #include "hd_backgrounds.hpp"
 #include "launcher.hpp"
 #include "input_map.hpp"
@@ -96,6 +100,24 @@ bool mod_test_run() {
     return value != nullptr && value[0] != '\0' && strcmp(value, "0") != 0;
 }
 
+// `OGRE_RELAUNCH=1`: this process was started by a quick load (quick_save.hpp)
+// and boots past the start screen with the mods as they stand, as the run that
+// started it did. Read once and cleared, so a process this one starts later
+// (the next quick load sets it again) does not inherit it by accident.
+bool relaunched_by_quick_load() {
+    static const bool relaunched = [] {
+        const char* value = getenv("OGRE_RELAUNCH");
+        const bool set = value != nullptr && value[0] != '\0' && strcmp(value, "0") != 0;
+#if defined(_WIN32)
+        _putenv("OGRE_RELAUNCH=");
+#else
+        unsetenv("OGRE_RELAUNCH");
+#endif
+        return set;
+    }();
+    return relaunched;
+}
+
 }  // namespace
 
 // Frames the game must have produced before an interactive exit goes through the
@@ -122,10 +144,16 @@ static void update_gfx(void*) {
     // The Esc overlay owns a window of its own; drawing it here keeps it on the
     // main thread, where SDL's Cocoa backend requires window calls to happen.
     ogre::overlay_render();
+    // The CHEATS tab's toggles, held every frame while ON (cheats.hpp).
+    ogre::cheats_tick();
+    // F5 / F9 quick save: a pending return to the title, and scripted keys.
+    ogre::quick_save_tick();
     // The game-speed badge ("2x", "4x", ...) is a second window over the game
     // window's corner, on the same main thread, shown for a couple of seconds
     // after the multiplier changes.
     ogre::speed_badge_tick();
+    // A game that stops producing frames gets one error.log (hang_watch.cpp).
+    ogre::hang_watch_tick(ogre::g_platform.window);
     // The overlay's MAIN tab carries EXIT GAME. It records the request instead
     // of ending the run itself, so this one exit path prints the dumps below and
     // calls ultramodern::quit for both the close button and the panel. The
@@ -135,6 +163,11 @@ static void update_gfx(void*) {
     if (ogre::overlay_quit_requested()) {
         fprintf(stderr, "[overlay] EXIT GAME\n");
         fflush(stderr);
+        quit = true;
+    }
+    // A quick load restored the battery: end the run the same way, and main()
+    // starts the program again after the teardown (quick_save.hpp).
+    if (ogre::quick_save_restart_requested()) {
         quit = true;
     }
     if (quit) {
@@ -204,10 +237,39 @@ static void disable_console_quick_edit() {
     mode &= ~static_cast<DWORD>(ENABLE_QUICK_EDIT_MODE);
     SetConsoleMode(input, mode);
 }
+
+// True when `fd` already writes to a file or a pipe that the launching process
+// chose (`ogrebattle64.exe > run.log 2>&1`, a CI step, an IDE's output pane).
+static bool std_fd_is_redirected(int fd) {
+    const intptr_t handle = _get_osfhandle(fd);
+    if (handle == -1 || handle == -2) {  // -2 is the UCRT's _NO_CONSOLE_FILENO
+        return false;
+    }
+    const DWORD type = GetFileType(reinterpret_cast<HANDLE>(handle));
+    return type == FILE_TYPE_DISK || type == FILE_TYPE_PIPE;
+}
+
+// Reopens a standard stream on `path` so that it lands on its own descriptor
+// `fd`. A process started with no standard handles (an Explorer launch) gets
+// streams bound to no descriptor: the UCRT sets their `_file` to
+// _NO_CONSOLE_FILENO (-2) and keeps fds 0..2 open as placeholders, so freopen
+// would open fd 3 or higher, and everything printed would miss fd 1/2 and
+// crash_log's pipe on them. Closing the placeholder first makes `fd` the lowest
+// free descriptor, which freopen then takes (session 145).
+static void reopen_std_stream(FILE* stream, int fd, const char* path, const char* mode) {
+    if (_fileno(stream) < 0) {
+        _close(fd);
+    }
+    FILE* reopened = nullptr;
+    freopen_s(&reopened, path, mode, stream);
+}
 #endif
 
 int main(int argc, char** argv) {
 #if defined(_WIN32) && !defined(__MINGW32__)
+    // Read before AttachConsole, which is what retargets the streams below.
+    const bool stdout_redirected = std_fd_is_redirected(1);
+    const bool stderr_redirected = std_fd_is_redirected(2);
     // OGRE_CONSOLE=1: allocate a console and put the [boot] log in it. The
     // distributed build is a GUI-subsystem image, and AttachConsole below only
     // finds a console that the parent already has, so a double-click has none.
@@ -215,10 +277,9 @@ int main(int argc, char** argv) {
     // way to see where a boot stops (Zelda64Recomp's Windows build has the same
     // `--show-console` switch). It never runs unless the variable is set.
     if (getenv("OGRE_CONSOLE") != nullptr && GetConsoleWindow() == nullptr && AllocConsole()) {
-        FILE* console = nullptr;
-        freopen_s(&console, "CONIN$", "r", stdin);
-        freopen_s(&console, "CONOUT$", "w", stdout);
-        freopen_s(&console, "CONOUT$", "w", stderr);
+        reopen_std_stream(stdin, 0, "CONIN$", "r");
+        reopen_std_stream(stdout, 1, "CONOUT$", "w");
+        reopen_std_stream(stderr, 2, "CONOUT$", "w");
         SetConsoleOutputCP(CP_UTF8);
         disable_console_quick_edit();
     }
@@ -227,12 +288,26 @@ int main(int argc, char** argv) {
     // attaches only when the parent already has a console (a double-click from
     // Explorer has none, so it fails and is ignored). This runs before
     // crash_log::install so the capture forwards to the console like any other
-    // terminal.
+    // terminal. A stream the caller redirected to a file or a pipe keeps it:
+    // reopening it on CONOUT$ sent `> run.log 2>&1` to the console and left the
+    // file empty (session 119).
     else if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-        FILE* console = nullptr;
-        freopen_s(&console, "CONOUT$", "w", stdout);
-        freopen_s(&console, "CONOUT$", "w", stderr);
+        if (!stdout_redirected) {
+            reopen_std_stream(stdout, 1, "CONOUT$", "w");
+        }
+        if (!stderr_redirected) {
+            reopen_std_stream(stderr, 2, "CONOUT$", "w");
+        }
         disable_console_quick_edit();
+    }
+    // An Explorer launch has no standard handles and no console. Give both
+    // streams the null device on fds 1 and 2, so crash_log's capture has
+    // something to record and error.log carries the boot log (session 119).
+    if (_fileno(stdout) < 0) {
+        reopen_std_stream(stdout, 1, "NUL", "w");
+    }
+    if (_fileno(stderr) < 0) {
+        reopen_std_stream(stderr, 2, "NUL", "w");
     }
 #endif
 
@@ -279,9 +354,21 @@ int main(int argc, char** argv) {
         return EXIT_SUCCESS;
     }
 
-    // OGRE_CRASH_TEST=<segv|bus|abrt|fpe|ill>: raise that signal now, so a
-    // packaged build's error.log can be checked without provoking a real crash.
-    if (const char* crash = getenv("OGRE_CRASH_TEST")) {
+    // OGRE_CRASH_TEST=<segv|bus|abrt|fpe|ill>, or the argument
+    // --crash-test=<name>: raise that signal now, so a packaged build's
+    // error.log can be checked without provoking a real crash. The argument is
+    // for a launch that cannot carry an environment variable: Explorer starts a
+    // shortcut's target with Explorer's own environment, and that launch is the
+    // only one with no standard handles (tools/smoke-dist.sh, check 5).
+    const char* crash = getenv("OGRE_CRASH_TEST");
+    const char* crash_source = "OGRE_CRASH_TEST";
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--crash-test=", 13) == 0) {
+            crash = argv[i] + 13;
+            crash_source = "--crash-test";
+        }
+    }
+    if (crash != nullptr) {
         int sig = 0;
         if (strcmp(crash, "segv") == 0) sig = SIGSEGV;
         else if (strcmp(crash, "abrt") == 0) sig = SIGABRT;
@@ -291,7 +378,7 @@ int main(int argc, char** argv) {
         else if (strcmp(crash, "bus") == 0) sig = SIGBUS;
 #endif
         if (sig != 0) {
-            fprintf(stderr, "[boot] OGRE_CRASH_TEST=%s: raising signal %d\n", crash, sig);
+            fprintf(stderr, "[boot] crash test %s=%s: raising signal %d\n", crash_source, crash, sig);
             // Let the capture threads drain the line above into the ring before
             // the report is written; otherwise the smoke test's check of the
             // report races them.
@@ -299,6 +386,16 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             std::raise(sig);
         }
+        else if (crash_source[0] == '-') {
+            // An unknown name in the argument must not fall through to the ROM
+            // selection, which reads argv[1] as the ROM path.
+            fprintf(stderr, "[boot] --crash-test=%s: unknown signal name\n", crash);
+            return EXIT_FAILURE;
+        }
+    }
+
+    if (relaunched_by_quick_load()) {
+        fprintf(stderr, "[boot] started by a quick load (F9)\n");
     }
 
     // --- SDL + window --------------------------------------------------------
@@ -481,7 +578,9 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (rom_path.empty() || (!installed_mods.empty() && !mod_test_run()) || launcher_forced()) {
+    if (rom_path.empty() ||
+        (!installed_mods.empty() && !mod_test_run() && !relaunched_by_quick_load()) ||
+        launcher_forced()) {
         // The start screen is the whole interface: it returns the path of a ROM
         // it has already validated, or empty if the user closed the window.
         //
@@ -583,6 +682,11 @@ int main(int argc, char** argv) {
     ogre::overlay_shutdown();
     ogre::speed_badge_shutdown();
     ogre::shutdown_sdl(ogre::g_platform);
+    // F9 quick load: start the program again, now that this one's window and
+    // runtime are gone (quick_save.hpp).
+    if (ogre::quick_save_restart_requested()) {
+        ogre::quick_save_relaunch();
+    }
     // The runtime does not join the game's own threads, so they are still
     // running recompiled code here. Running the C++ static destructors (what
     // `return` does next) with them live is a race, and it is what made closing

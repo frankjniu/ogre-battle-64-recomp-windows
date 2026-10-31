@@ -30,7 +30,7 @@ Usage:
     tools/ogre_frame.py <dump> --scan                       # every PLausible DL root
 
 `--log` reads the `[renderer] display list N ... data=0x...` lines the app
-prints, which name the root display list of a frame. The scene's display lists
+prints with `OGRE_DL_TRACE=1`, which name the root display list of a frame. The scene's display lists
 are double buffered, so the log's last few roots are the ones to try, and the
 tool renders them all so the frame nearest the press can be picked by eye.
 
@@ -48,6 +48,9 @@ import sys
 import zlib
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from rdram import load_image  # noqa: E402
+
 RDRAM_SIZE = 0x800000
 W, H = 320, 240
 
@@ -64,6 +67,8 @@ OP_DL = 0xDE
 OP_ENDDL = 0xDF
 OP_MOVEWORD = 0xDB
 OP_BRANCH_Z = 0x04
+OP_SETOTHERMODE_H = 0xE3
+OP_RDPSETOTHERMODE = 0xEF
 
 
 class Image:
@@ -99,14 +104,20 @@ class Tile:
 
 class Draw:
     __slots__ = ("at", "tile", "fmt", "siz", "line", "palette", "ulx", "uly", "lrx", "lry",
-                 "s", "t", "dsdx", "dtdy", "src", "pal", "flip", "uls", "ult", "lrs", "lrt")
+                 "s", "t", "dsdx", "dtdy", "src", "pal", "flip", "uls", "ult", "lrs", "lrt",
+                 "q", "othermode_h")
 
     def key(self):
         return (self.ulx, self.uly, self.lrx, self.lry, self.src, self.pal, self.s, self.t)
 
 
-def walk(img: Image, start: int, limit: int = 3000, depth: int = 0):
-    """Decode the display list at `start`; return the draws it emits."""
+def walk(img: Image, start: int, limit: int = 20000, depth: int = 0, mode: list | None = None):
+    """Decode the display list at `start`; return the draws it emits.
+
+    `mode` is a one-element list holding the RDP's othermode high word, shared
+    with the lists this one calls so a mode set in a callee stays set."""
+    if mode is None:
+        mode = [0]
     tiles = [Tile() for _ in range(8)]
     tmem_src: dict[int, int] = {}
     tlut_src: dict[int, int] = {}
@@ -159,6 +170,8 @@ def walk(img: Image, start: int, limit: int = 3000, depth: int = 0):
             d.uls, d.ult, d.lrs, d.lrt = t.uls, t.ult, t.lrs, t.lrt
             d.ulx, d.uly = p0(w1, 12, 12) // 4, p0(w1, 0, 12) // 4
             d.lrx, d.lry = p0(w0, 12, 12) // 4, p0(w0, 0, 12) // 4
+            d.q = (p0(w1, 12, 12), p0(w1, 0, 12), p0(w0, 12, 12), p0(w0, 0, 12))
+            d.othermode_h = mode[0]
             d.s, d.t = sext((st >> 16) & 0xFFFF, 16), sext(st & 0xFFFF, 16)
             d.dsdx, d.dtdy = sext((ds >> 16) & 0xFFFF, 16), sext(ds & 0xFFFF, 16)
             d.flip = (op == OP_TEXRECTFLIP)
@@ -168,9 +181,20 @@ def walk(img: Image, start: int, limit: int = 3000, depth: int = 0):
             d.pal = tlut_src[max(cands)] if cands else None
             draws.append(d)
             a += 24
+        elif op == OP_SETOTHERMODE_H:
+            # F3DEX2: w0 bits 8..15 = 32 - shift - len, bits 0..7 = len - 1.
+            length = p0(w0, 0, 8) + 1
+            shift = 32 - p0(w0, 8, 8) - length
+            if 0 <= shift < 32:
+                mask = ((1 << length) - 1) << shift
+                mode[0] = (mode[0] & ~mask & 0xFFFFFFFF) | (w1 & mask)
+            a += 8
+        elif op == OP_RDPSETOTHERMODE:
+            mode[0] = w0 & 0x00FFFFFF
+            a += 8
         elif op == OP_DL:
             if depth < 8:
-                draws.extend(walk(img, w1, limit, depth + 1))
+                draws.extend(walk(img, w1, limit, depth + 1, mode))
             a += 8
         elif op == OP_ENDDL:
             break
@@ -308,7 +332,7 @@ def main() -> int:
     ap.add_argument("--scan", action="store_true", help="try every SETTIMG-adjacent address as a root")
     args = ap.parse_args()
 
-    img = Image(args.dump.read_bytes())
+    img = Image(load_image(args.dump))
     if len(img.d) != RDRAM_SIZE:
         print(f"{args.dump}: {len(img.d)} bytes, expected {RDRAM_SIZE}", file=sys.stderr)
         return 2
@@ -340,11 +364,18 @@ def main() -> int:
         if args.draws:
             print(f"== {name} ({len(uniq)} draws)")
             for d in uniq:
+                # `q` is the rectangle in pixels with the quarter-pixel fraction
+                # kept; `cyc` is the RDP cycle type (0 1-cycle, 1 2-cycle,
+                # 2 copy, 3 fill) and `filt` the texture filter (0 point,
+                # 2 bilinear, 3 average), both from the othermode high word.
+                q = ",".join(f"{v / 4:g}" for v in d.q[:2]) + ".." + ",".join(f"{v / 4:g}" for v in d.q[2:])
                 print(f"  {d.at:08X} rect={d.ulx},{d.uly}..{d.lrx},{d.lry} tile={d.tile} "
                       f"fmt={d.fmt} siz={d.siz} line={d.line} pal={d.palette} "
                       f"s={d.s} t={d.t} dsdx={d.dsdx} dtdy={d.dtdy} "
                       f"src={('0x%08X' % d.src) if d.src else '-'} "
-                      f"tlut={('0x%08X' % d.pal) if d.pal else '-'}")
+                      f"tlut={('0x%08X' % d.pal) if d.pal else '-'} "
+                      f"q={q} cyc={p0(d.othermode_h, 20, 2)} filt={p0(d.othermode_h, 12, 2)} "
+                      f"win={d.uls / 4:g},{d.ult / 4:g}..{d.lrs / 4:g},{d.lrt / 4:g}")
             continue
         buf, painted = composite(img, uniq, scale=args.scale)
         if args.out is None:

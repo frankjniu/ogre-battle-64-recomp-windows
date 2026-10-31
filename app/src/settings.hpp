@@ -29,7 +29,9 @@
 //   changed under the Esc overlay takes effect on the next frame. `widescreen.cpp`
 //   owns `ar_option` and this file owns `res_option`, `msaa_option` and
 //   `wm_option`; each writer starts from the live config, so neither loses the
-//   other's value.
+//   other's value. CRT FILTER sits between RESOLUTION and MSAA; it is not part
+//   of `GraphicsConfig`, and the renderer polls it every frame
+//   (`crt_filter_applied`).
 // * AUDIO: SOUNDS and VOLUME.
 // * INPUT: MOUSE ENABLED, off by default, which is what lets the pointer drive
 //   the world map's and the mission field's cursors. See `MouseMode` below.
@@ -118,28 +120,27 @@ void set_widescreen_mode(WidescreenMode mode);
 // `right_text`; the drawn row uses the panel's own radio layout.
 std::string widescreen_mode_text();
 
-// RESOLUTION and MSAA are experimental and shipped behind a flag. Both are
-// implemented and reach RT64, but a player run with them produced visual
-// artifacts (developer, session 121), so they are off and their rows are absent
-// from the SETTINGS tab unless `OGRE_DISPLAY_EXPERIMENTS=1` asks for them. The
-// gate also accepts a set `OGRE_RESOLUTION` or `OGRE_MSAA`, so the debug
-// spellings keep working. While it is off the two values are not applied at all
-// (native resolution, no antialiasing) and the values already in
-// `settings.cfg` are kept for a later run with the flag on.
+// MSAA is experimental and shipped behind a flag. It is implemented and reaches
+// RT64, but a player run with it and RESOLUTION produced visual artifacts
+// (developer, session 121), so it is off and its row is absent from the SETTINGS
+// tab unless `OGRE_DISPLAY_EXPERIMENTS=1` asks for it. The gate also accepts a set
+// `OGRE_MSAA`, so the debug spelling keeps working. While it is off the value is
+// not applied at all and the value already in `settings.cfg` is kept for a later
+// run with the flag on. RESOLUTION left the gate in session 145.
 bool display_experiments_enabled();
 
 // The RESOLUTION row: how many pixels RT64 renders before it scales the picture
 // to the window. `Native` is the game's own target (320x240), which is what the
-// port drew before the row existed; `Double` renders at twice that in each axis;
+// port drew before session 145; `Double` renders at twice that in each axis;
 // `Auto` renders at the largest integer multiple of the native resolution that
-// fits the window (RT64's `WindowIntegerScale`). The names are the row's own;
+// fits the window (RT64's `WindowIntegerScale`): 9x on a 1080-point window at
+// 200% scaling, 4x on a 1080-pixel one. The names are the row's own;
 // `settings.cpp` maps them to `ultramodern::renderer::Resolution`.
 //
-// Experimental (`display_experiments_enabled`). `resolution_mode()` returns the
-// mode in use, which is `Native` while the gate is off.
+// `Auto` is the default (session 145), stored as `render_resolution`.
 //
 // The enumerators follow the row's display order, so `Native` is the marker of
-// the first option and the default.
+// the first option.
 enum class ResolutionMode {
     Native = 0,
     Double = 1,
@@ -163,11 +164,58 @@ void set_resolution_mode(ResolutionMode mode);
 // The RESOLUTION row's options as one string (radio markers and labels).
 std::string resolution_mode_text();
 
+// The CRT FILTER row: a CRT look drawn by RT64's VI pass. The frame is first
+// box-filtered to the game's own resolution (one texel per framebuffer pixel),
+// then one of three published CRT shaders draws it to the window
+// (tools/RT64/src/shaders/VideoInterfaceCrtPS.hlsl, ported from libretro's
+// slang-shaders with their default parameters):
+//
+// * `Hyllian`: crt-hyllian-fast (MIT). 4 texel reads per pixel: a sharp cubic
+//   filter, one beam per line, a magenta/green dot mask. The cheapest.
+// * `LottesFast`, shown as CRTS: crt-lottes-fast, Timothy Lottes' CRTS (public
+//   domain; the label is his name for it, and fits the row on one line). 8 reads
+//   per pixel: two sine-shaped beams, an RGB mask with a tone curve that keeps
+//   the brightness, slight curvature and rounded corners.
+// * `Lottes`: crt-lottes (public domain). 31 distinct reads per pixel: Gaussian
+//   beams over three lines, a strong shadow mask, bloom and curvature. The
+//   heaviest and the closest to an arcade monitor.
+//
+// `Off` is the default and draws the frame as before. Stored as `crt_filter`.
+enum class CrtFilterMode {
+    Off = 0,
+    Hyllian = 1,
+    LottesFast = 2,
+    Lottes = 3,
+};
+
+constexpr int kCrtFilterModeCount = 4;
+
+// "OFF", "HYLLIAN", "CRTS" or "LOTTES" for the radio row's `index`-th
+// option.
+const char* crt_filter_mode_label(int index);
+
+// The live mode.
+CrtFilterMode crt_filter_mode();
+
+// The index of the live mode in the radio row.
+int crt_filter_mode_index();
+
+// Stores `mode` and writes `<config>/settings.cfg`. The renderer picks it up on
+// its next frame.
+void set_crt_filter_mode(CrtFilterMode mode);
+
+// The CRT FILTER row's options as one string (radio markers and labels).
+std::string crt_filter_mode_text();
+
+// The live mode as an int, for the renderer thread (an atomic, as
+// `audio_gain_percent` is).
+int crt_filter_applied();
+
 // The MSAA row: RT64's multisample antialiasing on the render target. `Off` is
 // the default and what the port did before the row existed. MSAA affects 3D
 // edges only; the 2D screens are drawn as rectangles and are unchanged.
 //
-// Experimental, on the same gate as RESOLUTION. `antialias_mode()` returns `Off`
+// Experimental (`display_experiments_enabled`). `antialias_mode()` returns `Off`
 // while the gate is off.
 enum class AntialiasMode {
     Off = 0,
@@ -287,6 +335,21 @@ void set_mouse_mode(MouseMode mode);
 // The MOUSE ENABLED row's options as one string (radio markers and labels).
 std::string mouse_mode_text();
 
+// The CHEATS tab: MAX GOTH and MAX ITEM COUNTS, two OFF/ON rows. While ON,
+// cheats.cpp writes the value every frame (cheats.hpp has the addresses and
+// the evidence). Both are OFF by default and saved as `cheat_max_goth` and
+// `cheat_max_items`; `OGRE_CHEAT_MAX_GOTH` and `OGRE_CHEAT_MAX_ITEMS` override
+// them for one run. The rows use the OFF/ON labels of `mouse_mode_label`.
+bool cheat_max_goth();
+int cheat_max_goth_index();
+void set_cheat_max_goth(bool on);
+std::string cheat_max_goth_text();
+
+bool cheat_max_items();
+int cheat_max_items_index();
+void set_cheat_max_items(bool on);
+std::string cheat_max_items_text();
+
 // The VOLUME row: a slider over 0..100 percent, drawn as `kVolumeCells`
 // characters with the handle on one of them.
 constexpr int kVolumeStepPercent = 5;
@@ -319,7 +382,7 @@ std::filesystem::path settings_path(const std::filesystem::path& pref_dir);
 
 // Loads `<config>/settings.cfg` if it exists, applies the result to the
 // runtime, and remembers the directory for later writes. `OGRE_SPEED`,
-// `OGRE_WIDESCREEN`, `OGRE_RESOLUTION`, `OGRE_MSAA`, `OGRE_WINDOW`,
+// `OGRE_WIDESCREEN`, `OGRE_RESOLUTION`, `OGRE_CRT`, `OGRE_MSAA`, `OGRE_WINDOW`,
 // `OGRE_SOUNDS` and `OGRE_VOLUME` win over the file, and
 // `OGRE_DISPLAY_EXPERIMENTS` gates the two experimental rows. Call once at
 // startup, after `resolve_pref_dir()`.

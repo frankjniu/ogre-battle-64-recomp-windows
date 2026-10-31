@@ -29,7 +29,17 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-app="$root/build-app/ogrebattle64"
+# The app: OGRE_APP if set, else the first build that exists. On Windows `make
+# app` writes build-dist/ogrebattle64.exe.
+app=${OGRE_APP:-}
+if [ -z "$app" ]; then
+    for candidate in "$root/build-dist/ogrebattle64.exe" "$root/build-app/ogrebattle64.exe"                      "$root/build-dist/ogrebattle64" "$root/build-app/ogrebattle64"; do
+        if [ -f "$candidate" ]; then app=$candidate; break; fi
+    done
+fi
+# A python that is not the Windows Store stub (`python3` can be one).
+python=python3
+if ! python3 -c "" >/dev/null 2>&1; then python=python; fi
 default_rom="$root/assets/ogre64.z64"
 saves_dir="$root/assets/saves"
 
@@ -82,7 +92,7 @@ dst="$pref/saves/ogrebattle64-us-rev1.bin"
 mkdir -p "$pref/saves"
 
 if [ "$reset" = 1 ] || [ ! -f "$dst" ]; then
-    python3 "$root/tools/sramsave.py" import "$src" "$dst"
+    "$python" "$root/tools/sramsave.py" import "$src" "$dst"
 else
     echo "keeping the battery state already at $dst"
     echo "  (--reset re-imports $src and discards progress saved since)"
@@ -92,11 +102,21 @@ if [ "$import_only" = 1 ]; then
     exit 0
 fi
 
-if [ ! -x "$app" ]; then
-    echo "run-save.sh: $app is missing; build it with:" >&2
-    echo "  cmake -S app -B build-app -DCMAKE_BUILD_TYPE=Release && cmake --build build-app -j" >&2
+if [ -z "$app" ] || [ ! -f "$app" ]; then
+    echo "run-save.sh: no app build found (or OGRE_APP is wrong); build it with" >&2
+    echo "  make app   (see docs/guides/app-build.md -> \"Windows setup\")" >&2
     exit 1
 fi
+# The Windows exe needs RT64's shader compiler beside it to start in place.
+case "$app" in
+    *.exe)
+        app_dir=$(dirname -- "$app")
+        for dll in dxcompiler.dll dxil.dll; do
+            if [ ! -f "$app_dir/$dll" ] && [ -f "$app_dir/RT64/$dll" ]; then
+                cp "$app_dir/RT64/$dll" "$app_dir/$dll"
+            fi
+        done ;;
+esac
 
 # With no explicit app arguments, boot the usual ROM.
 if [ $# -eq 0 ] && [ -f "$default_rom" ]; then

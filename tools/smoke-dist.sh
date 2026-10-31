@@ -6,7 +6,7 @@
 #
 #   tools/smoke-dist.sh [dist-dir]        # default: dist/ogre-battle-64-recomp
 #
-# Three checks:
+# Five checks:
 #
 #   1. the app binary, its companion files and the packaged example mods exist;
 #      the mods are part of the package (`packaging/README-dist.txt` lists them)
@@ -26,8 +26,12 @@
 #      dialog or a hang cannot stall a release run. The same run asserts that the
 #      presented-frame capture is off, which is the v0.4.0 Windows crash
 #      (session 107);
+#   4. a run with OGRE_CRASH_TEST=segv writes an error.log that holds the
+#      [boot] line printed before the raise;
+#   5. Windows: the same report from a launch with no standard handles (a
+#      double-click), made through Explorer and a temporary shortcut.
 #
-# `SMOKE_TIMEOUT` (seconds, default 90) bounds check 3.
+# `SMOKE_TIMEOUT` (seconds, default 90) bounds checks 3 and 5.
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "$0")/.." && pwd)
@@ -67,16 +71,21 @@ if [ "$kind" = windows ]; then
     for dll in dxcompiler.dll dxil.dll msvcp140.dll vcruntime140.dll vcruntime140_1.dll; do
         [ -f "$dist/$dll" ] || fail "$dll is missing from the package"
     done
+    # A candidate counts only if it runs Python. On a stock Windows machine
+    # `python3` (and often `python`) is the Microsoft Store alias in WindowsApps:
+    # it exists on PATH, prints "Python was not found" and exits 9009, which
+    # failed this check before a real interpreter was tried.
     python=""
-    for candidate in python3 python py; do
-        if command -v "$candidate" >/dev/null 2>&1; then python="$candidate"; break; fi
+    for candidate in python3 python "py -3"; do
+        # shellcheck disable=SC2086
+        if $candidate -c "import sys" >/dev/null 2>&1; then python="$candidate"; break; fi
     done
     if [ -n "$python" ]; then
-        if [ "$python" = py ]; then python="py -3"; fi
+        echo "smoke-dist: PE import check with $python"
         # shellcheck disable=SC2086
         $python "$root/tools/pe_imports.py" "$dist" || fail "the package does not carry every DLL its binaries import"
     else
-        echo "smoke-dist: no python found; skipping the PE import check"
+        echo "smoke-dist: no working python (python3, python, py -3); skipping the PE import check"
     fi
 elif [ "$kind" = macos ] && command -v otool >/dev/null 2>&1; then
     extra=$(otool -L "$app" | tail -n +2 | grep -vE "System/Library|/usr/lib|@executable_path" || true)
@@ -123,15 +132,22 @@ log="$work/smoke.log"
 
 OGRE_SMOKE=1 OGRE_PREF_DIR="$work" "$app" >"$log" 2>&1 &
 pid=$!
-# A watchdog, because a loader failure can raise a dialog and wait for a click.
-( sleep "$timeout_seconds"; kill -9 "$pid" 2>/dev/null ) &
-watchdog=$!
+# A deadline, because a loader failure can raise a dialog and wait for a click.
+# It polls in this shell: a background `sleep` watchdog outlived its subshell
+# when that was killed, held the caller's output pipe open, and made every
+# piped run take the full SMOKE_TIMEOUT.
+deadline=$((SECONDS + timeout_seconds))
+while kill -0 "$pid" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+        kill -9 "$pid" 2>/dev/null || true
+        break
+    fi
+    sleep 0.2
+done
 set +e
 wait "$pid"
 code=$?
 set -e
-kill "$watchdog" 2>/dev/null || true
-wait "$watchdog" 2>/dev/null || true
 
 if [ "$code" -ne 0 ]; then
     echo "smoke-dist: the app exited $code" >&2
@@ -139,21 +155,24 @@ if [ "$code" -ne 0 ]; then
     [ -f "$work/error.log" ] && { echo "--- error.log ---"; cat "$work/error.log" >&2; }
     fail "the packaged binary did not reach main (or did not exit cleanly)"
 fi
-if [ -s "$log" ]; then
-    grep -q "\[smoke\] main reached" "$log" || {
-        cat "$log" >&2
-        fail "the app exited 0 without reaching the smoke marker"
+# An empty log fails. It is what a Windows build that reopens its stdio on the
+# parent's console produces, and every Windows release up to session 145 did:
+# the checks below were then skipped, so the session-107 capture assertion never
+# ran on the platform it was written for.
+[ -s "$log" ] || fail "the app exited 0 and wrote nothing to its redirected output"
+grep -q "\[smoke\] main reached" "$log" || {
+    cat "$log" >&2
+    fail "the app exited 0 without reaching the smoke marker"
+}
+# The presented-frame capture must be off unless the caller set the variable.
+# A stale entry made RT64 read a buffer destination as a texture on the first
+# present: the v0.4.0 Windows access violation (session 107).
+if [ -z "${OGRE_CAPTURE_PRESENT:-}" ]; then
+    grep -q "\[smoke\] capture path: (unset)" "$log" || {
+        grep "capture path" "$log" >&2 || true
+        fail "the presented-frame capture is on without OGRE_CAPTURE_PRESENT"
     }
-    # The presented-frame capture must be off unless the caller set the variable.
-    # A stale entry made RT64 read a buffer destination as a texture on the first
-    # present: the v0.4.0 Windows access violation (session 107).
-    if [ -z "${OGRE_CAPTURE_PRESENT:-}" ]; then
-        grep -q "\[smoke\] capture path: (unset)" "$log" || {
-            grep "capture path" "$log" >&2 || true
-            fail "the presented-frame capture is on without OGRE_CAPTURE_PRESENT"
-        }
-        echo "smoke-dist: the presented-frame capture is off by default"
-    fi
+    echo "smoke-dist: the presented-frame capture is off by default"
 fi
 echo "smoke-dist: the binary loaded, reached main and exited 0"
 
@@ -175,12 +194,55 @@ set -e
 if [ ! -f "$report_file" ]; then
     fail "OGRE_CRASH_TEST=segv wrote no error.log"
 fi
-if ! grep -q "OGRE_CRASH_TEST" "$report_file"; then
+if ! grep -q "crash test OGRE_CRASH_TEST=segv" "$report_file"; then
     echo "--- error.log ---" >&2
     cat "$report_file" >&2
     fail "the crash report did not contain the captured boot log"
 fi
 echo "smoke-dist: the crash report captured the boot log"
 rm -f "$report_file"
+
+# --- 5. Windows: the same report from a launch with no standard handles ------
+# A double-click starts the exe from Explorer with no standard handles and no
+# console. main.cpp then reopens stdout and stderr on NUL as fds 1 and 2; the
+# report holds the boot line only if those streams land on the descriptors that
+# crash_log's capture reads (session 145). Check 4 cannot see this, because its
+# launch passes the shell's handles. Explorer is the launcher used here: other
+# ways to start a process with no handles (cleared handles with
+# DETACHED_PROCESS, thread injection) were quarantined by Defender
+# (session 119). Explorer starts a shortcut's target with Explorer's own
+# environment, so the crash is requested by the --crash-test argument stored in
+# a temporary .lnk. A host with no Explorer shell (a service, a hosted runner)
+# skips the check.
+if [ "$kind" = windows ]; then
+    run_ps() { powershell.exe -NoProfile -NonInteractive -Command "$1" | tr -d '\r'; }
+    explorers=$(run_ps "@(Get-Process explorer -ErrorAction SilentlyContinue).Count")
+    if [ "${explorers:-0}" -eq 0 ]; then
+        echo "smoke-dist: no Explorer shell on this host; skipping the no-handle launch check"
+    else
+        app_win=$(cygpath -w "$app")
+        dist_win=$(cygpath -w "$dist")
+        lnk_win=$(cygpath -w "$work/crash-test.lnk")
+        run_ps "\$s = (New-Object -ComObject WScript.Shell).CreateShortcut('$lnk_win'); \$s.TargetPath = '$app_win'; \$s.Arguments = '--crash-test=segv'; \$s.WorkingDirectory = '$dist_win'; \$s.Save()"
+        [ -f "$work/crash-test.lnk" ] || fail "could not write the crash-test shortcut"
+        running="@(Get-Process ogrebattle64 -ErrorAction SilentlyContinue | Where-Object { \$_.Path -eq '$app_win' }).Count"
+        [ "$(run_ps "$running")" -eq 0 ] || fail "$app is already running; close it and run the check again"
+        rm -f "$report_file"
+        # explorer.exe hands the file to the running shell and exits 1.
+        explorer.exe "$lnk_win" || true
+        deadline=$((SECONDS + timeout_seconds))
+        until [ -f "$report_file" ] && [ "$(run_ps "$running")" -eq 0 ]; do
+            [ "$SECONDS" -lt "$deadline" ] || fail "the Explorer launch wrote no error.log within ${timeout_seconds}s"
+            sleep 1
+        done
+        if ! grep -q "crash test --crash-test=segv" "$report_file"; then
+            echo "--- error.log ---" >&2
+            cat "$report_file" >&2
+            fail "the crash report of a launch with no standard handles did not contain the boot log"
+        fi
+        echo "smoke-dist: the crash report of a launch with no standard handles captured the boot log"
+        rm -f "$report_file"
+    fi
+fi
 
 echo "smoke-dist: PASS"

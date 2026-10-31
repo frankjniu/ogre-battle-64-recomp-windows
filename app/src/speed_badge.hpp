@@ -24,6 +24,10 @@ void speed_badge_init(SDL_Window* game_window);
 // it as that window passes.
 void speed_badge_tick();
 
+// Shows `text` in the badge for the badge's hold time, replacing whatever it
+// shows (quick save uses it). Not drawn in fullscreen, like the speed readout.
+void speed_badge_message(const char* text);
+
 // Destroys the badge window and renderer.
 void speed_badge_shutdown();
 

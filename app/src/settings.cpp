@@ -33,12 +33,15 @@ std::filesystem::path g_pref_dir;
 // update_gfx callback) reads and writes them, so they need no lock.
 int g_game_speed = 1;
 WidescreenMode g_widescreen = WidescreenMode::Off;
-ResolutionMode g_resolution = ResolutionMode::Native;
+ResolutionMode g_resolution = ResolutionMode::Auto;
 AntialiasMode g_antialias = AntialiasMode::Off;
+CrtFilterMode g_crt = CrtFilterMode::Off;
 DisplayMode g_display = DisplayMode::Windowed;
 SoundMode g_sound = SoundMode::On;
 int g_volume = kVolumeDefaultPercent;
 MouseMode g_mouse = MouseMode::Off;
+bool g_cheat_max_goth = false;
+bool g_cheat_max_items = false;
 
 // Defined below, after the gate that decides whether the two experimental values
 // are applied at all.
@@ -97,6 +100,13 @@ void publish_audio_gain() {
     g_audio_gain.store(g_sound == SoundMode::On ? g_volume : 0, std::memory_order_relaxed);
 }
 
+// CRT FILTER for the renderer thread, which polls it every frame.
+std::atomic<int> g_crt_applied{0};
+
+void publish_crt() {
+    g_crt_applied.store(static_cast<int>(g_crt), std::memory_order_relaxed);
+}
+
 // Publishes MOUSE ENABLED to the two cursor modules. Both read the value on
 // their next frame, so a change under the Esc overlay takes effect without a
 // restart; `enabled()` in each module still lets `OGRE_MAP_CURSOR` /
@@ -132,11 +142,12 @@ std::string lowercase(std::string text) {
     return text;
 }
 
-// Whether RESOLUTION and MSAA are live this run. The two are experimental and
-// produced visual artifacts in a player run (developer, session 121), so they are
-// off unless the run asks for them: `OGRE_DISPLAY_EXPERIMENTS=1`, or a set
-// `OGRE_RESOLUTION`/`OGRE_MSAA`, which is a developer naming the feature
-// directly. One value per process, so it is read once.
+// Whether MSAA is live this run. It produced visual artifacts in a player run
+// together with RESOLUTION (developer, session 121) and has not been verified
+// since, so it is off unless the run asks for it: `OGRE_DISPLAY_EXPERIMENTS=1`,
+// or a set `OGRE_MSAA`, which is a developer naming the feature directly.
+// RESOLUTION left the gate in session 145. One value per process, so it is read
+// once.
 bool experiments_enabled() {
     static const bool enabled = [] {
         const char* flag = std::getenv("OGRE_DISPLAY_EXPERIMENTS");
@@ -146,23 +157,20 @@ bool experiments_enabled() {
                 return true;
             }
         }
-        // A developer naming one of the two values directly is an opt-in too, so
-        // the debug spellings keep working on their own.
-        for (const char* name : {"OGRE_RESOLUTION", "OGRE_MSAA"}) {
-            const char* value = std::getenv(name);
-            if (value != nullptr && value[0] != '\0') {
-                return true;
-            }
+        // A developer naming the value directly is an opt-in too, so the debug
+        // spelling keeps working on its own.
+        const char* value = std::getenv("OGRE_MSAA");
+        if (value != nullptr && value[0] != '\0') {
+            return true;
         }
         return false;
     }();
     return enabled;
 }
 
-// The mode RESOLUTION is in this run: the configured one when the experiments are
-// on, `Native` otherwise.
+// The mode RESOLUTION is in this run: always the configured one (session 145).
 ResolutionMode applied_resolution() {
-    return experiments_enabled() ? g_resolution : ResolutionMode::Native;
+    return g_resolution;
 }
 
 AntialiasMode applied_antialias() {
@@ -264,17 +272,20 @@ SoundMode parse_sound(const std::string& text) {
     return SoundMode::On;
 }
 
-// `resolution = native|2x|auto`. A missing or unparsable value is the default,
-// `native`, which is what every build before the row drew.
+// `render_resolution = native|2x|auto`. A missing or unparsable value is the
+// default, `auto`: render at the window's own pixel size (session 145). The key
+// was `resolution` while the row was hidden, and every file written then holds
+// `resolution = native`, which no player chose; that key is no longer read, so
+// those files get the new default.
 ResolutionMode parse_resolution(const std::string& text) {
-    const std::string value = lowercase(setting_value(text, "resolution"));
+    const std::string value = lowercase(setting_value(text, "render_resolution"));
+    if (value == "native" || value == "1x" || value == "1" || value == "original") {
+        return ResolutionMode::Native;
+    }
     if (value == "2x" || value == "2" || value == "double") {
         return ResolutionMode::Double;
     }
-    if (value == "auto" || value == "window" || value == "integer") {
-        return ResolutionMode::Auto;
-    }
-    return ResolutionMode::Native;
+    return ResolutionMode::Auto;
 }
 
 // `msaa = off|2x|4x|8x`. A missing or unparsable value is the default, `off`.
@@ -290,6 +301,34 @@ AntialiasMode parse_antialias(const std::string& text) {
         return AntialiasMode::Msaa8X;
     }
     return AntialiasMode::Off;
+}
+
+// `crt_filter = off|hyllian|crts|lottes` (`lottes-fast`, libretro's name for
+// CRTS, also parses). A missing or unparsable value is the default, `off`.
+CrtFilterMode parse_crt(const std::string& text) {
+    const std::string value = lowercase(setting_value(text, "crt_filter"));
+    if (value == "hyllian") {
+        return CrtFilterMode::Hyllian;
+    }
+    if (value == "lottes-fast" || value == "lottes_fast" || value == "lottesfast" ||
+        value == "crts") {
+        return CrtFilterMode::LottesFast;
+    }
+    if (value == "lottes") {
+        return CrtFilterMode::Lottes;
+    }
+    return CrtFilterMode::Off;
+}
+
+// The `crt_filter` value written for a mode.
+const char* crt_filter_key(CrtFilterMode mode) {
+    switch (mode) {
+        case CrtFilterMode::Off:        return "off";
+        case CrtFilterMode::Hyllian:    return "hyllian";
+        case CrtFilterMode::LottesFast: return "crts";
+        case CrtFilterMode::Lottes:     return "lottes";
+    }
+    return "off";
 }
 
 // `window = windowed|fullscreen`. A missing or unparsable value is the default,
@@ -311,6 +350,13 @@ MouseMode parse_mouse(const std::string& text) {
         return MouseMode::On;
     }
     return MouseMode::Off;
+}
+
+// `<key> = off|on` (or 0/1, false/true, no/yes) for a cheat row. A missing or
+// unparsable value is the default, off.
+bool parse_cheat(const std::string& text, const char* key) {
+    const std::string value = lowercase(setting_value(text, key));
+    return value == "on" || value == "1" || value == "true" || value == "yes";
 }
 
 // `volume = <n>` in percent, clamped to 0..100. A missing or unparsable value
@@ -359,8 +405,10 @@ void write_settings() {
         "game_speed = " + std::to_string(g_game_speed) + "\n"
         "# widescreen: off or on.\n"
         "widescreen = " + lowercase(widescreen_mode_label(static_cast<int>(g_widescreen))) + "\n"
-        "# resolution: native, 2x or auto.\n"
-        "resolution = " + lowercase(resolution_mode_label(static_cast<int>(g_resolution))) + "\n"
+        "# render_resolution: native (320x240), 2x, or auto (the window's pixel size).\n"
+        "render_resolution = " + lowercase(resolution_mode_label(static_cast<int>(g_resolution))) + "\n"
+        "# crt_filter: off, hyllian, crts or lottes.\n"
+        "crt_filter = " + std::string(crt_filter_key(g_crt)) + "\n"
         "# msaa: off, 2x, 4x or 8x.\n"
         "msaa = " + lowercase(antialias_mode_label(static_cast<int>(g_antialias))) + "\n"
         "# window: windowed or fullscreen.\n"
@@ -371,7 +419,11 @@ void write_settings() {
         "volume = " + std::to_string(g_volume) + "\n"
         "# mouse: off or on. on lets the pointer drive the world map's and the\n"
         "# mission field's cursors, including the click and the edge scroll.\n"
-        "mouse = " + lowercase(mouse_mode_label(static_cast<int>(g_mouse))) + "\n";
+        "mouse = " + lowercase(mouse_mode_label(static_cast<int>(g_mouse))) + "\n"
+        "# cheat_max_goth, cheat_max_items: off or on. While on, the value is held\n"
+        "# every frame (goth at 9,999,999; every owned item at 99).\n"
+        "cheat_max_goth = " + std::string(g_cheat_max_goth ? "on" : "off") + "\n"
+        "cheat_max_items = " + std::string(g_cheat_max_items ? "on" : "off") + "\n";
     std::fwrite(text.data(), 1, text.size(), file);
     std::fclose(file);
 }
@@ -576,6 +628,43 @@ std::string resolution_mode_text() {
     return radio_text(resolution_mode_label, kResolutionModeCount, resolution_mode_index());
 }
 
+const char* crt_filter_mode_label(int index) {
+    switch (static_cast<CrtFilterMode>(index)) {
+        case CrtFilterMode::Off:        return "OFF";
+        case CrtFilterMode::Hyllian:    return "HYLLIAN";
+        case CrtFilterMode::LottesFast: return "CRTS";
+        case CrtFilterMode::Lottes:     return "LOTTES";
+    }
+    return "OFF";
+}
+
+CrtFilterMode crt_filter_mode() {
+    return g_crt;
+}
+
+int crt_filter_mode_index() {
+    const int index = static_cast<int>(g_crt);
+    return index >= 0 && index < kCrtFilterModeCount ? index : -1;
+}
+
+void set_crt_filter_mode(CrtFilterMode mode) {
+    if (mode == g_crt) {
+        return;
+    }
+    g_crt = mode;
+    publish_crt();
+    write_settings();
+    std::fprintf(stderr, "[settings] crt filter %s\n", crt_filter_key(mode));
+}
+
+std::string crt_filter_mode_text() {
+    return radio_text(crt_filter_mode_label, kCrtFilterModeCount, crt_filter_mode_index());
+}
+
+int crt_filter_applied() {
+    return g_crt_applied.load(std::memory_order_relaxed);
+}
+
 const char* antialias_mode_label(int index) {
     switch (static_cast<AntialiasMode>(index)) {
         case AntialiasMode::Off:    return "OFF";
@@ -714,6 +803,48 @@ std::string mouse_mode_text() {
     return text;
 }
 
+bool cheat_max_goth() {
+    return g_cheat_max_goth;
+}
+
+int cheat_max_goth_index() {
+    return g_cheat_max_goth ? 1 : 0;
+}
+
+void set_cheat_max_goth(bool on) {
+    if (on == g_cheat_max_goth) {
+        return;
+    }
+    g_cheat_max_goth = on;
+    write_settings();
+    std::fprintf(stderr, "[settings] cheat max goth %s\n", on ? "on" : "off");
+}
+
+std::string cheat_max_goth_text() {
+    return radio_text(mouse_mode_label, kMouseModeCount, cheat_max_goth_index());
+}
+
+bool cheat_max_items() {
+    return g_cheat_max_items;
+}
+
+int cheat_max_items_index() {
+    return g_cheat_max_items ? 1 : 0;
+}
+
+void set_cheat_max_items(bool on) {
+    if (on == g_cheat_max_items) {
+        return;
+    }
+    g_cheat_max_items = on;
+    write_settings();
+    std::fprintf(stderr, "[settings] cheat max item counts %s\n", on ? "on" : "off");
+}
+
+std::string cheat_max_items_text() {
+    return radio_text(mouse_mode_label, kMouseModeCount, cheat_max_items_index());
+}
+
 int volume_percent() {
     return g_volume;
 }
@@ -763,12 +894,15 @@ void load_settings(const std::filesystem::path& pref_dir) {
     g_pref_dir = pref_dir;
     int speed = 1;
     WidescreenMode widescreen = WidescreenMode::Off;
-    ResolutionMode resolution = ResolutionMode::Native;
+    ResolutionMode resolution = ResolutionMode::Auto;
     AntialiasMode antialias = AntialiasMode::Off;
+    CrtFilterMode crt = CrtFilterMode::Off;
     DisplayMode display = DisplayMode::Windowed;
     SoundMode sound = SoundMode::On;
     int volume = kVolumeDefaultPercent;
     MouseMode mouse = MouseMode::Off;
+    bool max_goth = false;
+    bool max_items = false;
     bool have_file = false;
     const std::string text = read_file(settings_path(pref_dir), have_file);
     if (have_file) {
@@ -778,10 +912,13 @@ void load_settings(const std::filesystem::path& pref_dir) {
         widescreen = parse_widescreen(text);
         resolution = parse_resolution(text);
         antialias = parse_antialias(text);
+        crt = parse_crt(text);
         display = parse_display(text);
         sound = parse_sound(text);
         volume = parse_volume(text);
         mouse = parse_mouse(text);
+        max_goth = parse_cheat(text, "cheat_max_goth");
+        max_items = parse_cheat(text, "cheat_max_items");
     }
     if (const int env = env_game_speed(); env != 0) {
         // A developer run names its speed on the command line; the value is
@@ -801,8 +938,14 @@ void load_settings(const std::filesystem::path& pref_dir) {
     // OGRE_WINDOW=windowed|fullscreen: the same one-run rule, for the three
     // DISPLAY rows.
     if (const char* env = std::getenv("OGRE_RESOLUTION"); env != nullptr && env[0] != '\0') {
-        resolution = parse_resolution(std::string("resolution = ") + env);
+        resolution = parse_resolution(std::string("render_resolution = ") + env);
         std::fprintf(stderr, "[settings] OGRE_RESOLUTION=%s overrides the saved resolution\n", env);
+    }
+    // OGRE_CRT=off|hyllian|crts|lottes: the same rule, for the CRT
+    // FILTER row.
+    if (const char* env = std::getenv("OGRE_CRT"); env != nullptr && env[0] != '\0') {
+        crt = parse_crt(std::string("crt_filter = ") + env);
+        std::fprintf(stderr, "[settings] OGRE_CRT=%s overrides the saved crt filter\n", env);
     }
     if (const char* env = std::getenv("OGRE_MSAA"); env != nullptr && env[0] != '\0') {
         antialias = parse_antialias(std::string("msaa = ") + env);
@@ -829,38 +972,52 @@ void load_settings(const std::filesystem::path& pref_dir) {
         mouse = parse_mouse(std::string("mouse = ") + env);
         std::fprintf(stderr, "[settings] OGRE_MOUSE=%s overrides the saved mouse mode\n", env);
     }
+    // OGRE_CHEAT_MAX_GOTH and OGRE_CHEAT_MAX_ITEMS=off|on: the same one-run
+    // rule, for the CHEATS tab.
+    if (const char* env = std::getenv("OGRE_CHEAT_MAX_GOTH"); env != nullptr && env[0] != '\0') {
+        max_goth = parse_cheat(std::string("cheat_max_goth = ") + env, "cheat_max_goth");
+        std::fprintf(stderr, "[settings] OGRE_CHEAT_MAX_GOTH=%s overrides the saved cheat\n", env);
+    }
+    if (const char* env = std::getenv("OGRE_CHEAT_MAX_ITEMS"); env != nullptr && env[0] != '\0') {
+        max_items = parse_cheat(std::string("cheat_max_items = ") + env, "cheat_max_items");
+        std::fprintf(stderr, "[settings] OGRE_CHEAT_MAX_ITEMS=%s overrides the saved cheat\n", env);
+    }
     g_game_speed = speed;
+    g_cheat_max_goth = max_goth;
+    g_cheat_max_items = max_items;
     g_widescreen = widescreen;
     g_resolution = resolution;
     g_antialias = antialias;
+    g_crt = crt;
     g_display = display;
     g_sound = sound;
     g_volume = volume;
     g_mouse = mouse;
     publish_audio_gain();
     publish_graphics();
+    publish_crt();
     publish_mouse();
     ultramodern::set_speed_multiplier(static_cast<uint32_t>(speed));
-    // RESOLUTION and MSAA are experimental: report the value actually applied,
-    // and say why a configured one is not.
+    // MSAA is experimental: report the value actually applied, and say why a
+    // configured one is not.
     const bool experiments = experiments_enabled();
-    if (!experiments &&
-        (resolution != ResolutionMode::Native || antialias != AntialiasMode::Off)) {
+    if (!experiments && antialias != AntialiasMode::Off) {
         std::fprintf(stderr,
-                     "[settings] resolution %s and msaa %s are experimental and not applied; "
-                     "set OGRE_DISPLAY_EXPERIMENTS=1 to enable them\n",
-                     lowercase(resolution_mode_label(static_cast<int>(resolution))).c_str(),
+                     "[settings] msaa %s is experimental and not applied; "
+                     "set OGRE_DISPLAY_EXPERIMENTS=1 to enable it\n",
                      lowercase(antialias_mode_label(static_cast<int>(antialias))).c_str());
     }
     std::fprintf(stderr,
-                 "[settings] game speed x%d, widescreen %s, resolution %s, msaa %s, window %s, "
-                 "sounds %s, volume %d%%, mouse %s%s\n",
+                 "[settings] game speed x%d, widescreen %s, resolution %s, crt filter %s, "
+                 "msaa %s, window %s, sounds %s, volume %d%%, mouse %s, cheats goth %s items %s%s\n",
                  speed, lowercase(widescreen_mode_label(static_cast<int>(widescreen))).c_str(),
                  lowercase(resolution_mode_label(static_cast<int>(resolution_mode()))).c_str(),
+                 crt_filter_key(crt),
                  lowercase(antialias_mode_label(static_cast<int>(antialias_mode()))).c_str(),
                  lowercase(display_mode_label(static_cast<int>(display))).c_str(),
                  lowercase(sound_mode_label(static_cast<int>(sound))).c_str(), volume,
                  lowercase(mouse_mode_label(static_cast<int>(mouse))).c_str(),
+                 max_goth ? "on" : "off", max_items ? "on" : "off",
                  experiments ? " (display experiments on)" : "");
 }
 

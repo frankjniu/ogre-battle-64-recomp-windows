@@ -14,7 +14,13 @@ prints them at once, and — with `--check` — turns them into an assertion so
   `Failed to execute task`, `RSP ucode ... exited unexpectedly`;
 * the **bank loads** and the display-list cadence.
 
+The RSP task lines and the display-list lines are off in a stock run (session
+145). Run the game with `OGRE_RSP_LOG=1` for the task table, and with
+`OGRE_DL_TRACE=1` for the display-list cadence. `--check` fails on a log that
+has no RSP task lines, because its stubbed-task check would then check nothing.
+
 Usage:
+    OGRE_RSP_LOG=1 OGRE_DL_TRACE=1 ./build-app/ogrebattle64 rom.z64 > run.log 2>&1
     tools/runlog.py run.log                 # human summary
     tools/runlog.py run.log --json          # machine-readable
     tools/runlog.py run.log --check         # exit 1 on any problem (smoke test)
@@ -153,7 +159,7 @@ def print_human(s: dict, max_tasks: int, show_banks: bool) -> None:
         parts = ", ".join("type %s x%d" % (k, v) for k, v in s["tasks_per_type"].items())
         print("  %s" % parts)
     else:
-        print("  none")
+        print("  none: the log has no [rsp] task lines (run with OGRE_RSP_LOG=1)")
     if s["tasks_served"]:
         print("  served by: %s" % ", ".join("%s x%d" % (k, v)
                                             for k, v in sorted(s["tasks_served"].items())))
@@ -182,8 +188,8 @@ def print_human(s: dict, max_tasks: int, show_banks: bool) -> None:
               % (s["dl_count"], s["dl_first"][0], s["dl_first"][1] / 1000.0,
                  s["dl_last"][0], s["dl_last"][1] / 1000.0))
     else:
-        print("  no [renderer] display list lines (null build, or the game never "
-              "reached a frame)")
+        print("  no [renderer] display list lines (run with OGRE_DL_TRACE=1; a null "
+              "build prints none, and so does a run that never reached a frame)")
 
     if s["banks"]:
         print("\nbank loads  (%d)" % len(s["banks"]))
@@ -233,6 +239,10 @@ def main(argv: list[str] | None = None) -> int:
         if s["non_gfx_stubbed"]:
             print("\nFAIL: %d non-gfx task(s) served by the stub microcode "
                   "(their work never happens)" % s["non_gfx_stubbed"])
+            return 1
+        if not s["tasks"]:
+            print("\nFAIL: no [rsp] task lines, so the stubbed-task check checked "
+                  "nothing; run the game with OGRE_RSP_LOG=1")
             return 1
         print("\nPASS: no crash, no stub call, no unknown module, no bad RSP exit, "
               "no stubbed non-gfx task")

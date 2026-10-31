@@ -27,6 +27,8 @@
 
 #include "renderer.hpp"
 #include "gbi.hpp"
+#include "hd_backgrounds.hpp"
+#include "settings.hpp"
 #include "ram_key.hpp"
 #include "sdl_platform.hpp"
 #include "widescreen.hpp"
@@ -141,6 +143,37 @@ void set_application_user_config(RT64::Application* app, const ultramodern::rend
     app->userConfig.refreshRateTarget = config.rr_manual_value;
     app->userConfig.internalColorFormat = to_rt64(config.hpfb_option);
     app->userConfig.displayBuffering = RT64::UserConfiguration::DisplayBuffering::Triple;
+
+    // 2D rectangles sample at the console's pixel positions (RT64 `Original`).
+    // RT64's default `ScaledOnly` upscales every G_TEXRECT whose dsdx/dtdy is not
+    // exactly 1024 (`DrawCall::identityRectScale`). OB64 draws its dialogue box
+    // as three rectangles stretched by 1026..1169/1024 over a 16x61 window, and
+    // at 4x or more the sub-pixel samples of the last row and column reach one
+    // texel past the window the console reads: a broken row under the box's
+    // shadow and a sliver beside the portrait. With `Original` the shader snaps
+    // each rectangle's UV to the native pixel (`RasterPS.hlsl`, `lowResUV`).
+    // Triangles (the cutscene backdrop strips) are always upscaled, and HD
+    // replacement textures sample at full resolution either way.
+    // `OGRE_UPSCALE_2D=scaled|all` restores RT64's modes for an A/B.
+    {
+        auto mode = RT64::UserConfiguration::Upscale2D::Original;
+        const char* name = "original";
+        if (const char* env = getenv("OGRE_UPSCALE_2D")) {
+            if (strcmp(env, "scaled") == 0) {
+                mode = RT64::UserConfiguration::Upscale2D::ScaledOnly;
+                name = "scaled";
+            } else if (strcmp(env, "all") == 0) {
+                mode = RT64::UserConfiguration::Upscale2D::All;
+                name = "all";
+            }
+        }
+        app->userConfig.upscale2D = mode;
+        static const char* logged = nullptr;
+        if (logged != name) {
+            fprintf(stderr, "[renderer] 2D rectangles: upscale2D %s\n", name);
+            logged = name;
+        }
+    }
 
     // One line per applied configuration: the SETTINGS tab's DISPLAY rows change
     // any of these at runtime, and this is what makes the value a run actually
@@ -1451,6 +1484,14 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         if (const char* texdir = getenv("OGRE_DUMP_TEX")) {
             app_->state->dumpingTexturesDirectory = texdir;
         }
+        // HD backgrounds: the RT64 texture pack that `tools/backgrounds.py hd`
+        // writes beside the `mods/backgrounds/` pack. Its strips replace the
+        // backdrop's 320x6 and 176x11 texture loads by their TMEM hash
+        // (docs/guides/hd-backgrounds.md).
+        if (const std::filesystem::path hd = ogre::hd_backgrounds_texture_pack(); !hd.empty()) {
+            const bool ok = app_->textureCache->loadReplacementDirectory(RT64::ReplacementDirectory(hd));
+            fprintf(stderr, "[hdbg] texture pack %s%s\n", hd.string().c_str(), ok ? "" : " (failed to load)");
+        }
         // OGRE_FB_GPU_COPY=0: turn off RT64's GPU framebuffer copies. A texture
         // load whose RDRAM source is covered by a framebuffer RT64 has on record
         // can be served from that framebuffer's GPU copy instead of the texture's
@@ -1524,6 +1565,28 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         return true;
     }
 
+    // CRT FILTER (settings.hpp) is not part of GraphicsConfig, so the renderer
+    // polls it once per screen update and hands a change to RT64's user
+    // configuration, which the present queue reads for the VI pass.
+    void apply_crt_filter() {
+        const int mode = ogre::crt_filter_applied();
+        if (mode == applied_crt_filter_) {
+            return;
+        }
+        applied_crt_filter_ = mode;
+        RT64::UserConfiguration::CRTFilter filter = RT64::UserConfiguration::CRTFilter::Off;
+        switch (static_cast<ogre::CrtFilterMode>(mode)) {
+            case ogre::CrtFilterMode::Hyllian:    filter = RT64::UserConfiguration::CRTFilter::Hyllian; break;
+            case ogre::CrtFilterMode::LottesFast: filter = RT64::UserConfiguration::CRTFilter::LottesFast; break;
+            case ogre::CrtFilterMode::Lottes:     filter = RT64::UserConfiguration::CRTFilter::Lottes; break;
+            default: break;
+        }
+        app_->userConfig.crtFilter = filter;
+        app_->updateUserConfig(false);
+        fprintf(stderr, "[renderer] crt filter %s\n", ogre::crt_filter_mode_label(mode));
+        fflush(stderr);
+    }
+
     void enable_instant_present() override {
         if (app_ == nullptr) {
             return;
@@ -1540,25 +1603,26 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         app_->interpreter->loadUCodeGBI(task->t.ucode & 0x3FFFFFF, task->t.ucode_data & 0x3FFFFFF, true);
 
         ++dl_count_;
+        // OGRE_DL_TRACE=1 prints every submission with its time, and how long RT64
+        // took to process it. Without it a run prints nothing per display list
+        // (session 145); it used to sample the first eight and every tenth, which
+        // is debug output in a release build (session 117 item 8).
+        static const bool dl_trace = getenv("OGRE_DL_TRACE") != nullptr;
         const auto dl_begin = std::chrono::high_resolution_clock::now();
         // Wall time between submissions plus the recompiled-function entries the
         // game spent on the frame: a frame that takes 2 s because it executes
         // 50x the work is a different bug from one that simply slept.
         static uint64_t last_entries = 0;
-        {
+        if (dl_trace) {
             uint64_t entries = ultramodern::debug_total_entry_count();
             const uint64_t delta = entries - last_entries;
             last_entries = entries;
-            // OGRE_DL_TRACE=1 prints every submission with its time; the default
-            // samples the first few and every tenth.
-            if (getenv("OGRE_DL_TRACE") != nullptr || dl_count_ <= 8 || (dl_count_ % 10) == 0) {
-                // trace_millis, not time_since_start: the profiler and scheduler
-                // ring report on the same clock, so stalls can be lined up with
-                // the work the game was doing.
-                fprintf(stderr, "[renderer] display list %u at t=%llums entries=%llu (type=%u ucode=0x%08X data=0x%08X)\n",
-                        dl_count_, (unsigned long long)ultramodern::trace_millis(),
-                        (unsigned long long)delta, task->t.type, task->t.ucode, task->t.data_ptr);
-            }
+            // trace_millis, not time_since_start: the profiler and scheduler
+            // ring report on the same clock, so stalls can be lined up with
+            // the work the game was doing.
+            fprintf(stderr, "[renderer] display list %u at t=%llums entries=%llu (type=%u ucode=0x%08X data=0x%08X)\n",
+                    dl_count_, (unsigned long long)ultramodern::trace_millis(),
+                    (unsigned long long)delta, task->t.type, task->t.ucode, task->t.data_ptr);
         }
 
         // OGRE_NOP_RECT=<selectors>: bisect aid, see the helper above.
@@ -1807,7 +1871,7 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         }
         const auto dl_end = std::chrono::high_resolution_clock::now();
         const auto dl_ms = std::chrono::duration_cast<std::chrono::microseconds>(dl_end - dl_begin).count();
-        if (dl_count_ <= 8 || (dl_count_ % 10) == 0 || dl_ms > 100000) {
+        if (dl_trace) {
             fprintf(stderr, "[renderer]   processDisplayLists %lld us (dl %u)\n",
                     (long long)dl_ms, dl_count_);
             fflush(stderr);
@@ -1833,6 +1897,7 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
             return;
         }
         ++present_count_;
+        apply_crt_filter();
         // OGRE_VI_TRACE=1: report the VI state RT64 is about to present. The
         // presenter only draws when the decoded VI is visible and has a nonzero
         // size (rt64_present_queue.cpp: viVisible/fbSize), so a black canvas is
@@ -2008,6 +2073,8 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
     // files by the same count, so the `[njread]` line's present index says which
     // capture to look at for a given njpeg pass.
     uint32_t present_count_ = 0;
+    // The CRT FILTER mode last handed to RT64 (apply_crt_filter); -1 = none yet.
+    int applied_crt_filter_ = -1;
 };
 
 }  // namespace

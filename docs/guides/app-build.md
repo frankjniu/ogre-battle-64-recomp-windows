@@ -1,1878 +1,497 @@
-# Building and running the PC port app
+# Building, running and debugging the Windows port
 
-The app (`app/`) compiles the recompiled game code against `N64ModernRuntime`
-and links the renderer (RT64), then boots the game on your ROM.
+The app (`app/`) compiles the recompiled game code against N64ModernRuntime,
+links the RT64 renderer, and boots the game from the player's ROM. This guide
+covers the Windows build. The generated game code is produced in WSL, because
+Windows has no MIPS toolchain, and the app is built natively with clang-cl.
 
-## Prerequisites
-
-- CMake ≥ 3.20 and a C++20 compiler (clang/gcc/msvc).
-- SDL2. On macOS: `brew install sdl2` (installs `sdl3` + `sdl2-compat`).
-- The toolchain from the main [PLAN.md](../../PLAN.md) reproduce section
-  (splat, mips binutils, the N64Recomp and N64ModernRuntime vendored clones, and
-  the RT64 submodule).
-- Your own big-endian `.z64` dump at `assets/ogre64.z64`.
-
-## Regenerating the recompiled code (start here on a fresh clone)
-
-**A fresh clone cannot build the app.** The recompiled C is *generated*, not
-committed: `RecompiledFuncs/`, 34 `Bank*Funcs/`, `RspFuncs/` and
-`app/src/bank_funcs.inc` are all gitignored, because they are the recompiler's
-output from a ROM that cannot be redistributed. You need your own ROM and one
-command:
+Commands are Git Bash unless a block says PowerShell or WSL. The examples use
+two shell variables:
 
 ```sh
-make regenerate
+APP=build-dist/ogrebattle64.exe
+ROM=/c/path/to/ogre64.z64
 ```
 
-That runs the whole pipeline in the one order that works:
+Every game run sets `OGRE_NO_AUDIO=1` (AGENTS.md rule 14), and every example
+line below carries it.
+
+## Windows setup
+
+### 1. Compiler, CMake, Ninja and make
+
+```powershell
+winget install --id Microsoft.VisualStudio.2022.BuildTools --exact --override "--quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --add Microsoft.VisualStudio.Component.VC.Llvm.Clang --add Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset --add Microsoft.VisualStudio.Component.VC.CMake.Project"
+choco install make
+```
+
+The developer's machine has MSVC 14.44.35207, Windows SDK 10.0.26100.0,
+clang-cl 19.1.5, and the CMake 3.31.6-msvc6 and Ninja that ship with the Build
+Tools. `make` comes from Chocolatey. Git Bash (Git for Windows) is the shell.
+
+### 2. Generate the game code in WSL
+
+`RecompiledFuncs/`, `Bank*Funcs/`, `RspFuncs/` and `app/src/bank_funcs.inc` are
+generated from the ROM and gitignored. Generate them in WSL (Ubuntu 24.04):
+
+```sh
+# WSL
+sudo apt-get install build-essential cmake ninja-build clang lld \
+  binutils-mips-linux-gnu gcc-mips-linux-gnu python3-venv python3-pip git zip
+git clone /mnt/c/Users/<you>/Development/ogre-battle-64-recomp ~/ob64
+cd ~/ob64
+mkdir -p assets && cp <rom> assets/ogre64.z64
+# USA Rev A, SHA-1 d26b14bee422a09581ce438d45ba9fec9783fbb8
+python3 -m venv tools/venv && tools/venv/bin/pip install 'splat64[mips]'   # 0.50.1
+git clone https://github.com/N64Recomp/N64Recomp.git tools/N64Recomp
+git -C tools/N64Recomp checkout ffb39cd
+git -C tools/N64Recomp submodule update --init --recursive
+git -C tools/N64Recomp apply ../../patches/n64recomp-ob64.patch
+cmake -S tools/N64Recomp -B tools/N64Recomp/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build tools/N64Recomp/build --target N64RecompCLI RSPRecomp RecompModTool
+make regenerate
+make example-mods
+```
+
+The Makefile expects the binaries at `tools/N64Recomp/build/N64Recomp`,
+`RSPRecomp` and `RecompModTool`. `make example-mods` writes `build/mods/*.nrm`,
+which `make dist` requires.
+
+The WSL tree also holds everything that needs the ROM or the MIPS ELFs: `asm/`,
+`build/*.elf`, `assets/`, `mips-linux-gnu-objdump`. The Windows checkout has
+none of these, so the offline tools that read the ROM or `build/*.elf`
+(`scenemap.py`, `arenamap.py`, `guestmap.py`, `stubmap.py`, `recompcov.py`,
+`elfcheck.py`, `cross_bank.py`) run in the WSL tree.
+
+### 3. Copy the generated code into the Windows checkout
+
+```sh
+# WSL, from ~/ob64
+W=/mnt/c/Users/<you>/Development/ogre-battle-64-recomp
+rm -rf "$W"/RecompiledFuncs "$W"/Bank*Funcs "$W"/RspFuncs
+cp -r RecompiledFuncs Bank*Funcs RspFuncs "$W"/
+cp app/src/bank_funcs.inc "$W"/app/src/
+mkdir -p "$W"/build/mods && cp build/mods/*.nrm "$W"/build/mods/
+```
+
+All of these are gitignored. The `rm -rf` removes a unit directory that a
+regeneration no longer produces.
+
+Regenerate and copy again whenever `config/`, `asm/` or the Makefile's dispatch
+list (`cross_bank.py dispatch --only …`) changes: run `make regenerate`, or
+`make bank-recomp && make recomp` in that order when only bank configs or the
+dispatch list changed. Keep the WSL tree's `Makefile` and `config/` in sync
+with the Windows checkout. A WSL clone carries only committed state, so copy
+uncommitted edits across before regenerating.
+
+### 4. Third-party trees
+
+```sh
+git submodule update --init --recursive                    # RT64
+git clone https://github.com/N64Recomp/N64ModernRuntime.git tools/N64ModernRuntime
+git -C tools/N64ModernRuntime checkout 589bbf018a3e6d3646ddf7de1e7919f1b7e99bb1
+git -C tools/N64ModernRuntime submodule update --init --recursive
+git -C tools/N64ModernRuntime apply --ignore-whitespace ../../patches/n64modernruntime-ob64.patch
+git -C tools/N64ModernRuntime/N64Recomp apply --ignore-whitespace ../../../patches/n64modernruntime-n64recomp.patch
+git -C tools/RT64 apply --ignore-whitespace ../../patches/rt64-ob64.patch
+git -C tools/RT64/src/contrib/plume apply --ignore-whitespace ../../../../../patches/rt64-plume-ob64.patch
+git -C tools/RT64/src/contrib/plume apply --ignore-whitespace ../../../../rt64-plume-sdl.patch
+python tools/patchcheck.py                                  # must print PASS
+```
+
+`--ignore-whitespace` is needed because a Windows checkout gives the RT64 tree
+CRLF line endings, and `git apply` then fails on a hunk whose last line has no
+newline (`patches/rt64-ob64.patch` has two). See "Third-party patches".
+
+### 5. Build, package, smoke-test
+
+```sh
+make app DIST_OS=windows CMAKE_ARGS="-G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl"
+make dist DIST_OS=windows
+DIST_OS=windows /usr/bin/bash tools/smoke-dist.sh
+```
+
+`make app` builds a static SDL2 first (`make sdl2-static`) and then the app in
+`build-dist/`; the executable is `build-dist/ogrebattle64.exe`. `make dist`
+reuses the configured `build-dist/` and writes `dist/ogre-battle-64-recomp/`.
+Run `make app` with `CMAKE_ARGS` before the first `make dist`: a `build-dist/`
+configured without them uses the default generator and `cl.exe`, which fails.
+
+### 6. Traps on this machine
+
+- **`VsDevCmd.bat` fails on a long `PATH`** with `'vswhere.exe' is not
+  recognized` or `\Microsoft was unexpected at this time`. Capture its
+  environment from PowerShell with a minimal `PATH`:
+
+  ```powershell
+  $env:PATH = 'C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Program Files (x86)\Microsoft Visual Studio\Installer'
+  cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64 && set' > vsenv.txt
+  ```
+
+  Import the `NAME=value` lines into Git Bash (convert `PATH` with
+  `cygpath -p`), and prepend these Build Tools directories to `PATH`:
+  `VC\Tools\Llvm\x64\bin` (clang-cl),
+  `Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin` and
+  `Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja`.
+- **`bash` resolves to WSL** once the VS `PATH` is first: the name finds
+  `System32\bash.exe`. Run repo scripts with `/usr/bin/bash`.
+- **`python3` may be the Microsoft Store stub.** `tools/smoke-dist.sh` skips a
+  candidate that cannot run `-c "import sys"` and tries `python3`, `python`, then
+  `py -3`. Other tools that call `python3` (`make bg-extract`, `make bg-hd`) still
+  need a real one first on `PATH`.
+- **`build-dist/ogrebattle64.exe` does not start in place** until
+  `dxcompiler.dll` and `dxil.dll` are copied beside it from `build-dist/RT64/`.
+  `make dist` copies them into the package.
+- **`wsl -d Ubuntu -- bash -c '...'` expands `$VAR` and `$(...)` on the Windows
+  side**, because the line passes through the default shell first. Use
+  `wsl -d Ubuntu --exec bash -c '...'` or a script file.
+
+### 7. Running from a shell, and Defender
+
+`"$APP" "$ROM" > run.log 2>&1` keeps its log: a redirected stream stays on its
+file or pipe. A double-clicked launch has no standard handles; its log still
+reaches `error.log` on a crash.
+
+To test a launch with no standard handles, start the exe through
+`explorer.exe <exe>`, or through `explorer.exe <shortcut.lnk>` to pass
+arguments; `tools/smoke-dist.sh` check 5 does the latter with
+`--crash-test=segv`. Explorer starts the program with its own environment, so
+an `OGRE_*` variable set in the calling shell does not reach it. Scripts that
+cleared the handles and used `DETACHED_PROCESS|CREATE_NO_WINDOW`, or thread
+injection, got the exe quarantined by Defender.
+
+### 8. Per-thread CPU
+
+The runtime names its threads with `SetThreadDescription` ("N64 Thread n",
+"Gfx Thread", "RT64 Workload", "RT64 Present", ...). Per-thread CPU time can be
+read by opening each of the process's threads with access `0x0800`
+(`THREAD_QUERY_LIMITED_INFORMATION`) and calling `GetThreadDescription` and
+`GetThreadTimes`.
+
+## Regenerating the recompiled code
+
+`make regenerate` (in WSL) runs the pipeline in the one order that works:
 
 | step | what it produces |
 |---|---|
 | `make resplit` | `asm/`, `assets/*.bin`, `ogrebattle64.ld`, `config/symbols/undefined_*_auto.txt` (splat) |
-| `make` | `build/ogrebattle64.elf` (assemble + link the MIPS ELF) |
+| `make` | `build/ogrebattle64.elf` |
 | `make bank-recomp` | `Bank*Funcs/`, `app/src/bank_funcs.inc` (the 34 streamed-bank units) |
-| `make recomp` | `RecompiledFuncs/` (N64Recomp + the cross-bank dispatch) |
+| `make recomp` | `RecompiledFuncs/` (N64Recomp plus the cross-bank dispatch) |
 | `make rsp-recomp` | `RspFuncs/` (the njpeg and audio microcode) |
 
-Verified end to end from a clean checkout of the tracked tree: the app builds
-and boots, and `RecompiledFuncs/` comes out **byte-identical** to the tree the
-project has been testing.
+`bank-recomp` must run before `recomp`. The cross-bank dispatch
+(`tools/cross_bank.py dispatch --only …`) rewrites the call sites that N64Recomp
+binds to the wrong bank, and it sees only the bank records `bank_funcs.inc`
+lists. Run the other way round, the build succeeds and runs wrong-bank code
+(sessions 41/45/55); `make recomp` refuses to run in that state.
 
-**The order near the end is load-bearing.** `make recomp`'s cross-bank dispatch
-(`tools/cross_bank.py dispatch --only …`) rewrites 16 call sites that N64Recomp
-otherwise binds to the wrong bank, but it can only see bank records that
-`bank_funcs.inc` already lists. Recompile before regenerating the banks and the
-dispatch is skipped: the build succeeds and quietly runs wrong-bank code — the
-failure class of sessions 41/45/55. `make recomp` now refuses to run in that
-state rather than let it through.
+- `make resplit` leaves `asm/1CE040.s` and `asm/40E80.s` modified with identical
+  content: a re-split writes the raw splat form, and
+  `tools/fix_cross_overlay_labels.sh` re-applies the label patch on every build.
+  Do not commit or revert those two files unless the label patch changes.
+- Trees regenerated at different recompiler versions can differ in the
+  `recomp_trace_return(rdram, N)` depth constants of 26 files under
+  `Bank{B..L}Funcs/`. They feed the shadow call-chain diagnostic only.
 
-Two things worth knowing:
+## Third-party patches
 
-- **`make resplit` leaves tracked files modified.** The committed `asm/*.s` are
-  the post-`fix-labels` form, and a re-split writes the raw splat form;
-  `tools/fix_cross_overlay_labels.sh` (a prerequisite of the object rules) then
-  re-applies the patch on every build, so `git status` shows `asm/1CE040.s` and
-  `asm/40E80.s` as dirty with identical content. Do not commit or revert those
-  files unless you are deliberately changing the label patch.
-- **Regenerated bank units differ from an older tree in one cosmetic way**: the
-  `recomp_trace_return(rdram, N)` depth constants in 26 files under
-  `Bank{B..L}Funcs/`. They feed the shadow call-chain diagnostic only — a
-  diff with those lines filtered out is empty — so a regenerated tree is
-  functionally identical. Expect the difference if you diff generated output
-  against a tree someone has not regenerated since the recompiler's trace
-  numbering changed.
+`tools/N64ModernRuntime` and `tools/RT64` are checked out at pinned upstream
+commits and carry the project's changes as uncommitted work. The tracked copy is
+the patch files in `patches/` plus `tools/rt64-plume-sdl.patch`:
 
-## Configure & build
-
-Once the code above exists:
-
-```sh
-# one-time: initialize the RT64 submodule (it is the only submodule; the
-# N64Recomp and N64ModernRuntime trees are gitignored vendored clones)
-git submodule update --init --recursive
-
-# apply the SDL >= 2.0.22 compatibility patch to RT64's plume submodule
-# (needed on systems with older SDL2, e.g. Ubuntu 22.04's 2.0.20)
-git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-sdl.patch
-
-# apply the runtime patches to their vendored clones
-git -C tools/N64ModernRuntime apply ../../patches/n64modernruntime-ob64.patch
-git -C tools/N64ModernRuntime/N64Recomp apply ../../../patches/n64modernruntime-n64recomp.patch
-
-# apply the OGRE diagnostics (present traces, GPU readback capture, presenter
-# knobs). patches/rt64-plume-ob64.patch is the texture -> buffer readback support in
-# plume's Metal backend.
-git -C tools/RT64 apply ../../patches/rt64-ob64.patch
-git -C tools/RT64/src/contrib/plume apply ../../../../../patches/rt64-plume-ob64.patch
-
-# build the app
-cmake -S app -B build-app -DCMAKE_BUILD_TYPE=Release
-cmake --build build-app -j
-```
-
-### Third-party patches
-
-The four vendored trees carry the project's local changes as uncommitted work:
-`tools/N64ModernRuntime` and `tools/RT64` are checked out at a pinned upstream
-commit and left dirty. The **tracked** copy of those changes is the patch files
-in `patches/`, and the two build paths use different sources:
-
-| path | source of the changes |
+| build | source of the changes |
 |---|---|
-| a developer's machine | the dirty tree; the patches were applied once at setup |
-| a GitHub-hosted release runner (`vars.OGRE_DATA_REPO` set) | the patch files, applied to a pristine checkout of the same commit |
+| a developer's machine | the dirty trees |
+| a GitHub-hosted release runner (`vars.OGRE_DATA_REPO` set) | the patch files, applied to pristine checkouts of the same commits |
 
-So a patch that no longer matches the tree ships old code, and the build stays
-green. That happened: `patches/rt64-ob64.patch` still read
-`getenv("OGRE_CAPTURE_PRESENT")` after the tree switched to
-`ogre_present_capture_path()`, and `patches/rt64-plume-ob64.patch` had no
-`plume_d3d12.cpp` hunk at all. Neither the presented-frame capture fix nor the
-D3D12 null-texture guard was in v0.5.0 or v0.5.1, which were built on hosted
-runners (session 116).
+A patch that no longer matches its tree ships old code on the hosted path while
+the build stays green (v0.5.0 and v0.5.1; session 116).
+`python tools/patchcheck.py` (or `make patch-check`) exits 1 on any difference:
+for every file a patch touches, `git diff HEAD -- <file>` must equal the patch's
+block, and a second pass fails when the tree changes a file no patch carries.
+`make patch-fix` rewrites stale patches; review `git diff patches/` before
+committing. `tools/release-build.sh` runs the check before packaging.
+`tools/rt64-plume-sdl.patch` has no post-image in the tree and is not checked.
 
-`tools/patchcheck.py` (or `make patch-check`) compares each patch against its
-tree and exits 1 on any difference. It needs no worktree: for every file a patch
-touches, the repository's own `git diff HEAD -- <file>` must equal the patch's
-block for that file, so equality proves the patch reproduces the tree. A second
-pass fails when the tree changes a file that no patch carries. `make patch-fix`
-rewrites the stale patches; review `git diff patches/` before committing them.
-`tools/release-build.sh` runs the check before packaging, so a developer cannot
-package stale patches. An SDL2 older than 2.0.22 also needs
-`tools/rt64-plume-sdl.patch`; it has no post-image in the tree and is the one
-patch the check does not cover.
+Keep `.gitattributes`' `*.patch eol=lf` and `--ignore-whitespace` when editing a
+patch or the workflow's `apply_patch` helper; without them the Windows job fails
+at `rt64_tmem_hasher.h:203` and `rt64_native_target.cpp:369`.
 
-The executable is written to `build-app/ogrebattle64`. If it fails with
-"the recompiled game code is missing", you skipped the regeneration section
-above; `tools/release-build.sh` prints the same list.
+## Build details
 
-`make app` is the Makefile wrapper for the same build, and it does **not** use
-`build-app`: `DIST_STATIC_SDL` defaults to `1`, so `make app` builds
-`build-dist/ogrebattle64` with a static SDL2. Use `make app DIST_STATIC_SDL=0`,
-or `cmake --build build-app --target ogrebattle64 -j`, to refresh the
-dynamically linked `build-app` binary. A plain `make app` followed by running
-`./build-app/ogrebattle64` tests the previous build; compare the two files'
-timestamps before interpreting a run.
-
-### Build variants
-
-| Variant | Configure command | Renderer |
-|---|---|---|
-| Native + RT64 (default) | `cmake -S app -B build-app -DCMAKE_BUILD_TYPE=Release` | RT64 (Vulkan/Metal/D3D12) |
-| Native + null renderer | `cmake -S app -B build-null -DCMAKE_BUILD_TYPE=Release -DOGRE_USE_RT64=OFF` | `null_renderer.cpp` (no GPU, no RT64) |
-| WebAssembly (Emscripten) | `make web` (`emcmake cmake -S app -B build-wasm -DCMAKE_BUILD_TYPE=Release`, then `cmake --build build-wasm -j`) | `web_renderer.cpp` (WebGL2 prototype; `OGRE_USE_RT64` is forced off) |
-
-The null-renderer variant is useful for bring-up/CI on machines without a
-working GPU driver; the Emscripten variant is the browser port
-(`docs/WEB-PORT.md`) — it needs the Emscripten SDK (`brew install emscripten`)
-and is served per `docs/WEB-PORT-DEPLOYMENT.md` (cross-origin isolation headers
-required for pthreads). CI builds it in `.github/workflows/wasm.yml`.
-
-`make web` exists because the browser target is a separate build directory that
-nothing else touches: a source file both builds compile that includes a
-native-only header (`sdl_platform.hpp`) fails only here, and that has left the
-target unbuildable for days twice (sessions 109 and 138). Run `make web` before
-finishing a change to any file in `app/CMakeLists.txt`'s Emscripten source list.
-`EM_CACHE` holds the Emscripten sysroot (`~/.cache/emscripten-ogre` by default)
-so a rebuild does not re-download it.
-
-`make web-dist` runs `make web` and then writes `dist-web/`: one self-contained
-directory a plain static host can serve (the page, the shell, the Emscripten
-output, and `coi-serviceworker.js`, which supplies the COOP/COEP headers a static
-host cannot send). It is what `.github/workflows/pages.yml` publishes to GitHub
-Pages. No ROM data is in it. See `docs/WEB-PORT-DEPLOYMENT.md`.
-
-### The browser build reads the same environment knobs
-
-The browser build takes the native environment knobs from the page's query
-string: `app/web/web.js` copies every `OGRE_*` parameter into the `ENV` object
-Emscripten's `getenv` reads, before the wasm runtime initialises its
-environment. So `OGRE_SCENE`, `OGRE_STEP`, `OGRE_TRACE_DL`, `OGRE_S2D_TRACE`,
-`OGRE_DUMP_RDRAM` and the rest work unchanged, and one URL reaches a scene:
-
-```
-http://127.0.0.1:8931/app/web/index.html?OGRE_SCENE_LOG=1&OGRE_TAP_MS=1500&OGRE_TAP_BUTTON=start,a,start,a,start,a,a,a,a,a,a,a,a
-```
-
-`OGRE_TAP_MS`/`OGRE_TAP_BUTTON` are implemented in `web.js` for controller 0,
-with the native button vocabulary and the native 150 ms press. Only those two
-are JS-side; they drive the same `ogre_input_set` the keyboard does.
-`debug/probes/atmark.cjs` waits for a regular expression in the page log and
-captures a canvas series around it, which is how a scene that lasts about a
-second is photographed (`--wait 'GFX-S2D'`, for example).
-
-The per-frame work that hangs off the native `update_gfx` callback runs in the
-browser from `ogre_gfx_flush()` (`app/src/web_renderer.cpp`), which the page
-calls every animation frame: `ogre::poll_scene()` (`OGRE_SCENE` forcing,
-`OGRE_SCENE_LOG`, `OGRE_SCENE_TRACE`) and `ogre::ram_key_tick()`
-(`OGRE_RAM_KEY_AT_MS`). Until session 142 the browser build had no such call, so
-those knobs read as no-ops there.
-
-A guest-RDRAM image is therefore available in the browser as well, and only the
-transfer out of the wasm filesystem is new: `ram_key_tick` writes
-`<OGRE_RAM_KEY_OUT>/ram-<n>-full.bin` (`OGRE_RAM_KEY_FULL=1`) into the page's own
-filesystem, and `debug/probes/rdram.cjs` reads it back through `Module.FS` and
-writes it next to the page log, ready for `tools/rdram.py`:
-
-```sh
-node debug/probes/rdram.cjs --secs 120 --out /tmp/browser \
-  --query 'OGRE_RAM_KEY_AT_MS=52000&OGRE_RAM_KEY_FULL=1&OGRE_RAM_KEY_OUT=/tmp&OGRE_SCENE_LOG=1'
-python3 tools/rdram.py /tmp/browser-rdram.bin word 0x802507F8
-```
-
-`OGRE_RAM_KEY_AT_MS` takes one dump per run, so a dump has to bracket the
-fault: a trap ends the wasm instance and nothing can be read from it afterwards.
+- **clang-cl under Ninja.** `cl.exe` rejects the GCC/Clang flag spellings the
+  app, the runtime and RT64 use (`cl : command line error D8021: invalid numeric
+  argument '/Wno-unused-variable'`). `app/CMakeLists.txt` adds `-Xclang
+  -fexceptions -fcxx-exceptions` for clang-cl and keys its flag groups on
+  `CMAKE_CXX_COMPILER_ID`, because CMake also reports `MSVC` for clang-cl.
+- **Static SDL2 and CRT.** `DIST_STATIC_SDL` defaults to `1`, so `make app`
+  builds `build-dist/` against SDL2 2.32.10 fetched into `tools/SDL2-static/`.
+  On MSVC the library is `SDL2-static.lib` with its package config in
+  `<prefix>/cmake`; `make` passes `-DOGRE_STATIC_SDL2=ON`. Every target and the
+  SDL2 build use `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`. `--config Release`
+  keeps a multi-config generator off Debug. `DIST_STATIC_SDL=0` builds
+  `build-app/` against an installed SDL2, which the setup above does not
+  provide.
+- **Entry point.** The app defines `SDL_MAIN_HANDLED` and calls
+  `SDL_SetMainReady()`. The exe is a GUI-subsystem image (`WIN32_EXECUTABLE`);
+  `app/src/main.cpp` supplies the `WinMain` forwarder.
+- **Windows branches.** `create_window` returns RT64's `{ HWND, thread_id }`.
+  `readlink` and `__attribute__((weak))` have Windows branches.
+- **DXC.** RT64 statically imports `dxcompiler.dll`/`dxil.dll`; its CMake copies
+  them into `build-dist/RT64/`.
+- **Frame pointers.** The app, the recompiled code and `librecomp`/`ultramodern`
+  build with `-fno-omit-frame-pointer` (RT64 does not), so a debugger stopped in
+  the runtime unwinds across a bridge to the guest caller.
+- **Null renderer.** `cmake -S app -B build-null -DOGRE_USE_RT64=OFF` builds
+  `null_renderer.cpp` with no GPU path. It has not been set up on this machine.
+- **"the recompiled game code is missing"**: the files of "Windows setup" step 3
+  are absent. `tools/release-build.sh` prints the same list.
+- **Stale CMake cache.** After touching `tools/RT64/CMakeLists.txt` or the
+  toolchain, delete `build-dist/` and rebuild.
 
 ## Running
 
 ```sh
-# from the repo root (the app resolves the ROM path from the config path)
-./build-app/ogrebattle64 [path-to-rom.z64]
+OGRE_NO_AUDIO=1 "$APP" "$ROM"
 ```
 
-The app starts on its own **start screen** when it has no ROM to boot: the
-`OGRE BATTLE 64: RECOMP` title over a tabbed panel (**MAIN**, **MODS**,
-**CONTROLS**, **SETTINGS**, **DEBUG**). The MAIN tab carries the ROM row,
-which reads `[ ] No ROM` and `PRESS SPACE TO CHOOSE A ROM, OR DROP IT IN A
-WINDOW`. With no ROM loaded that row is the selected one, so `SPACE` (or a click)
-opens a native file picker; a ROM can also be dropped onto the window. A ROM
-placed in the app's folder (or `<app>/roms/`) is found automatically, so "put the
-ROM next to the executable and launch" works with no click at all.
+With no ROM to boot the app opens its start screen: the
+`OGRE BATTLE 64: RECOMP` title over a tabbed panel (MAIN, MODS, CONTROLS,
+SETTINGS, DEBUG). `SPACE` or a click on the ROM row opens a file picker, and a
+ROM can be dropped on the window. A ROM in the app's folder or `<app>/roms/` is
+found automatically. The ROM is validated by XXH3 hash and a copy is stored in
+the config directory, so later launches boot straight into the game, except that
+the start screen still appears first when a mod is installed. `OGRE_LAUNCHER=1`
+forces the start screen; `OGRE_ROM=<path>` names a ROM without an argument.
 
-The ROM is validated by XXH3 hash and the runtime stores a copy in the config
-directory, so **later launches skip the start screen and boot straight into the
-game** — unless a mod is installed, in which case the start screen appears first
-so the mods can be turned on or off (see "Mods" below). `OGRE_LAUNCHER=1` forces
-the start screen even when a ROM is available; `OGRE_ROM=<path>` names one
-without an argument.
+### Console output and logs
 
-**The config directory is the executable's own directory** (`SDL_GetBasePath`),
-not the per-user preference dir, so a distributed build is self-contained: the
-battery save lands at `saves/<game id>.bin` right beside the executable, and so
-do `mods/`. Inside the macOS bundle `SDL_GetBasePath` returns the folder that
-holds the `.app` (`SDL_FILESYSTEM_BASE_DIR_TYPE=parent`), which is that same
-folder. `OGRE_PREF_DIR=<dir>` still overrides it (the scripted harnesses
-use that), and a read-only install location falls back to the platform
-preference dir automatically. The boot log prints the resolved path.
+A double-click opens no console window. `main.cpp` attaches to the parent's
+console with `AttachConsole` when one exists, so a terminal run prints its log,
+and a stream the caller redirected to a file or a pipe keeps that target. A
+launch with no standard handles leaves `stdout`/`stderr` bound to no descriptor
+(`_fileno` is -2); `main.cpp` reopens them on `NUL` as fds 1 and 2, which lets
+the crash log capture them. `OGRE_CONSOLE=1` calls `AllocConsole()` and points
+the standard streams at a new console.
 
-### Distribution — `make dist`
+`OGRE_RSP_LOG=1` (the `[rsp]` task lines, read by `tools/runlog.py`) and
+`OGRE_DL_TRACE=1` (the per-display-list lines, read by `tools/dlgaps.py`,
+`tools/proflog.py --dl`, `tools/ogre_frame.py --log` and `runlog.py`'s cadence
+line) are off by default. A stock run prints neither.
 
-```sh
-make dist        # -> dist/ogre-battle-64-recomp/  (the app + README + SDL2 license)
-make dist-zip    # -> dist/ogre-battle-64-recomp-<platform>.zip
-```
+### Config directory
 
-**The package shows no console window.** macOS wraps the executable in
-`Ogre Battle 64.app` (`packaging/macos-Info.plist`), so Finder launches it
-without opening Terminal, and Windows links `ogrebattle64.exe` as a GUI-subsystem
-binary (`WIN32_EXECUTABLE` in `app/CMakeLists.txt`; `app/src/main.cpp` supplies
-the `WinMain` forwarder that subsystem's CRT entry point needs, and attaches to
-the parent's console with `AttachConsole` when one exists, so running the `.exe`
-from a terminal still shows the log without ever creating a window). The app's
-`[boot]`/`[bank]` log therefore has no console to reach for a double-clicked
-launch, so a crash writes `error.log` next to the save file — see "Crash
-reports" below.
+The config directory is the executable's own directory (`SDL_GetBasePath`):
+`saves/<game id>.bin`, `mods/`, `mods.json`, `mod_config/`, `controls.cfg`,
+`settings.cfg` and `error.log` sit beside the exe. `OGRE_PREF_DIR=<dir>`
+overrides it. A read-only install location falls back to
+`%APPDATA%\ogrebattle64\`. The boot log prints the resolved path.
 
-The macOS bundle carries `SDL_FILESYSTEM_BASE_DIR_TYPE=parent`. `SDL_GetBasePath`
-then returns the folder that holds the `.app`, which is the same folder the
-README describes, so the ROM, `saves/`, `mods/`, `controls.cfg`, `settings.cfg`
-and `error.log` all stay beside the bundle rather than inside it. The bundle is
-ad-hoc signed at the end of the recipe.
+### Paths under `/tmp`
 
-**The package is a single file: SDL2 is linked statically.** Everything else is
-a system framework or already static, so the executable has no non-system
-dynamic dependency at all:
-
-```sh
-otool -L "dist/ogre-battle-64-recomp/Ogre Battle 64.app/Contents/MacOS/ogrebattle64" \
-  | grep -v "System/Library\|/usr/lib"   # prints nothing
-```
-
-Static SDL2 needs the *real* SDL2 sources: Homebrew's `sdl2` formula on macOS is
-**`sdl2-compat`**, a shim that `dlopen`s `libSDL3.0.dylib` and ships no static
-library, so `make dist` first runs `make sdl2-static`, which fetches a pinned
-SDL2 (`2.32.10`; API/ABI-compatible with the 2.32.70 shim, so either header set
-works) into the gitignored `tools/SDL2-static/` and builds it with
-`-DSDL_SHARED=OFF -DSDL_STATIC=ON`. That happens once and is reused. `dist`
-builds the app in its own `build-dist/` directory against that prefix, and
-copies SDL2's zlib license into the package as `SDL2-LICENSE.txt`.
-
-On Linux the static SDL2 also needs the audio development headers:
-`libasound2-dev`, `libpulse-dev` and `libpipewire-0.3-dev` (the first two are
-dependencies of `libsdl2-dev`). SDL2's CMake **drops an audio backend whose
-headers are missing without failing** — the configure summary prints
-`SDL_ALSA (Wanted: ON): OFF` while the cache variable still reads ON — and the
-OSS driver's header is the one that is always present on Linux. The result is an
-SDL2 whose only output driver is `/dev/dsp`, which no PipeWire or PulseAudio
-machine has: `SDL_InitSubSystem(SDL_INIT_AUDIO)` fails with
-`dsp: No such audio device`, the app prints `[SDL] audio unavailable, running
-silently`, and the game has no sound. The 0.3.0 Linux release was built on such
-a host and shipped that binary (issue #8). `make sdl2-static` therefore verifies
-the archive with `tools/check-sdl2-audio.sh` and rebuilds from scratch when a
-cached copy fails, and `tools/smoke-dist.sh` checks the packaged binary for an
-ALSA, PulseAudio or PipeWire backend. The system SDL2 a Linux distribution ships
-always has them, which is why `DIST_STATIC_SDL=0` (system `libsdl2-dev`) is
-unaffected.
-
-The static link pulls in the frameworks SDL2 uses (Cocoa, IOKit, CoreAudio,
-AudioToolbox, AVFoundation, Carbon, CoreVideo, Foundation, plus weakly
-GameController/Metal/QuartzCore/CoreHaptics), which is why the package still
-runs anywhere those system frameworks exist — macOS only.
-
-`DIST_STATIC_SDL=0 make dist` skips all of that and bundles the shared SDL2
-instead (two files, seconds instead of a minute) — useful for a quick local
-package.
-
-`make dist` needs **no ROM and no recompiler run** — but it does need the
-recompiled code to already be present on the machine. `RecompiledFuncs/`,
-`Bank*Funcs/`, `RspFuncs/` and `app/src/bank_funcs.inc` are **gitignored and
-generated**, so a fresh clone has none of them and `make dist` fails with the
-"recompiled game code is missing" message from `tools/release-build.sh` until
-`make && make recomp && make bank-recomp` has been run once against a ROM on
-that machine. Release builds therefore run on a machine with the ROM, unless the
-generated code is supplied from the private data repository — see "Releases"
-below.
-
-On Windows the executable links `SDL2-static` and the static CRT
-(`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`, set for every target in
-`app/CMakeLists.txt`), and the package carries the MSVC runtime DLLs beside the
-`.exe`. That is not optional: RT64 statically imports `dxcompiler.dll`/`dxil.dll`,
-and those two Microsoft binaries import `MSVCP140.dll`/`VCRUNTIME140.dll`, so a
-machine without the Visual C++ redistributable cannot start the process at all.
-The 0.1.0 and 0.2.0 packages shipped neither, which `tools/pe_imports.py` now
-catches on any machine — including a runner that has the redistributable
-installed and where a launch would therefore succeed. `make sdl2-static` builds
-SDL2 with the same runtime-library setting, and the `dist` recipe fails rather
-than shipping a Windows package without the DLLs.
-
-A first launch of the package in an empty folder is the user-facing acceptance
-test: the black start screen appears, clicking/dropping a ROM boots the game,
-and `saves/ogrebattle64-us-rev1.bin` is written next to the executable.
-
-### Smoke test — `make smoke`
-
-```sh
-make dist && make smoke        # or: tools/smoke-dist.sh [dist-dir]
-```
-
-`tools/smoke-dist.sh` runs on the machine that built the package and checks
-three things. The release workflow runs the same script on every runner image
-between "Build and package" and "Collect the archive", so a package that cannot
-start fails the release instead of reaching a player.
-
-1. The app binary and `README.txt` exist, and on Windows the companion DLLs
-   (`dxcompiler.dll`, `dxil.dll`, `msvcp140.dll`, `vcruntime140.dll`,
-   `vcruntime140_1.dll`) do too.
-2. The package is self-contained. On Windows, `tools/pe_imports.py` parses every
-   shipped `.exe`/`.dll` and requires each imported DLL to be either shipped
-   beside them or a Windows system DLL. This is the check a launch cannot make on
-   a runner: the image has the Visual C++ redistributable installed, so a package
-   that is missing `msvcp140.dll` still starts there (session 94 shipped exactly
-   that package). macOS checks `otool -L` for non-system dependencies, Linux
-   checks `ldd` for unresolved libraries and greps the binary for an ALSA,
-   PulseAudio or PipeWire SDL backend. SDL2 is linked statically, so its audio
-   backends are compiled in; the OSS-only build that a host without the audio
-   headers produces cannot open a device on any PipeWire or PulseAudio machine,
-   and the 0.3.0 Linux package shipped exactly that (session 100, issue #8).
-3. The binary loads and reaches `main`: it runs with `OGRE_SMOKE=1`, which exits
-   0 as soon as `main` is reached, under a deadline (`SMOKE_TIMEOUT` seconds,
-   default 90) so a loader error dialog or a hang cannot stall a release run.
-   The launch check is skipped when the package is for another platform (a
-   Windows zip checked from macOS still gets checks 1 and 2).
-4. A crash leaves a usable report: the same binary runs with
-   `OGRE_CRASH_TEST=segv`, and `error.log` must exist and contain the `[boot]`
-   line printed immediately before the raise. That line only reaches the report
-   through the stdout/stderr capture, so an empty report (the capture never ran,
-   or the handler died on a stdio lock) fails the package instead of reaching a
-   player. `error.log` is removed afterwards.
-
-### Crash reports — `error.log`
-
-`app/src/crash_log.cpp` is what replaces the console window a distributed build
-no longer has. `crash_log::install()` runs at the top of `main()` and:
-
-* replaces fd 1 and fd 2 with the write ends of two pipes, each drained by a
-  thread into its own 128 KiB ring while every byte is forwarded to the real
-  descriptor. A terminal run, `... > run.log 2>&1` and `2> run.log` all behave
-  as before. `stdout` is put back on line buffering with a **static buffer and a
-  non-zero size**: the MSVC CRT treats `setvbuf(stream, nullptr, _IOLBF, 0)` as an
-  invalid parameter, and its invalid-parameter handler fast-fails the process
-  (`0xC0000409`) before any handler can run. glibc and macOS accept a zero size,
-  so this only ever showed on Windows — it is what made the 0.2.0 Windows build
-  do nothing at all, and why it wrote no `error.log` (session 94). The handlers
-  are installed before the capture for the same reason;
-* installs the fatal handlers: `SIGSEGV`/`SIGBUS`/`SIGABRT`/`SIGFPE`/`SIGILL`
-  through `sigaction` on POSIX, the same through `signal` plus
-  `SetUnhandledExceptionFilter` on Windows, and `std::set_terminate` on both.
-
-A fatal event writes `<config dir>/error.log`, which is the executable's own
-directory unless that one is read-only (`resolve_pref_dir`). The file holds the
-reason, the **faulting instruction and the address it touched** (each with its
-host module and offset on Windows and macOS; an access violation also says
-whether the access was a read, a write or an execute), the RDRAM base, the N64
-thread, the last recompiled function per thread, the last 200 stderr lines and
-the last 100 stdout lines (the boot log, `[bank]` load lines, any
-`[overlays] streamed function stub called @ ...` line), then the runtime's guest
-call chain. The player attaches it to a GitHub issue.
-
-The handler's own output uses only `open`/`write`/`close` and an atomic ring
-length; the runtime's dump helpers are `printf`-based and run after the ring has
-been written. The handler never calls `fflush`: a fault can arrive while the
-faulting thread holds a stdio stream lock, and flushing from the handler
-re-enters that lock and hangs the process instead of killing it (session 94).
-The `printf`-based dumps run only after a non-blocking `ftrylockfile` probe shows
-both stream locks free, and the report says when they were skipped. **Windows has
-no `ftrylockfile`, so there the handler uses no stdio at all**: it writes the
-fault fields, the N64 thread and the last function per thread with raw writes,
-and skips the runtime's printf-based call-chain dump. Only the
-first report of a fatal event is written, so a `std::terminate` that then aborts
-does not overwrite it. `OGRE_DUMP_RDRAM=<path>` still adds the whole 8 MiB image,
-on the crash path as on the exit path. `crash_log::flush()` restores the
-descriptors and joins the threads; `atexit` calls it, and the bounded-run and
-window-close `_Exit` paths call it explicitly.
-
-`OGRE_CRASH_TEST=<segv|bus|abrt|fpe|ill>` raises that signal immediately after
-the logger is armed, so a packaged build's `error.log` can be checked without
-provoking a real crash.
-
-`SDL_ShowSimpleMessageBox` errors from the runtime (its `message_box` channel)
-also write `error.log`, for the same reason: a player who sees the box has no
-console to copy.
-
-`report_boot_failure()` (`app/src/sdl_platform.cpp`) is the sibling for a failure
-that is not a crash: it writes `error.log` and shows the reason in a message box.
-The SDL init, the game window, and the start screen's window and renderer all
-call it, because a silent `EXIT_FAILURE` in a console-less build is
-indistinguishable from "the program does nothing" (session 94). `init_sdl`
-requires only video and events: `SDL_Init` fails the whole call when any
-requested subsystem fails, and `SDL_INIT_AUDIO` can fail on a host with no usable
-output device, which used to stop the app before its first window. Audio and game
-controllers are initialised separately and may be absent; the game runs silently
-without them.
+Several built-in defaults are POSIX paths: the console file
+`/tmp/ogre-console.txt`, the bare `dump`/`snap`/`save` outputs
+(`/tmp/ogre-rdram-NNNN.bin`, `/tmp/ogre-snap-NNNN`,
+`/tmp/ogre-checkpoint-NNNN.ckpt`), `snap`'s frames `/tmp/ogre-shot.<n>.ppm`, and
+the `OGRE_RAM_KEY` output when neither `OGRE_RAM_KEY_OUT` nor `OGRE_PREF_DIR` is
+set. The Windows CRT opens `/tmp/...` as `\tmp\...` on the current drive
+(`C:\tmp\`), which must exist. Git Bash's `/tmp` is `%TEMP%`, a different
+directory. Use explicit `C:/tmp/...` paths in `OGRE_*` values and console
+commands; the examples below do.
 
 ### Closing the window
 
-The window's close button makes SDL2 post `SDL_QUIT` (the last window's
-`SDL_WINDOWEVENT_CLOSE` posts it too; `src/events/SDL_windowevents.c`).
-`update_gfx` writes any requested dumps and calls `ultramodern::quit()`.
+The close button makes SDL post `SDL_QUIT`; `update_gfx` writes any requested
+dumps and calls `ultramodern::quit()`. Nothing joins the game's host threads, so
+two changes keep the close from hanging (session 94): `librecomp/src/recomp.cpp`
+does not free RDRAM when `exited` is set (`patches/n64modernruntime-ob64.patch`),
+and `main.cpp` runs the SDL teardown and then `_Exit(EXIT_SUCCESS)`, after
+`crash_log::flush()`, so no static destructor runs under a live game thread.
+Teardown takes about half a second, exits 0 and writes no `error.log`. The
+saving thread is joined inside `recomp::start` first, so the battery save is
+safe.
 
-`quit()` stops the runtime's own threads, but the game's threads are host threads
-running recompiled code and nothing joins them. Two things follow, and both are
-needed for the window to close instead of hanging:
+## Distribution
 
-* `librecomp/src/recomp.cpp` no longer frees RDRAM when `exited` is set (the
-  change is in `patches/n64modernruntime-ob64.patch`). It used to `munmap` the 8 MiB
-  image at the end of `recomp::start`, and a game thread that touched it
-  afterwards faulted — session 94's window-close freeze, whose fault address was
-  inside the image. The process is about to exit, so the OS reclaims the mapping.
-* `main.cpp` runs the SDL teardown and then `_Exit(EXIT_SUCCESS)` instead of
-  returning. `return` runs the C++ static destructors while those threads are
-  live, which is the same race from the other side. `crash_log::flush()` runs
-  first, because `_Exit` skips the atexit handler.
+### `make dist`
 
-Teardown takes about half a second after the close, exits 0, and writes no
-`error.log` (a normal close is not a crash). The battery save is safe: the
-runtime joins its saving thread inside `recomp::start`, before either change.
+```sh
+make dist DIST_OS=windows       # -> dist/ogre-battle-64-recomp/
+make dist-zip DIST_OS=windows   # -> dist/ogre-battle-64-recomp-windows.zip
+```
 
-### Releases (GitHub Actions)
+The package holds `ogrebattle64.exe`, `dxcompiler.dll`, `dxil.dll`,
+`msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll` (and
+`msvcp140_atomic_wait.dll` when present), `README.txt`, `mods/*.nrm` and an
+empty `mod_config/`. SDL2 and the CRT are static.
 
-`.github/workflows/release.yml` builds macOS, Linux and Windows packages,
-creates a GitHub release and attaches one archive per platform — `.tar.gz` on
-macOS and Linux, `.zip` on Windows — so the downloads appear on the repository's
-Releases page.
+The MSVC runtime DLLs are required: `dxcompiler.dll`/`dxil.dll` import
+`MSVCP140.dll`/`VCRUNTIME140.dll`, so a machine without the Visual C++
+redistributable cannot start the process. `app/CMakeLists.txt` copies the
+app-local runtime from `VCToolsRedistDir`, and `make dist` fails when a DLL is
+missing. It also needs the generated code and at least one `build/mods/*.nrm`.
+`dist-zip` uses `zip` when present and otherwise CMake's zip writer.
 
-Prepare a release with the one command that does all of it:
+Acceptance test: launch the package in an empty folder; the start screen
+appears, a chosen or dropped ROM boots the game, and
+`saves/ogrebattle64-us-rev1.bin` is written beside the exe.
+
+### Smoke test
+
+```sh
+DIST_OS=windows /usr/bin/bash tools/smoke-dist.sh [dist-dir]
+```
+
+`make smoke` runs the same script through its `#!/usr/bin/env bash` line, which
+finds WSL's `bash` when the VS `PATH` is first; call `/usr/bin/bash` directly.
+`tools/smoke-dist.sh` runs on the machine that built the package, and the
+release workflow runs it before collecting the archive. It checks:
+
+1. the exe, `README.txt`, the companion DLLs and at least one `mods/*.nrm` exist;
+2. `tools/pe_imports.py` finds every DLL the shipped `.exe`/`.dll` import either
+   shipped or a Windows system DLL (a launch on a runner cannot catch this,
+   because the runner has the redistributable);
+3. the exe reaches `main` with `OGRE_SMOKE=1` within `SMOKE_TIMEOUT` seconds
+   (default 90);
+4. a run with `OGRE_CRASH_TEST=segv` writes an `error.log` that contains the
+   `[boot]` line printed just before the raise;
+5. on a host with an Explorer shell, a launch with no standard handles writes
+   the same report: the script writes a `.lnk` that passes `--crash-test=segv`,
+   opens it with `explorer.exe`, and waits for the process to exit. A host with
+   no Explorer (a hosted runner, a service) prints a skip line.
+
+`SMOKE_TIMEOUT` bounds checks 3 and 5. Check 2 runs `tools/pe_imports.py` with
+the first of `python3`, `python` and `py -3` that runs Python, so the Microsoft
+Store stub is skipped; it prints `smoke-dist: PE import check with <python>`.
+
+### Crash reports — `error.log`
+
+`crash_log::install()` (`app/src/crash_log.cpp`) runs at the top of `main()`:
+
+- It replaces fd 1 and fd 2 with pipes, each drained by a thread into a 128 KiB
+  ring and forwarded to the real descriptor. `stdout` gets line buffering with a
+  static buffer and a non-zero size: the MSVC CRT treats
+  `setvbuf(stream, nullptr, _IOLBF, 0)` as an invalid parameter and fast-fails
+  (`0xC0000409`). The handlers are installed before the capture.
+- It installs `SIGSEGV`/`SIGABRT`/`SIGFPE`/`SIGILL` handlers through `signal`,
+  `SetUnhandledExceptionFilter`, and `std::set_terminate`.
+
+A fatal event writes `<config dir>/error.log`: the reason, the faulting
+instruction and the address it touched (with host module and offset, and read,
+write or execute), the RDRAM base, the N64 thread, the last recompiled function
+per thread, the last 200 stderr and 100 stdout lines. The handler uses raw
+writes and never `fflush`, because the faulting thread can hold a stdio lock.
+Windows has no `ftrylockfile`, so the handler uses no stdio at all there and
+skips the runtime's printf-based call-chain dump. Only the first report is
+written. `OGRE_DUMP_RDRAM=<path>` adds the 8 MiB image. `crash_log::flush()`
+restores the descriptors; `atexit` and the `_Exit` paths call it.
+
+A hang writes `error.log` too. `app/src/hang_watch.cpp` runs from `update_gfx`
+on the main thread and reads the game's frame counter `D_800AEFA4` (the VI count
+copied at the end of each game frame, `0x800726C4`). When the counter stays
+still for `OGRE_HANG_MS` (default 5000; `0` turns the watch off), it prints a
+`[hang]` line with the frame counter, the VI count `D_800C4BCC` and the scene
+`D_800E810E`, runs the `[snap]` queue snapshot once (the main thread stalls about
+1.6 s) and writes `error.log` with the reason `hang: …`. The stdout section then
+holds the `[hang]` line and the snapshot. It reports once per stall and prints
+`[hang] frames resumed …` if frames come back. The boot (until the counter has
+changed twice), time with the game window minimized or hidden, and any gap over
+1 s between two main-thread calls do not count. With `OGRE_HANG_MS=150` the
+scene loads at `0x09`, `0x0A` and `0x04` trigger it, which is a quick way to see
+a report.
+
+The runtime's `message_box` errors also write `error.log`.
+`report_boot_failure()` (`app/src/sdl_platform.cpp`) writes `error.log` and
+shows a message box when SDL init, the game window or the start screen's window
+or renderer fails. `init_sdl` requires only video and events; audio and
+controllers may be absent, and the game then runs silently.
+
+## Releases (GitHub Actions)
+
+`.github/workflows/release.yml` builds packages, creates a GitHub release and
+attaches one archive per platform (`ogre-battle-64-recomp-windows-x86_64.zip`
+for Windows). Its matrix still lists macOS and Linux.
+
+### `make release`
 
 ```sh
 make release VERSION=v0.6.0
+gh release edit v0.6.0 --draft=false     # publish after reviewing the assets
 ```
 
-`tools/release.sh` is that command. It:
-
-1. regenerates the game code (`make bank-recomp`, `make recomp`, `make
-   rsp-recomp`) and the example mods,
-2. packs `files.tar.gz` with `tools/data-bundle.sh`, then unpacks it and
-   compares every file against the tree, so a bundle holding code generated
-   before the current inputs fails here rather than in CI,
-3. commits and pushes the bundle to the private data repository, and
-4. dispatches the Release workflow with `draft` and waits for all three
-   platform builds.
-
-The draft release is at `https://github.com/<repo>/releases`. Publish it after
-reviewing the assets:
+`tools/release.sh` regenerates the game code (`make bank-recomp`,
+`make recomp`, `make rsp-recomp`) and the example mods, packs `files.tar.gz`
+with `tools/data-bundle.sh` and compares it with the tree, commits and pushes it
+to the private data repository, and dispatches the Release workflow as a draft.
+It regenerates, so it runs where the ROM and the MIPS toolchain are (WSL). It
+refuses a version that already has a tag or release, a tracked tree with
+uncommitted changes, and an unpushed branch tip, because the bundle records
+`git rev-parse HEAD`. `make release-check VERSION=…` is the same with
+`NO_PUSH=1` and changes nothing outside the tree.
 
 ```sh
-gh release edit v0.6.0 --draft=false
-```
-
-The tag is created by the workflow's `gh release create`, on the commit the run
-built. `make release` refuses a version that already has a tag or a release, a
-tracked tree with uncommitted changes, and a branch whose tip is not pushed,
-because the bundle records `git rev-parse HEAD` and the hosted unpack step fails
-when that differs from the commit being built.
-
-`make release-check VERSION=v0.6.0` is the same script with `NO_PUSH=1`: it
-regenerates, packs and reports the bundle, the commit it would push and the run
-it would start, and changes nothing outside this tree.
-
-The generated code is a function of the ROM and `config/`, so a commit that
-changes only tooling or documentation leaves the bundle byte-identical. The
-script compares the packed code with the tree (the workflow cannot: it has no
-ROM) and, when they agree, repacks the archive with the commit being released,
-because the workflow refuses a bundle whose recorded commit differs from the
-build's.
-
-```sh
-VERSION=v0.6.0          # required only to override; default: newest tag + 1
+VERSION=v0.6.0          # default: newest tag + 1
 DATA_REPO=OWNER/REPO    # default: the OGRE_DATA_REPO Actions variable
 REGEN=0                 # use the generated code already in the tree
-SKIP_BUNDLE=1           # reuse dist/ogre-data/files.tar.gz; for a retry after
-                        # the workflow failed. The code comparison still runs
-                        # and the bundle is re-recorded if it is identical
+SKIP_BUNDLE=1           # reuse dist/ogre-data/files.tar.gz (a retry)
 DRAFT=false             # publish instead of drafting
 NO_WAIT=1               # do not wait for the run
 make release
 ```
 
-**`platforms` selects the matrix for a dispatched run** (`all`, `windows`,
-`linux` or `macos`; a tag push always builds all three). A Windows-only run is
-about 8 minutes instead of 30, which is the iteration path for a
-Windows-specific bug; it still runs the smoke test and creates the release, so
-that release carries only the one platform's asset. `make release` always asks
-for `all`.
+A commit that changes only tooling or docs leaves the generated code identical;
+the script then repacks the archive with the new commit, because the workflow
+refuses a bundle whose recorded commit differs.
+
+**Windows only.** The `platforms` input selects the matrix of a dispatched run
+(`all`, `windows`, `linux`, `macos`). A Windows run takes about 8 minutes, runs
+the smoke test and creates a release with only the Windows asset. `make release`
+always asks for `all`, and a tag push builds all and publishes.
 
 ```sh
 gh workflow run release.yml -f tag=v0.2.1-rc3 -f platforms=windows
 ```
 
-A tag push runs the workflow too, and on that path the `tag` and `draft` inputs
-are empty: the tag that was pushed is used and the release is published. Use
-`make release` or a dispatch when the release should be a draft; the `draft`
-input defaults to `true` so an unattended dispatch does not publish.
-
-`tools/release-build.sh` is the single build entry point — the workflow just
-exports `DIST_OS` and runs it, so a release artifact is byte-for-byte what
-`make dist` produces locally:
-
-```sh
-tools/release-build.sh                  # this machine's platform
-DIST_OS=linux tools/release-build.sh    # what CI does per runner
-```
-
-**Why the workflow uses self-hosted runners by default.** A GitHub-hosted runner
-clones the repository, and the recompiled code that `make dist` links is *not in
-the repository* (`RecompiledFuncs/`, `Bank*Funcs/`, `RspFuncs/`,
-`app/src/bank_funcs.inc` are generated from the ROM and gitignored). Those
-runners have no ROM, so they cannot produce it, and `tools/release-build.sh`
-fails fast with the list of what is missing rather than a wall of compile
-errors. The default `runs-on:` values therefore select self-hosted runners,
-where the ROM and the generated code already are.
-
-### Building releases on GitHub-hosted runners
-
-A private data repository supplies the generated code, which lets the release
-matrix run on hosted runners with no ROM present.
-
-1. On a machine with the ROM and a built tree, produce the archive. `make
-   release` does this and the two steps after it; the commands it runs are:
-
-   ```sh
-   make bank-recomp && make recomp && make rsp-recomp
-   make example-mods
-   tools/data-bundle.sh                 # -> dist/ogre-data/files.tar.gz
-   ```
-
-   The order is `make regenerate`'s: `make recomp` dispatches the cross-bank
-   calls against the records `make bank-recomp` writes into
-   `app/src/bank_funcs.inc`, and refuses to run without them.
-
-   The archive holds `RecompiledFuncs/`, `Bank*Funcs/`, `RspFuncs/` and
-   `app/src/bank_funcs.inc` at its root, the packaged example mods
-   (`build/mods/*.nrm`), plus `ogre-data.txt` recording the public commit it was
-   generated from. It refuses to run when any of them is missing.
-
-   The mods are in the archive because a release runner cannot build them: it has
-   no ROM and no `mips-linux-gnu-gcc`, and the macOS image has no Linux container
-   runtime for `tools/build-example-mods.sh`'s Docker fallback. `make dist`
-   requires at least one `.nrm` and fails without one,
-   `tools/release-build.sh` checks for them before the app build, the workflow's
-   unpack step fails a bundle that carries none, and `tools/smoke-dist.sh` fails
-   a package whose `mods/` directory is empty. v0.4.0 shipped an empty `mods/`
-   because the bundle omitted them and `make dist` only warned (session 108).
-
-   The unpack step also fails when the bundle's recorded commit differs from the
-   commit being built. The runner cannot recompile, so it cannot test whether an
-   older bundle still matches; it prints how many commits newer the build is and
-   the regeneration command. Regenerating is part of preparing a release, not an
-   optional refresh.
-
-2. Commit `files.tar.gz` to the private repository. `make release` copies it
-   there, commits it as `generated code at <commit>, with the example mods` and
-   pushes, then dispatches the workflow.
-
-3. In this repository's settings, set the **Actions variable** `OGRE_DATA_REPO`
-   to the private repository slug (for example `OWNER/PRIVATE-REPO`), and add the
-   **secret** `OGRE_DATA_TOKEN`: a fine-grained token with `Contents: Read` on
-   that private repository. Setting the variable switches every matrix job to its
-   hosted runner and unpacks the archive from there; leaving it unset keeps the
-   self-hosted labels. The repository's name is not recorded here; the variable
-   is its only reference.
-
-The archive is a snapshot of the recompiler's output, so regenerate it whenever
-a change alters the generated code or anything under `mods/`. Regenerate it as
-part of preparing a release: the workflow fails the job when the archive's
-recorded commit differs from the commit being built, because nothing on the
-runner can tell whether that bundle still describes this source tree. The stale
-bundle left by session 108 failed three hosted jobs at the unpack step with
-`build/mods/*.nrm is missing from files.tar.gz`. Hosting the generated C
-in a private repository keeps it out of this repository and out of the release
-archives; it does not change what the published binary contains.
-
-On the hosted path the workflow reconstructs everything else a fresh checkout
-lacks: it clones `N64ModernRuntime` at the pinned commit and applies
-`patches/n64modernruntime-ob64.patch` and `patches/n64modernruntime-n64recomp.patch`, applies
-`patches/rt64-ob64.patch` and `patches/rt64-plume-ob64.patch`/`tools/rt64-plume-sdl.patch` to the
-RT64 submodules, and installs what the runner image is missing (`libgtk-3-dev`,
-`libvulkan-dev`, `libx11-dev` on Linux; the Metal toolchain on macOS; `make` on
-Windows). The self-hosted path keeps its own toolchain and dirtied submodules.
-
-The patch step is line-ending tolerant. A Windows checkout gives both the patch
-files and the RT64 tree CRLF, and `git apply` fails on a hunk whose last line has
-no newline (`\ No newline at end of file`; `patches/rt64-ob64.patch` has two) in that
-state. `.gitattributes` pins `*.patch` to `eol=lf` and the workflow passes
-`--ignore-whitespace` to `git apply`. Keep both when editing a patch or the
-`apply_patch` helper: without them the Windows job fails at
-`rt64_tmem_hasher.h:203` and `rt64_native_target.cpp:369`.
-
-Three platform properties of the hosted path are load-bearing.
-
-- **The data bundle must not carry AppleDouble files.** macOS `tar` writes
-  `._<name>` members for files with extended attributes. They are metadata on
-  macOS but ordinary files on Linux, and `app/CMakeLists.txt` globs `*.c`, so
-  the Linux build compiles them and fails with
-  `._funcs_0.c:1:2: error: stray '\5' in program`. `tools/data-bundle.sh` sets
-  `COPYFILE_DISABLE=1` and excludes `._*`; the workflow's unpack step deletes
-  any that an older bundle still carries.
-- **The arm64 build needs the `sse2neon` include.** `librecomp/rsp_vu.hpp`
-  includes `<sse2neon.h>` under `__aarch64__` and `<nmmintrin.h>` on x86-64.
-  `ultramodern` propagates `thirdparty/sse2neon` PUBLIC, which reaches the app
-  target, but `ogrebattle64_rsp` does not link `ultramodern`, so
-  `app/CMakeLists.txt` lists the directory for it. An x86-64 machine never
-  reads the header, so a missing entry only shows on Apple Silicon.
-- **A Windows runner builds with clang-cl under Ninja.** `cl.exe` rejects the
-  GCC/Clang spellings the app, the runtime and RT64 use for their flags — `cl :
-  command line error D8021: invalid numeric argument '/Wno-unused-variable'` —
-  so the Windows job uses the configuration Zelda64Recomp uses:
-  `ilammy/msvc-dev-cmd@v1` exports the MSVC headers, libraries and linker,
-  `choco install ninja` provides the generator, and `CMAKE_ARGS=-G Ninja
-  -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl` selects the
-  compiler. `app/CMakeLists.txt` then adds `-Xclang -fexceptions
-  -fcxx-exceptions` for clang-cl and keys its flag groups on
-  `CMAKE_CXX_COMPILER_ID`, not on `MSVC` — CMake reports `MSVC` for clang-cl
-  too, because it targets the MSVC ABI. Windows-only consequences: the static
-  SDL2 library is `SDL2-static.lib` and its package config is in
-  `<prefix>/cmake` (SDL2 uses `lib/cmake/SDL2` only off MSVC), so `make` passes
-  `-DOGRE_STATIC_SDL2=ON` and the app finds the config in either directory
-  before RT64 is added; `--config Release` is passed so a multi-config generator
-  would not build Debug; the app defines `SDL_MAIN_HANDLED` and calls
-  `SDL_SetMainReady()` so it keeps its own `main`; `create_window` returns
-  RT64's `{ HWND, thread_id }` handle; `readlink` and `__attribute__((weak))`
-  have Windows branches (the weak attribute is dropped for `_MSC_VER`, and the
-  crash handler uses POSIX `sigaction`, so it is compiled out). The package
-  carries `dxcompiler.dll` and `dxil.dll`, which RT64 copies next to its library
-  and loads at runtime.
-
-A self-hosted runner needs, per platform:
-
-| platform | toolchain | SDL2 |
-|---|---|---|
-| macOS | Xcode command line tools (incl. the Metal toolchain: `xcodebuild -downloadComponent MetalToolchain`) | built by `make sdl2-static` |
-| Linux | `cmake`, `ninja`, `g++`, `pkg-config`, `libgtk-3-dev`, `libvulkan-dev`, `libx11-dev` | `libsdl2-dev` (or `make sdl2-static`, which also needs `libasound2-dev libpulse-dev libpipewire-0.3-dev` so the static SDL2 has audio) |
-| Windows | Visual Studio 2022 with the C++ Clang tools (`clang-cl`) and `ninja`, `make`, run from a Developer Command Prompt; MinGW is not tested | built by `make sdl2-static` |
-
-## Scripted runs and diagnostics
-
-### The world map's mouse cursor (scene `0x05`)
-
-The world map's cursor follows the pointer, and a left click confirms the
-location under it. The cursor is a `Flama` sprite at screen pixels in the map
-module's state object (`*(u32*)0x80197B18`): the state machine
-`func_ovlM_8019AF0C` keeps `state+0x52`/`+0x54` and clamps them to its play area
-(x `0x28..0x110`, y `0x28..0xC0`), and the scene hook's cursor draw
-(`func_ovlM_801A103C`) reads the pair at `0x801A1C48`/`0x801A1C4C` and emits the
-sprite there.
-
-`app/src/map_cursor.cpp` samples `SDL_MOUSEMOTION`, aspect-fits the 320x240
-framebuffer inside the drawable, and writes the pixel into that pair at the draw
-site. The draw site is bank code, which is outside the mod hook map, so
-`tools/map_cursor.py` inserts the call and `make bank-recomp` re-applies it.
-
-A click does not move the cursor: it ORs the N64 `A` bit into controller 0 for a
-few pad polls in `get_input`, the same path the keyboard and the live console's
-`press` command use. The map's `A` selects the location under the cursor.
-
-The pointer scrolls the map by pushing past the view's edge. The map's state
-machine clamps the cursor to x `0x28..0x110`, y `0x28..0xC0`, so a pointer beyond
-a bound cannot place the sprite there; instead a pointer within 24 pixels of a
-bound holds the matching **D-pad** bit in `get_input`, which is what the map
-scrolls its view with. The direction is computed from the pointer's pixel clamped
-into the framebuffer, so a pointer in the pillarbox or in the black border of a
-fullscreen window still scrolls.
-
-Both cursors are off until the player turns on **SETTINGS > INPUT > MOUSE
-ENABLED** (`Off` by default; `mouse = on` in `<config>/settings.cfg`). The
-setting is the player-facing switch; the per-screen `OGRE_*` variables below
-override it for one run, and `OGRE_MOUSE=off|on` sets the row itself.
-
-| Variable | Effect |
-|---|---|
-| `MOUSE ENABLED` (SETTINGS, default `OFF`) | the player-facing switch for both cursors: the world map's and the mission field's, with the click and the edge scroll. `Off` is what every build before the row did |
-| `OGRE_MOUSE=off\|on` | set the row for one run without the UI |
-| `OGRE_MAP_CURSOR=1` / `=0` | force the map's cursor on / off for one run, whatever the row says (`off`, `false` and `no` also work for 0) |
-| `OGRE_MAP_CURSOR_LOG=1` | print one `[mapcursor]` line on every change of the game's cursor position, the pointer position, the draw flag or the edge push, and one `[cursor] hidden/shown` line on every change of the operating system pointer |
-| `OGRE_MAP_CURSOR_CONFIRM_POLLS=<n>` | how many pad polls a click holds `A` (default 8) |
-| `OGRE_MAP_CURSOR_EDGE=<n>` | how close to a bound the pointer must be to scroll (default 24 pixels) |
-| `OGRE_MAP_CURSOR_EDGE_FORCE=<mask>` | hold that raw D-pad mask (hex or decimal, e.g. `0x100` for right) as if the pointer were at that edge, with no mouse event. A measurement aid, so a scripted run can scroll with nobody at the mouse |
-| `OGRE_CURSOR=0` | keep the operating system pointer visible over the game window (`off`, `false` and `no` also work). It is hidden while the pointer is over the **game** window, and shown again while the pointer is over the Esc overlay window or outside the game window |
-
-The operating system pointer belongs to the whole application, not to one window:
-`pump_sdl_events` owns the hide and show of it, since whoever hides SDL's single
-cursor has to be the one that shows it again. The state is derived from
-`SDL_GetMouseFocus()` and `overlay_visible()` rather than from ENTER/LEAVE
-events, so a window that opens under a stationary pointer is handled too. The
-close path restores the pointer before the process exits.
-
-### The mission field's mouse cursor (scene `0x03`)
-
-The mission field's cursor follows the pointer, and a left click is the game's
-`A`. The cursor is two **f32 framebuffer pixels** at `state+0x08` (x) and
-`state+0x0C` (y) in the mission field's state object, where
-`state = *(u32*)0x801AB870 = 0x800E91D0` — a **fixed** address (in the main ELF's
-BSS) that the mission's modules each hold as a pointer constant in their data
-(record 7's `0x801AB870`, record 9's `0x80213690`, record 2's `0x8019E1B4`,
-record 3's `0x801AB870`). Session 115 read the same object through
-`*(0x80213690)` and recorded it as a heap pointer; it is fixed. The object is
-re-laid-out per phase, so the hook is gated by its call site, not by the object's
-contents.
-
-`func_ovlN_801BE4E0` (bank unit N, record 7) is the mover. It reads the **held**
-button word `*(0x800E8108)` (the base ELF fills that slot with `&D_800E79B0`)
-and the D-pad masks of the input profile at `*(0x801F0CC0)`, integrates a
-per-frame delta (a ramp of `±26` then `±8*counter`, divided by 128 and multiplied
-by 32.0), stores the pair at `0x801BE974`/`0x801BE988`, and clamps it to x
-40.0..280.0 and y 30.0..210.0 (`0x801BEB98`/`0x801BEBB8`,
-`0x801BEBE0`/`0x801BEC00`).
-
-**The mission's cursor is digital (D-pad) where the world map's is analog.** No
-mission bank reads the stick; the map reads it at `*(0x800C47F0)+2`/`+3`.
-
-**The cursor is also a servo the game runs continuously.** Over a played run the
-pair moves 1-9 px (median 3.6) on nearly every frame with nothing held, from the
-mover's own integration, its pull toward the screen centre, and the snap-to-unit
-writers. So the mouse cannot simply follow whatever the game does — that locks it
-out — and it cannot always overwrite the game either, because a command recentres
-the camera and carries the cursor with it, which is what leaves the cursor on the
-place that was just acted on. The arbitration is by explicit signal:
-
-| the game moves the cursor when | log |
-|---|---|
-| a D-pad direction is held | `pad=1` |
-| C-LEFT is held in a mode that centres (profile `+0x1C`, field mode `*(0x801F0E00)` < 2 or == 42) | `centre=1` |
-| the mover integrated a delta on this call (`state+0x06`/`+0x07`) | `nudge=1` |
-| the window after a click is still running | `yield=1` |
-
-In all four cases the pointer **adopts** the game's position instead of writing;
-otherwise it places the cursor at the pointer's pixel.
-
-The two insertions are in the mover: `ogre_mission_cursor_note_move` at the
-generated label `L_801BEC04` (the only point where the per-frame delta bytes still
-hold this call's values — the mover zeroes them at `0x801BEC48`-`0x801BEC58`), and
-`ogre_mission_cursor` at the epilogue `L_801BECC8`, which both of the mover's
-paths reach, including the screen-centring branch at `0x801BE890`. The sites are
-bank code, so `tools/mission_cursor.py` inserts both calls (it finds the unit that
-defines `func_ovlN_801BE4E0`) and `make bank-recomp` re-applies them.
-
-A click does not move the cursor: it ORs the N64 `A` bit into controller 0 for a
-few pad polls in `get_input`, the same path the keyboard and the live console's
-`press` command use. One click arms both the map's and the mission's confirm, and
-each armed count is consumed on every poll whatever screen is up, so an `A` armed
-on one screen cannot fire later on the other.
-
-**The field's view scrolls when the pointer is close to a play-area edge.** The
-camera pans with the cursor, not with a held direction: the mover converts the
-held D-pad into the per-frame delta bytes `state+0x06`/`+0x07` (`0x801BE5A8`
-`li $v1,26`, then the ramp at `0x801BE6D4`), and `func_ovlN_801BECF0` — called
-right after the mover at `0x801AF130` — reads those same bytes and adds
-`delta/128 * 8.5 * table[e]` to the eye x and the look-at x of the camera at
-`*(u32*)0x8018F5AC` (`0x801BEE04`-`0x801BEE1C`), with the same for z
-(`0x801BEE9C`-`0x801BEF5C`), and clamps the result to the map's world rect at
-`0x801F0DD8`. It only runs while `*(0x801F3630)` is set, which the mover sets only
-when the cursor pair actually changed on that call (`0x801BEC3C`-`0x801BEC70`), so
-the pan is coupled to cursor movement. The pointer's own pixel is clamped by the
-mover to 40..280 / 30..210, so a pointer past that bound cannot place the cursor
-there and the intent arrives as a held direction instead: a pointer within
-`OGRE_MISSION_CURSOR_EDGE` pixels (default 24) of a play-area bound holds the
-matching D-pad bit, which the mover decodes through the profile `*(0x801F0CC0)`.
-The masks this mode's profile uses are the N64 D-pad bits (right `0x100`, left
-`0x200`, up `0x800`, down `0x400`), which the hook prints once per run beside
-`hook active`. This is the world map's mechanism, and the arbitration already
-adopts the game's cursor while a direction is held, so the push and the pointer
-do not fight. Developer-confirmed: the camera could be moved around by moving the
-cursor close to the edges (session 129).
-
-| Variable | Effect |
-|---|---|
-| `OGRE_MISSION_CURSOR=1` / `=0` | force the mission's cursor on / off for one run, whatever the MOUSE ENABLED row says (`off`, `false` and `no` also work for 0) |
-| `OGRE_MISSION_CURSOR_LOG=1` | print one `[missioncursor]` line on every change of the game's cursor position, the pointer position, the D-pad state or the camera, one line per edge push, one line per confirm poll, and one line per click |
-| `OGRE_MISSION_CURSOR_CONFIRM_POLLS=<n>` | how many pad polls a click holds `A` (default 8) |
-| `OGRE_MISSION_CURSOR_YIELD=<n>` | frames after a click during which the pointer adopts the game's cursor instead of placing it (default 15, ~0.25 s). It has to cover the camera coming to rest after a command; the cost is that the pointer does not respond during the window, so the player moves the mouse afterwards to re-sync it |
-| `OGRE_MISSION_CURSOR_AT=<x>,<y>` | park the pointer at that framebuffer pixel **once**, with no mouse event, as if it had been moved there. A measurement aid, so a scripted run can place the cursor with nobody at the mouse. Do not run it while someone is testing with a real mouse: the parked pointer is what the placement uses |
-| `OGRE_MISSION_CURSOR_EDGE=<n>` | how close to a play-area bound (40/280 x, 30/210 y) the pointer may be before it pushes that direction (default 24 px) |
-| `OGRE_MISSION_CURSOR_EDGE_FORCE=<mask>` | hold that raw D-pad mask (hex or decimal, e.g. `0x100` for right) as if the pointer were at that edge, with no mouse event. A measurement aid, so a scripted run can hold a direction with nobody at the mouse |
-
-The `[missioncursor]` line carries the field's camera as
-`cam=<eye x>,<eye z>/<look x>,<look z>`. `*(u32*)0x8018F5AC` is the camera the
-mover and `func_ovlA_801AAE30` both use, `+0x14` is the eye (its height is
-`+0x18`) and `+0x20` the point it looks at, and `func_ovlN_801BECF0` moves both
-to pan. `edge=` is the D-pad mask the pointer is currently pushing.
-
-Environment variables make a run self-driving and bounded, for measurements and
-captures without a human at the keyboard (see `docs/DECISIONS.md`, sessions 25,
-26 and 27). All default to off.
-
-| Variable | Effect |
-|---|---|
-| `OGRE_TAP_MS=<n>` | controller 0 presses Start for 150 ms out of every `n` ms (the native equivalent of the web probes' Enter tap) |
-| `OGRE_TAP_SCENE=<list>` | press `OGRE_TAP_MS`/`OGRE_TAP_BUTTON` only while the dispatcher's scene (`D_800E810E`) is in the list — names from `kScenes` (`title`, `new-game`, …) or hex, `,`/`+`-separated. Scopes a scripted tap to **game state instead of wall time**, so `OGRE_SPEED` and capture readback no longer break the schedule |
-| `OGRE_TAP_NOT_SCENE=<list>` | the complement of the above. `OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game` presses Start through the title and goes silent the moment New Game is confirmed — no `OGRE_TAP_MAX` tuning |
-| `OGRE_TAP_BUTTON=<list>` | which pad buttons the synthetic taps press, cycled one per tap (`start`, `a`, `b`, `down`, …; `none` skips a tap). **The list shape matters, and so does the form (developer, session 64): a tap that lands while the cursor is in a text field opens a *tooltip*, and the tooltip blocks the sequence from advancing.** The name-entry form (scene `0x07`) is where this bites. The recorded working shape is **a few `start,a` pairs then a long run of plain `a`** — e.g. `"start,a,start,a,start,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a"` (see the checkpoint and `OGRE_NJREAD_LOG` recipes below). An *endless* `start,a` alternation stalls there forever: a scripted run that shows no crash, no stub call, and a final scene of `0x07` is almost always this. If a schedule keeps stalling, drive the run by hand and take a checkpoint instead |
-| `OGRE_TAP_SCENE_BUTTON=<scene>:<button>[:<count>],…` | the **scene-keyed** sibling of `OGRE_TAP_BUTTON` (session 68). `OGRE_TAP_BUTTON`'s slot index advances with **wall time**, so a route across several scenes has to be hand-tuned to how long each takes — the same "title → Load Game → map" schedule landed on the map in one run and in the attract loop in the next, because the boot reaches the title anywhere between 1.6 s and 15 s (the forced-scene poke races the publisher stills). This one keys the button on the dispatcher's active scene (`D_800E810E`; names from `kScenes` or hex) and presses it every `OGRE_TAP_MS` while that scene runs, at most `<count>` times (default unlimited). Entries in one scene are consumed in order, so `OGRE_TAP_MS=1500 OGRE_TAP_SCENE_BUTTON="title:start:5,0x12:a:3,0x05:right:3,0x05:a:1"` is "Start up to five times on the title (early presses are sometimes swallowed; the scene change stops it), A three times on the Load Game screen, then walk the map cursor right three times and press A". Requires `OGRE_TAP_MS`; it replaces the slot schedule entirely |
-| `OGRE_EXIT_AFTER_MS=<n>` | after `n` ms the app prints the last recompiled function *and the live call chain* of every game thread, then exits 0 (a scripted run does not unwind on purpose: the graceful path tears threads down mid-call and segfaults intermittently) |
-| `OGRE_PREF_DIR=<dir>` | use `<dir>` as the runtime config dir instead of the executable's own folder, so a run keeps its `saves/` and `mods/` where you choose (e.g. inside the repo, or on a sandbox that cannot write next to the app). The boot log prints the resolved path |
-| `OGRE_ROM=<path>` | boot this ROM without passing it as an argument (validated and stored like an argument; the start screen is skipped) |
-| `OGRE_LAUNCHER=1` | force the start screen even when a ROM is available (testing the first-launch experience) |
-| `OGRE_TEST_DROP=<path>` | feed one synthetic ROM drop to the start screen, exercising the drop handler without a human drag (SDL cannot synthesize a Finder drag) |
-| `OGRE_LAUNCHER_TAB=<main\|mods\|controls\|settings>` | open the start screen on that tab (screenshot and scripted-run aid) |
-| `OGRE_LAUNCHER_KEYS=<name>,…` | push one synthetic keydown per 150 ms through the start screen's real key handler. Names are SDL scancode names (`Tab`, `Down`, `Space`, `p`, `Return`), so `Tab,Tab,Tab,Space,p` opens CONTROLS, arms the A row's rebind and binds `P` |
-| `OGRE_LAUNCHER_SHOT=<path>` | after drawing a frame, write the start screen's renderer as a PPM and quit. `OGRE_LAUNCHER_SHOT_MS=<n>` delays it (default: after all `OGRE_LAUNCHER_KEYS` and `OGRE_LAUNCHER_PAD` entries) |
-| `OGRE_LAUNCHER_PAD=<tag>,…` | push one synthetic `SDL_CONTROLLERBUTTONDOWN` per 150 ms through the panel's real pad handler, so the pad path is exercised on a machine with no gamepad. Tags are the gamepad tags `controls.cfg` uses (`a`, `b`, `back`, `dup`, `dleft`, `lb`, …) |
-| `OGRE_OVERLAY=1` | open the in-game overlay at startup |
-| `OGRE_OVERLAY_AT_MS=<n>` | push one synthetic `ESC` down `n` ms after the overlay is initialised, so the real open path runs without a human |
-| `OGRE_OVERLAY_TAB=<main\|controls\|settings\|debug>` | open the overlay's panel on that tab (`start` is accepted as an alias for `main`, which carries EXIT GAME) |
-| `OGRE_OVERLAY_KEYS=<name>,…` | push one synthetic keydown per 150 ms while the overlay is visible (same names as `OGRE_LAUNCHER_KEYS`). `main` + `Space` activates EXIT GAME |
-| `OGRE_OVERLAY_PAD=<tag>,…` | the same for the pad (same tags as `OGRE_LAUNCHER_PAD`), delivered whether or not the overlay is visible, so a script's first `back` opens it |
-| `OGRE_OVERLAY_OPACITY=<0.2..1.0>` | the overlay window's opacity (default 0.90) |
-| `OGRE_WINDOW_CLOSE_AT_MS=<n>` | push one `SDL_WINDOWEVENT_CLOSE` for the game window `n` ms after the platform was configured, so the window's close path can be exercised without a human clicking the button. Pair it with `OGRE_OVERLAY_AT_MS` and `OGRE_OVERLAY_KEYS="Escape"` to have the overlay's second SDL window open and close first, which is the state the close button used to stop working in |
-| `OGRE_CAPTURE_OVERLAY=<path>` | write the overlay's renderer as a PPM once, after its first frame. `OGRE_OVERLAY_SHOT_MS=<n>` delays it, so the capture can show what `OGRE_OVERLAY_KEYS` changed |
-| `OGRE_SPEED_KEYS=<up\|down>,…` | push one synthetic `=` or `-` keydown per 150 ms, through the same SDL event path a real press takes, so a scripted run exercises the GAME SPEED hotkeys. `OGRE_SPEED_KEYS_AT_MS=<n>` is the delay before the first press (default 1000). `up`/`+`/`=` and `down`/`-` are the names |
-| `OGRE_SPEED_PAD=<tag>,…` | the same for the pad's R3 speed button, as synthetic `SDL_CONTROLLERBUTTONDOWN` events. Tags are the CONTROLS tab's (`r3`/`rstick` for the right stick's click). `OGRE_SPEED_PAD_AT_MS=<n>` is the delay before the first press (default 1000); both scripts use one clock, and a frame delivers the key script first when both are due |
-| `OGRE_CAPTURE_BADGE=<path>` | write the speed badge's window as a PPM, one file per show, so the file holds the last badge the run put up (session 137) |
-| `OGRE_SAVE=<name\|path>` | start the run from that save as the cartridge battery (session 78). A bare name is looked up as the path, then `<rom dir>/saves/<name>[.n64\|.bin]`, then `assets/saves/<name>[.n64\|.bin]`, so `OGRE_SAVE=prologue` finds `assets/saves/prologue.n64`. Accepts the port's 32 KiB image, an emulator wrapper of it (in either byte order, at any offset), a **DexDrive `.N64` Controller Pak dump** — converted through its notes' battery slots, checksums reseeded — or a bare pak. The result is written to `<config>/saves/<game id>.bin`, never back into the source |
-| `OGRE_SAVE_RESET=1` | re-import even when the battery in the config dir is newer than the source. Without it a run **keeps** that battery, so progress the game wrote back survives a re-run, and swapping a save file in re-imports it (its mtime is newer) |
-| `OGRE_SAVE_ALL=1` | with `OGRE_SAVE`, also take the stale records a deleted Controller Pak note leaves behind (still capped at the battery's two save slots) |
-| `OGRE_DEBUG_TRACES=1` | the runtime's `[ev]`/`[mq]`/`[sch]`/`[vi-debug]` traces, including `[pi] inline DMA` for every streamed-overlay load (very chatty) |
-| `OGRE_DEBUG_VI=1` | with `OGRE_DEBUG_TRACES`, log every `osViSetMode` (mode pointer + decoded geometry) and every VI geometry change (`[vi-debug]`) |
-| `OGRE_DL_ANALYZE=1` | per-submission F3DEX2 workload counts (commands, triangles, texrects, textures) |
-| `OGRE_DL_DECODE=<n>\|all` | dump the decoded command stream of display list `<n>` (or all): `SETTIMG`/`SETTILE`/`SETTILESIZE`/`LOAD*`/`TEXRECT` with its `RDPHALF` halves/`FILLRECT`/`SETSCISSOR`/combiner/othermode. The ground truth for "which RDP command draws this" |
-| `OGRE_RAM_KEY=<1..9>` (`_ADDR`, `_LEN`, `_OUT`, `_STRIDE`, `_AT_MS`, `_FULL`) | press that key and the run dumps guest RDRAM to `<OGRE_PREF_DIR>/ram-<n>.bin` and `.txt`, so a bug can be investigated offline with nothing copied out of a terminal. `_ADDR` defaults to `0x802696C8` (the sprite-part pool session 130 dumped), `_LEN` to `0x1000`, `_STRIDE` sets the slot size the `.txt` summary reports (default `0x80`), and `_AT_MS` takes one dump at that time for a scripted run. `_FULL=1` writes the whole 8 MiB image to `ram-<n>-full.bin` instead of the window; `tools/ogre_ram.py` then answers the questions a window cannot (`find-ptr` = every word equal to an address, which names the table that chose a buffer; `cell` = one slot printed as the game's own CI4 image; `empty-cells` = which slots in a range are all zero). Read-only: nothing is written to guest RDRAM |
-| `OGRE_DUMP_RDRAM=<path>` | write the whole 8 MiB RDRAM image for offline analysis: on the exit path (`OGRE_EXIT_AFTER_MS` or a closed window) and beside `error.log` on the crash path |
-| `OGRE_TEX_TRACE=1` (`_DUMP`, `_KEY`, `_KEY2`, `_MS`, `_AFTER_MS`, `_DRAW`, `_MAX`, `_MIN_PX`, `_IMAGES`, `_COLOUR`, `_BLACK`) | **what every textured rectangle samples** (session 130), the tool for "one part of a sprite draws as a black rectangle". The submitted display list is walked before RT64 parses it and each `G_TEXRECT` prints one `[tex]` line: the rectangle, its `s`/`t`/`dsdx`/`dtdy`, the `SETTILESIZE` window, the tile's line and palette, and the `SETTIMG` address/format/size/width. `OGRE_TEX_TRACE_DUMP=<dir>` also writes the RDRAM the draw reads to `<dir>/tex/<n>_src.bin` (and `_pal.bin` for an indexed image) beside a `.json`, with a byte summary on `[tex]   src:` lines. **`OGRE_TEX_TRACE_COLOUR=1` decodes each sampled window through its palette (CI4/CI8) or as RGBA16 and prints `[tex]   colour: mean N/255 …`**, plus one `[tex] BLACK DRAW: dl=… n=… rect=… timg=…` line for the first draw whose mean is at or below `OGRE_TEX_TRACE_BLACK` (default 4 of 255, with at least 32 opaque texels) — that is the line that names a part which samples a correct cutout and paints it black. `OGRE_TEX_TRACE_KEY=<1..9>` arms the capture when that digit key is pressed, which is the way to capture a bad frame: press it while the frame is on screen, and `OGRE_TEX_TRACE_MS=<n>` (default 2000) closes the capture by itself; each press re-arms, so several captures fit in one run. `OGRE_TEX_TRACE_MS=0` holds the capture until the window closes, so every frame after the press is in the log by construction, and `OGRE_TEX_TRACE_KEY2=<1..9>` arms the same capture on a second key with its own edge state (a press that was too early does not consume the next one). `OGRE_TEX_TRACE_AFTER_MS=<n>` is the timer alternative (one-shot). `_DRAW=<n>` reports only the nth rectangle of the run and `_MAX=<n>` caps the rest. `tools/ogre_tex_uv.py <dir>` decodes the dump into a per-draw summary (`--top N` = the N darkest samples, `--dark`, `--png`). Read-only: nothing is patched. The directory named by `OGRE_TEX_TRACE_DUMP` is created on demand |
-| `OGRE_CRASH_TEST=<segv\|bus\|abrt\|fpe\|ill>` | raise that signal right after the crash logger is armed, so a packaged build's `error.log` can be verified without provoking a real crash |
-| `OGRE_SMOKE=1` | print `[smoke] main reached`, try SDL once (reported, not required) and exit 0. `tools/smoke-dist.sh` and `make smoke` use it to prove a package loads and reaches `main` |
-| `OGRE_CONSOLE=1` | Windows: `AllocConsole()` and point stdin/stdout/stderr at it, so a double-clicked GUI build shows the `[boot]` log (the same switch Zelda64Recomp's Windows build calls `--show-console`) |
-| `OGRE_LIVE_CONSOLE=1` | turn on the **live debug console** (session 117). Off by default: with no variable set a stock run polls no path and reads no keyboard, because a console command can write guest RAM (`w`) and restore a checkpoint (`load`). Either trigger can also be turned on on its own by naming its own variable (`OGRE_CONSOLE_FILE`/`OGRE_CONSOLE_AT_MS`, `OGRE_KEY_<n>`). See "The live console" below |
-| `OGRE_GRAPHICS_API=<auto\|d3d12\|vulkan\|metal>` | pin RT64's backend instead of `auto`. RT64 switches D3D12 to Vulkan on an old driver (NVIDIA ≤ 475.14, AMD ≤ Jan 2019, Intel 6th-gen ≤ 31.0.101.2115) and that transition rebuilds the interface on the same window; `vulkan` skips it and `d3d12` is the other side of the A/B. The boot log names the GPU and whether the fallback ran |
-| `OGRE_CHAIN_HISTORY=<tid>` | record and print the ordered sequence of live call chains thread `<tid>` goes through |
-| `OGRE_SNAP=1\|<frames>` | the runtime's **periodic message-queue snapshot** (`[snap]`, `ultramodern::debug_dump_queue_snapshot`), which is what shows a frozen boot's full/blocked queues when every game thread is parked. **Off by default** (session 116): the snapshot samples `last_func_vram` 100 times at 200 us, dumps every parked thread's call chain, walks the malloc graph and prints ~80 lines, all on the Critical-priority VI thread, so it delays the retrace it observes — 26 ms of frame hitch every 1.5 s on macOS, and more on Windows where `sleep_for(200us)` resolves to the 1 ms system timer that SDL's `timeBeginPeriod(1)` sets. `=1` uses the default 90 VI frames (~1.5 s at 60 VI/s), a number sets its own period in VI frames |
-| `OGRE_COVER=1\|<path>` | recompiled-function **coverage census** (session 83): at exit, when the window is closed, or on the live console's `cover`, print every distinct recompiled function the run entered, one `[cover] 0xADDR count` line per function, for `tools/recompcov.py --log`. **Give it a path** (`OGRE_COVER=/tmp/cover.txt`) for a session played by hand — the census then lands in its own file instead of the end of a very chatty stdout, and the app prints one line saying so. `=1` keeps it on stdout for scripted runs. Unlike `OGRE_PROFILE=1` it starts no sampling thread and skips the shadow call chain, so the entry hooks cost one hash insert per call and a playthrough stays near normal speed |
-| `OGRE_SYNTH_FRAME=1` | submit a synthetic F3DEX2 display list (seven colour bars) through the normal task path, as a renderer-path probe. Also turns on the two presenter diagnostics below |
-| `OGRE_SYNTH_AT_MS=<n>` / `OGRE_SYNTH_PERIOD=<n>` | when the probe first submits, and how many VIs between re-submits (default 30; 0 = every VI). Keep `AT_MS` above ~600 ms: before that the game's ucode is not in RDRAM yet and RT64 cannot identify the GBI |
-| `OGRE_NO_DUMMY_VI=1` | skip the pre-start dummy VI workload (it clears the screen black every VI and would hide a diagnostic draw) |
-| `OGRE_SYNTH_RAW=1` | also write the bars straight into the VI framebuffer in RDRAM, bypassing the RDP (isolates the presenter from the display list) |
-| `OGRE_SYNTH_ANIMATE=1` | rotate the raw palette every VI so RT64's change-driven presenter keeps presenting |
-| `OGRE_SYNTH_NO_DL=1` | with `OGRE_SYNTH_RAW`, do not submit the display list (RAM path only) |
-| `OGRE_SYNTH_FORCE_VI=0` | do not pin the VI to the probe's framebuffer (the pin is on by default; without it the probe is timing-dependent, because the game may have repointed the VI at one of its own framebuffers) |
-| `OGRE_CAPTURE_PRESENT=<path>` | at present time, GPU-read back the exact swap-chain texture and write `<path>.<n>.ppm` (see "Capturing the native output") |
-| `OGRE_CAPTURE_TARGET=<path>` | same, for the render target the VI renderer sampled (`<path>.<n>.bin`, `R16G16B16A16_UNORM`, 8 bytes/texel) |
-| `OGRE_CAPTURE_AFTER=<n>` | skip the first `n` presents before capturing |
-| `OGRE_CAPTURE_EVERY=<n>` | with `OGRE_CAPTURE_PRESENT`, capture only every `n`th present — a multi-minute run becomes a slideshow instead of one 3 MB PPM per frame (files stay numbered by present index) |
-| `OGRE_SPEED=<n>` | scale the emulated clock (CPU counter **and** VI retrace schedule) by `n` (1..64), so timed sequences — the attract loop, songs — complete in `1/n` of the wall time. Semantics are unchanged: every timer scales together (audio is off in these runs). `OGRE_SPEED=8` reaches the attract loop's second variant in ~42 s instead of ~360 s. This is the debug spelling of **GAME SPEED**: with the variable unset the runtime takes its starting value from `<config>/settings.cfg`, and `OGRE_SPEED` overrides that file for one run without writing it |
-| `OGRE_WIDESCREEN=off\|on` | debug spelling of **WIDESCREEN**: `on` turns RT64's Expand aspect ratio on only while the dispatcher runs the mission scene `0x03`. The retired `missions` and `always` spellings are read as `on`. Overrides `<config>/settings.cfg` for one run without writing it, the same rule as `OGRE_SPEED`. Every transition prints a `[widescreen]` line |
-| `OGRE_DISPLAY_EXPERIMENTS=1` | turn on the two experimental DISPLAY rows, RESOLUTION and MSAA, which are hidden and not applied without it. A set `OGRE_RESOLUTION` or `OGRE_MSAA` enables it too |
-| `OGRE_RESOLUTION=native\|2x\|auto` | debug spelling of **RESOLUTION** (experimental; enables the row). `2x` renders at twice the native resolution in each axis and `auto` at the largest integer multiple that fits the window |
-| `OGRE_MSAA=off\|2x\|4x\|8x` | debug spelling of **MSAA** (experimental; enables the row) |
-| `OGRE_WINDOW=windowed\|fullscreen` | debug spelling of **WINDOW**, the same override rule |
-| `OGRE_SOUNDS=off\|on` | debug spelling of **SOUNDS**: `off` queues silence. Overrides `<config>/settings.cfg` for one run without writing it, the same rule as `OGRE_SPEED` |
-| `OGRE_VOLUME=<0..100>` | debug spelling of **VOLUME**, the output gain in percent, clamped. Same override rule |
-| `OGRE_MOUSE=off\|on` | debug spelling of **MOUSE ENABLED**, the switch for both screen cursors. Overrides `<config>/settings.cfg` for one run without writing it. `OGRE_MAP_CURSOR` / `OGRE_MISSION_CURSOR` then override one screen on top of it |
-| `OGRE_FORCE_SCENE=<hex>` | switch a run to attract scene `<hex>` by poking the scene id (`*(u16*)(D_800C4BBC+4)`) until `D_800E810E` reports it active — no need to wait out the attract loop. `OGRE_FORCE_SCENE_AFTER_MS` (default 3000) delays the first poke so boot can settle |
-| `OGRE_PRESENT_ALWAYS=1` | push a present on every VI even when nothing changed (a stalled boot changes nothing, so the window otherwise freezes on an old frame) |
-| `OGRE_PRESENT_FBTARGET=1` | if the framebuffer manager has no framebuffer at the VI address, present a non-empty render target there instead of the RDRAM copy |
-| `OGRE_INSTANT_PRESENT=1` | switch RT64 to `PresentEarly` (a display list presents the framebuffer it drew) |
-| `OGRE_RECT_LR_FIX=1` | restore RT64's **"Fix LR with Scissor"** rect enhancement, which is **off** by default here. RT64's `RDP::drawRect` (`rt64_rdp.cpp`) rewrites a rectangle's right edge to the scissor's right edge whenever the two are within one pixel, on the assumption that a game under-drew a full-screen background. OB64's rectangles are correct, and the unit profile's rightmost DEF/MDEF digit sits exactly one pixel inside the panel scissor, so the snap widened a 6-px glyph rectangle to 7 px and it sampled the next font cell's first column (`28` read as a cropped `9`, `11` as a cropped `2`). `OGRE_RECT_LR_FIX=1` A/Bs the old behaviour. See `docs/HANDOFF-2026-09-25-session101.md` |
-| `OGRE_PRESENT_TRACE=1` | `[present]`/`[state]` traces: what each present carries and which path it took |
-| `OGRE_RDP_TRACE=1` | `[rdp]` traces: `setColorImage`, `fillRect`, `drawRect` (with the scissor/empty checks) |
-| `OGRE_WORKLOAD_TRACE=1` | `[workload]` traces: the framebuffer pair RT64 built (colour image, scissor, call count) |
-| `OGRE_FBRENDER_TRACE=1` | `[fbrender]` traces: the renderer's per-call view (cycle type, fill colour, rect) |
-| `OGRE_VI_TRACE=1` | `[vi]` trace of the decoded VI RT64 is about to present |
-| `OGRE_OVERSCAN=<0..8>` | how much the presenter crops off the framebuffer's right/bottom edge (default **1 px**; `0` = present the full framebuffer, the pre-session-81 behaviour). OB64's own scissor and clear are `(0,0)-(1276,956)` = 319x239 of its 320x240 buffer, so the last row/column are never written by the scene and keep leftovers from the boot's njpeg draws; the VI's three-buffer rotation then toggled them into a flickering edge line. A CRT's overscan hid the game's off-by-one. Session 81's other half is **not** a knob — a game framebuffer is now sized from the VI rather than from the rectangle the frame drew (`framebufferHeightForDisplay`), because the RDP snaps a copy/fill rect's fractional bits and frames alternated between 239/240/241-row targets. See `docs/HANDOFF-2026-09-18-session81.md` §5-§7 |
-| `OGRE_SCHED_TRACE=1` | enable the scheduler traces and, at exit, dump the race-free scheduler event ring (`[sched-ring]`): every insert/pop/remove/resume/park/wake/swap with a global sequence number and the running queue after it. This is how a thread that yielded and was never resumed is read off a run |
-| `OGRE_SCHED_TRACE_TID=<tid>` | with `OGRE_SCHED_TRACE`, filter the ring dump to events involving thread `<tid>` |
-| `OGRE_NOP_RECT=<selectors>` | app-side bisect aid: walk the display list before RT64 parses it and replace matching `G_TEXRECT`s (and their `RDPHALF_1`/`RDPHALF_2` pair) with `G_SPNOOP`, so a suspected draw disappears and the layers under it show. Selectors: `any`, `tex:<hex>` (the current `SETTIMG` address), `flip` (`dsdx < 0`), `x:<a>-<b>`, `y:<a>-<b>`, `n:<index>` |
-| `OGRE_FOG=0` | disable the session-35 repair that rewrites OB64's fog/cloud "wrap" rectangles to sample the layer's own image (found through the game's layer table at `D_801B80E0`). On by default. The repair was a no-op until session 36 (its `G_SETTILESIZE`/`G_LOADTILE` extents were in texels, not the GBI's quarter-texels); it now draws the title's logo-band fog and the `©1999 QUEST` sweep (`docs/HANDOFF-2026-09-14-session36.md` §3) |
-| `OGRE_FOG_TRACE=1` | report each repaired fog rectangle group (layer, image address, dimensions and the rectangle's `s`/`t`) |
-| `OGRE_FOG_SCALE=<percent>` | scale the fog image's intensity when it is staged for the fog group (**default 100 = the game's own asset**, which is the right level: the combiner is `RGB=ONE, ALPHA=TEXEL0`, so the overlay is white modulated by the layer image's intensity, mean 5.1% / peak 20.4%). Lower values stage a scaled copy in the last 64 KiB of RDRAM, which OB64 leaves untouched (the first use reports it if that area is not zero); `45` gives a softer, non-retail look |
-| `OGRE_FOG_SUMMARY=1` | one `[fog-summary]` line per display list (groups repaired, layer/image used) plus one `[fog-group]` line per white group (`s`, `t`, the inherited tile, layer, image installed). This is how the `©1999 QUEST` blink was traced |
-| `OGRE_NO_AUDIO=1` | skip opening an audio output device; the boot logs `[SDL] OGRE_NO_AUDIO: no output device opened`. Every run of the game sets it (AGENTS.md rule 14). The audio microcode still runs, so a result that depends on the audio task is unaffected |
-| `OGRE_NJPEG=0` | force the **stub** for the Nintendo-JPEG decoder (`M_NJPEGTASK`, type 4: the New Game step ≥ 2 background decode). On by default since session 47, when the recompiled microcode was fixed (`text_address` is a label base — see `docs/guides/rsp-microcode.md`); it costs 0–1 ms per image |
-| `OGRE_NJPEG_TRACE=1` | `[njpeg]` lines: the colour image the YUV macroblock draw landed in. RT64 records it in the scratch word, but it is only *re*set by a YUV-texture-then-colour-image pair and never cleared, so it can be stale — the readback trusts the game's own `state[0x64]` instead (`tools/njpeg_readback.py`, `docs/HANDOFF-2026-09-16-session57.md` §1) |
-| `OGRE_NJREAD_LOG=1` | `[njread]` one line per njpeg stage-3 pass (`func_ovlE_8019976C`): the pass number, scene/step, the framebuffer the game's `state[0x64]` selects, which rule the `njpeg_readback.py` patch applied (`game` or `scratch`), the scratch word (`cimg`/`njpeg`/`lastfb`), the display word `D_800C4BB8`, and the pass's destination/size. This is how the stale-source artifact was found and is the before/after check for it |
-| `OGRE_YUV_TRACE=1` | `[yuv]` one line per `G_SETTIMG` with `fmt=YUV` (the njpeg macroblock texture image): confirms the `0x800A5110` draws reach RT64 at all |
-| `OGRE_BG=0` | run **without** the `mods/backgrounds/` HD-background pack (`off`, `false` and `no` also work). The pack is otherwise loaded automatically from the first folder that has a `backgrounds.txt` (`docs/guides/hd-backgrounds.md`) |
-| `OGRE_BG_DIR=<dir>` | use **only** this folder as the pack, instead of `<config>/mods/backgrounds`, `<config>/../mods/backgrounds` and `<cwd>/mods/backgrounds`. Pointing it at an empty folder is the other way to run without a pack |
-| `OGRE_BG_LOG=1` | `[hdbg]` one line per njpeg readback pass and per applied chunk: the scene/step, the destination, and which image (`01` or `01 wide`) |
-| `OGRE_BG_DEBUG=1` | paint each readback pass a solid colour (320x240 red, 176x240 green, 320x144 blue, 176x144 yellow) instead of the pack image, so a capture reads the four-pass composition |
-| `OGRE_BG_DUMP=<dir>` | write the game's own backdrop — the four sub-images assembled into the 496x384 canvas — as `original-step<NNNN>.png`, before the pack replaces anything. `tools/backgrounds.py` and `make bg-extract` drive this and file the result |
-| `OGRE_WS_SCENES=<hex>[,<hex>…]` | the scenes RT64's Expand is used for when WIDESCREEN is on (default the mission `0x03` and the dialogue/cutscene scene `0x0D`); a scene the HD-background pack covers is always added |
-| ~~`OGRE_NJ_WAIT_MS=<n>`~~ **removed (session 77)** | this used to make the **RSP worker** wait after *every* display list for the game's njpeg framebuffers (`0x400`/`0x25C00`/`0x4B400`) to appear in RT64's framebuffer manager, 500 ms timeout. Session 57 measured it as a no-op in the njpeg path (`[njwait] spins=1 found=1 ms=0`) but session 77 found its real cost: any scene that renders into neither of those three **fixed** addresses can never satisfy the condition, so the poll burned the whole 500 ms on every submitted list. The boot's **publisher stills (scene `0x0A`, the Nintendo/ATLUS/QUEST logos, which use a 640x480 image buffer) ran at 2 display lists/s instead of 30** — a visible ~16× slowdown. The readback never needed the wait (the game's own DP-completion wait plus `ogre_sync_framebuffers()` order the copy), so the call was deleted. `OGRE_SYNC_TRACE=1` no longer prints `[njwait]` lines, only `[syncfb]`. See `docs/HANDOFF-2026-09-18-session77.md` |
-| `OGRE_SYNC_TRACE=1` | `[njwait]` (the RSP-worker render wait: spins, found, ms, queue/workload ids), `[syncfb]` (the framebuffer manager at the game's CPU readback) and `[njpair]` (the framebuffer pairs RT64 builds for `0x400`/`0x25C00`/`0x4B400`) |
-| `OGRE_S2D_TRACE=1` | `[s2d]` the first 40 S2DEX 2D-object commands (`G_OBJ_RECTANGLE`/`_R`/`G_OBJ_SPRITE`), with the decoded `uObjSprite` (fmt/siz/image size/stride/TMEM address), the matrix-derived destination rectangle, the target colour image and the current texture image address. This is the diagnostic that showed Ogre Battle 64's 300 macroblock rectangles tiling its 320x240 njpeg framebuffer (session 51) — without the S2DEX2 object commands implemented, the same list looks like "texture loads only" |
-| `OGRE_CONVERT_TRACE=1` | `[convert]` the raw 9-bit `G_SETCONVERT` fields the game programs (`k0..k5`). The YUV16 decode sign-extends and scales them `2*K+1` and converts with `R = Y+K0*V'`, `G = Y+K1*U'+K2*V'`, `B = Y+K3*U'` (`U'=U-128`, `V'=V-128`) — the game sets `k0=175 k1=469 k2=423 k3=222 k4=114 k5=42`, i.e. coefficients `351/−85/−177/445` (session 52; `k4`/`k5` are the combiner's `K4`/`K5`, used raw over 255) |
-| `OGRE_FB_WRITEBACK=1` | `[fbpair]` (which framebuffer pairs RT64 renders, with their rows) and `[fbwrite]` (the CPU-visible RDP→RDRAM writeback, with the first pixels). This is how "does a rendered framebuffer reach RDRAM for a CPU read" is answered |
-| `OGRE_RDP_TRACE=2` | instead of the first-20 `[rdp]` lines, a `[cimg]` histogram of every colour-image address plus a `[cimgseq]` ordered list of the game's framebuffer targets — the ground truth for "which buffers does the game render into" |
-| `OGRE_FOG=alternate` | apply the repair on every other display list. On screens the game redraws every list this A/Bs the fog; it cannot say *which* screen a pair is on (session 35's isolation image was the story screen), and on the static title it shows nothing because no display list changes |
-| `OGRE_SCENE=<name\|hex>` | boot straight into a screen: `title` (0x04: the attract title — logo plus the New Game / Tutorial / Stereo menu over the clouds), `intro` (0x09), `publishers` (0x0A), `story` (0x0B), `unit-info` (0x0C), `tutorial` (0x17: Deneb's "Is this your first time here?" dialogue, the title's Tutorial entry), `menu` (0x18), `new-game` (0x02), or any hex id (`OGRE_FORCE_SCENE` still works). The poke is only seen **before the boot enters its first scene (~1.1 s)**, so it runs from the streamed-DMA hook and a per-frame retry and releases once `D_800E810E` reports the target. `menu`/`new-game` still SIGSEGV (unfinished cross-bank work) |
-| `OGRE_STEP=<n>` | **seed** the New Game opening's **step** at `n` for the selected scene — the scene-script step lives in `D_8018F1C0` and scene `0x0D` branches on it, so the movie (step 1, ~28.7 s) can be skipped. `OGRE_SPEED=8 OGRE_SCENE=new-game OGRE_STEP=2 OGRE_NJPEG=1 ./build-app/ogrebattle64` lands in the cathedral ~2.2 s after boot (step table: `docs/HANDOFF-2026-09-15-session44.md` §1, what each step shows: `docs/scenes.md`). The seed is written **once** on the first frame the target scene is active, then released as soon as the live step moves off it (or after a 1500 ms window). It is *not* held every frame: the VM writes the step itself when the sequence advances, and a per-frame hold overwrites that advance, so the opening loops on the seeded step forever (session 53) |
-| `OGRE_SCENE_AFTER_MS=<n>` | delay before the first scene poke (**default 0**). A delay past ~1500 ms makes the jump a silent no-op: the running scene re-establishes the state block every frame |
-| `OGRE_PROBE55=1` | `[probe55]` the New Game **sequence state** on every change: the scene, the scene-script step word `D_8018F1C0`, the next-scene word `D_8018F1C2`, and session 43's script-buffer words `0x80197B23`/`0x80197B38`/`0x80197B3C`. Session 53 used it to show the step stuck at 2 through the cathedral and then 0 (never 3), with the buffer words reading 0 the whole run |
-| `OGRE_SCENE_LOG=1` | log every scene change with its descriptor and record mask — how the scene ids above were identified |
-| `OGRE_PROBE57=1` | `[probe57]` the New Game **handoff state** on change: the scene, the step word `D_8018F1C0`, the next-scene word `D_8018F1C2`, the cutscene vtable pointer the scene-`0x0D` exit dispatches through (`0x801D0830`), the engine words `0x8023A994`/`0x8023A960` and `0x801DFC90`. Session 54 used it to show the natural opening advance `step 1 → 2` and the exit setting `D_8018F1C0 = 0` with `next = 0x0007` before scene `0x07` runs |
-| `OGRE_DMA_TRACE=1` | at `OGRE_EXIT_AFTER_MS`, dump **every** streamed PI DMA the game issued, grouped by `(rom, ram)` base with a `first`/`last` event index and a chunk count. The `[bank]` line only covers records the port compiled, so this is how a module the game loads but the port has no record for is found (session 54: the scene-`0x07` black screen). Prints only bases in overlay C's window `0x80190000..0x801C0000`; `OGRE_DMA_TRACE_FULL=1` prints every base (≈17k in a 26 s run) |
-| `OGRE_STEP` (corrected) | the `OGRE_STEP` seed is a **shortcut that changes the sequence's own state**, not just an entry point: entering `0x0D` at step 2 with no step-1 visit makes the exit take its `otherwise` arm and re-enter at step 0, which selects the movie-mode branch and crashes (session 53's wall). For a real New Game repro, drive the title instead: `OGRE_SCENE=title OGRE_TAP_MS=1000 OGRE_TAP_BUTTON="start,a,start,a,…"` (session 54) |
-| `OGRE_SCENE_TRACE=1` | the forcing state every 500 ms (`active`, `pending(D_800E8214)`, the state block and its id, and whether the target is active) — use this when a jump "does nothing" |
-| `OGRE_EMPTY_TILE=draw` | restore the pre-session-35 behaviour of drawing rectangles whose tile covers zero texels (`lrs == uls` or `lrt == ult`) instead of skipping them |
-| `OGRE_EMPTY_TILE_TRACE=1` | name every rectangle skipped because its tile covers no texels |
-| `OGRE_RECT_STATE=<y0>-<y1>` | per-rectangle render state for rectangles contained in rows `[y0,y1)`: cycle type, both combiner cycles (decoded by RT64's own `ColorCombiner::cycleColorText`/`cycleAlphaText`), the blender inputs, the primitive colour and the tile descriptor it samples |
-| `OGRE_TILE_TRACE=1` | every tile whose sampling rectangle is degenerate (`sampleHeight <= 1`), with the texture the cache returned (`hash`, index, dimensions, `tcScale`, `rawTMEM`) |
-| `OGRE_TILE_TRACE_ALL=1` (`_MAX`, `_MAXH`, `_MISS`, `_COPY`) | the same `[gpu-tile]` line for every tile (`_MAXH=<n>` keeps only tiles whose sample is at most n by n, so a scene's 320-wide layers do not consume the cap; `_MISS=1` prints only tiles whose texture-cache lookup failed; `_COPY=1` also prints the tiles served by a framebuffer tile copy, which otherwise print nothing) |
-| `OGRE_SPRITE_TRACE=1` | one `[spr]` line per tile of a two-texture draw, printed **after** the upload decision: the draw's `call` index, the tile's position and its count, the cycle type, the combiner, PRIM and ENV, the tile descriptor (`fmt`/`siz`/`line`/`tmem`), the sample size, `tileCopy`, `rawTMEM`, the hash it resolved to, and the RDP tile's `address`/`stride`/masks/`nativeSampler`. This is the line that says which path a tile took; `[dec]` below says what that path read (session 134) |
-| `OGRE_TILE_DECODE=1` | for every tile the texture cache hashes, the RGBA the renderer would decode out of the TMEM snapshot it is hashing, computed with the same rules as `TextureDecodeCS.hlsl` (`nz`, `mean`, three sample pixels, once per hash); the raw-TMEM path, which never reaches `uploadTexture`, prints its own line; and `[fbcopy]`/`[fbcopy-stale]`/`[fbcopy-outside]`/`[fbcopy-nowrite]` name every tile served by a framebuffer copy and every copy that was refused: `[fbcopy-stale]` the source framebuffer is out of sync with RDRAM, `[fbcopy-outside]` the tile's texels are not inside the framebuffer's `lastWriteRect`, `[fbcopy-nowrite]` the framebuffer was not written in the workload being processed (`fbWorkload` against `workload`) (sessions 134, 136) |
-| `OGRE_FB_GPU_COPY=0` | turn RT64's `emulatorConfig.framebuffer.copyWithGPU` off for one run, which removes the framebuffer tile-copy path entirely and makes every texture load read RDRAM. The A/B for the black-head fix; `1` restores RT64's default |
-| `OGRE_DUMP_TEX=<dir>` | write RT64's decoded-texture dump (a 4 KiB `.tmem` plus `.tile.json` per texture) into `<dir>` instead of opening its file dialog |
-
-```sh
-# a bounded run with taps, and the per-thread call chains
-OGRE_TAP_MS=5000 OGRE_EXIT_AFTER_MS=60000 ./build-app/ogrebattle64 > /tmp/ogre.out 2>&1
-grep -A 12 "per-thread last" /tmp/ogre.out
-
-# where the boot thread actually goes (the session-26 measurement)
-OGRE_CHAIN_HISTORY=3 OGRE_EXIT_AFTER_MS=3000 ./build-app/ogrebattle64 2>&1 | \
-  sed -n '/chainhistory/,/callchain t1/p'
-
-# renderer-path probe: build and submit a real display list while the boot is stuck
-OGRE_SYNTH_FRAME=1 OGRE_SYNTH_AT_MS=1000 OGRE_SYNTH_PERIOD=30 \
-  OGRE_EXIT_AFTER_MS=20000 ./build-app/ogrebattle64
-```
-
-### Jumping straight into a screen
-
-The attract loop takes minutes at 1×. `OGRE_SCENE` enters a screen at the next
-scene load instead, and `OGRE_SPEED` compresses whatever waits inside it:
-
-```sh
-# boot into the attract title (logo + PRESS START over the clouds)
-OGRE_SCENE=title ./build-app/ogrebattle64
-
-# a bounded title-screen capture: the title arrives ~17 s in at 4× and lasts
-# ~10 s, so capture a window across it
-OGRE_SCENE=title OGRE_SPEED=4 OGRE_CAPTURE_PRESENT=/tmp/title \
-  OGRE_CAPTURE_AFTER=1700 OGRE_CAPTURE_EVERY=10 OGRE_EXIT_AFTER_MS=26000 \
-  ./build-app/ogrebattle64
-
-# if a jump "does nothing", this says whether the poke landed
-OGRE_SCENE=title OGRE_SCENE_TRACE=1 OGRE_EXIT_AFTER_MS=6000 ./build-app/ogrebattle64
-```
-
-The poke only counts before the boot enters its first scene (~1.1 s), so leave
-`OGRE_SCENE_AFTER_MS` at its 0 default. See
-`docs/HANDOFF-2026-09-14-session36.md` for the dispatcher path and the verified
-ids (`menu` 0x18 and `new-game` 0x02 still crash: unfinished cross-bank work).
-
-### Capturing the native output
-
-Do **not** use `screencapture` to decide whether the renderer works. On a locked
-or asleep display it returns the last frame the window server committed, which
-can be seconds old (a cycling clear colour stays one colour across many
-captures), and the session-26 "the window is black" conclusion came from exactly
-that. Measure the presented texture instead:
-
-```sh
-# one command: submit the probe every 30 VIs and read back what is presented
-OGRE_SYNTH_FRAME=1 OGRE_SYNTH_AT_MS=900 OGRE_SYNTH_PERIOD=30 OGRE_NO_DUMMY_VI=1 \
-  OGRE_CAPTURE_PRESENT=/tmp/frame OGRE_CAPTURE_AFTER=200 \
-  OGRE_EXIT_AFTER_MS=8000 ./build-app/ogrebattle64
-# -> /tmp/frame.201.ppm, /tmp/frame.202.ppm, ... (P6; the swap chain is BGRA8)
-```
-
-`OGRE_CAPTURE_PRESENT` is the ground truth for "what does RT64 present": it is
-the swap-chain texture itself, with no window server in the path. Add
-`OGRE_CAPTURE_TARGET=/tmp/target` to also dump the render target the VI renderer
-sampled, which separates "the RDP did not draw" from "the presenter dropped it".
-The port reads `OGRE_CAPTURE_PRESENT` **once** at startup and passes the path to
-RT64 through `ogre_present_capture_path()`; the console's `snap` command toggles
-it without touching the environment, because the UCRT's `putenv` copies the
-string and hiding an entry by rewriting its name is a POSIX-only trick (that
-copy left the capture on in v0.4.0's Windows build and crashed the D3D12 backend
-on the first present — session 107). A value you set in the environment wins over
-`snap`, and `snap` says so.
-
-`OGRE_SYNTH_FRAME` turns on `OGRE_PRESENT_ALWAYS` and `OGRE_PRESENT_FBTARGET` for
-you (with `setenv(..., overwrite=0)`, so an explicit value still wins); with
-`OGRE_SYNTH_NO_DL` it turns on only `OGRE_PRESENT_ALWAYS`, because the
-render-target fallback would bypass the RAM upload path the raw probe is testing.
-The probe also pins the VI to its own framebuffer every VI (`osViSwapBuffer`), so
-the presented frame is the probe's and not whichever of the game's framebuffers
-the VI happened to point at; `OGRE_SYNTH_FORCE_VI=0` turns that off.
-
-Without `OGRE_PRESENT_ALWAYS` a stalled boot never re-presents and the window
-keeps an old black frame even though the render path works, and without
-`OGRE_PRESENT_FBTARGET` an RDP-only fill has no framebuffer in the manager so the
-presenter uploads empty RDRAM instead of the drawn target.
-
-### The game's own frames
-
-The game drives its own double-buffered VI, so none of the probe knobs are
-needed to see it - only the capture. This is the end-to-end check that the port
-renders the game (it should show the title scene's ring of soldiers):
-
-```sh
-# title scene, captured straight off the presented swap chain
-OGRE_TAP_MS=4000 OGRE_CAPTURE_PRESENT=/tmp/game OGRE_CAPTURE_AFTER=30 \
-  OGRE_EXIT_AFTER_MS=25000 ./build-app/ogrebattle64
-# -> /tmp/game.31.ppm ... : the twelve soldiers of the title screen
-```
-
-`docs/proofs/native-game-title.png` and `native-game-title-still.png` are captures
-of that run. A healthy run submits the game's real display lists
-(`data=0x801C1520` / `0x801C80A0` alternating, ~2.5/s) rather than only the boot
-blanking list at `0x800C6500`.
-
-### Reading a dump
-
-**The image is stored in ROM order** (verified session 132): the four file bytes
-at offset `a & 0x1FFFFFFF`, read **big-endian**, are the guest word, and the file
-byte at that offset is the logical byte the game holds at guest `a`. So a Python
-read is `int.from_bytes(data[a & 0x1FFFFFFF : +4], 'big')` for words and
-`data[a & 0x1FFFFFFF]` for logical bytes.
-
-The check that settles it: the part cache's own layout words. `D_8018FC88` must
-read `0x80269640`-style (a KSEG0 heap pointer) and `D_80190F70` must be eight
-bytes past it plus `0x8000`. An earlier reading used
-`struct.unpack_from('<I', ...)` and `data[off ^ 3]`, which returns the
-byte-reversed value (`0x40962680`) and transposes every multi-byte field; that
-reading produced session 131's withdrawn "12x16 cell with a palette at `+0x60`".
-`tools/rdram.py` and `tools/ogre_ram.py` read ROM order now.
-
-`tools/rdram.py` does all of that for you (`word`/`half`/`byte`/`string`/
-`hexdump`/`find`/`ptr`), and one mode answers the question mis-binding walls turn
-on:
-
-```sh
-tools/rdram.py /tmp/rdram.bin banks        # which module is resident in each window
-```
-
-It compares the dump against every record in `app/src/bank_funcs.inc` (+ the
-uncompiled segment-table records) and says which ROM offset is *actually* live at
-each streamed RAM base. Streamed RAM holds different modules at different times
-(`0x802395E0` is `bankRec14b` for the movie visit and `bankRec14c` for the steps
-after it), so "the port called the wrong function" usually shows up here as
-"the bytes at the faulting address are a different module's".
-
-The black canvas a stalled boot produces is the game's idle trajectory, not a
-renderer failure - but do not conclude that from a screen capture; see
-"Capturing the native output".
-
-## Diagnostics toolkit
-
-Four offline tools answer the questions every session otherwise re-derives by
-hand. None of them needs a CUDA/GPU/game run except where noted. The **live
-console** below is the fifth, and the only one that queries a *running* game.
-
-### A slow screen — a host stack sample, not the profiler (sessions 112, 115)
-
-`OGRE_PROFILE=1`'s per-thread function is the **most recently entered** function:
-`recomp_trace_entry` writes `last_func_vram[tid]` on every entry and
-`recomp_trace_return` never restores it
-(`tools/N64ModernRuntime/ultramodern/src/function_trace.cpp:262`). Read its `t4`
-line as a lead, and take a host stack sample while the screen is slow:
-
-```sh
-debug/menu-probe.sh                    # PROBE_DIR/APP/ROM/EXTRA_ENV overridable
-sample <pid> 4 -file /tmp/slow.txt     # or by hand, against a running window
-```
-
-`sample` names the recompiled function each game thread is in, so a chain through
-`yield_self` says the frame period is a recompiler-injected poll-loop wait.
-`debug/menu-probe.sh` runs the app with `OGRE_SCENE_LOG`, `OGRE_DL_TRACE`,
-`OGRE_PROFILE` and `OGRE_COVER`, keeps `sample <pid> 1` running for the life of
-the process, and binds the number keys to `snap` (RDRAM + presented frames),
-`save`, `cover` and `dump`, so a slow second is captured whether or not anyone is
-watching for it. `[renderer] display list N at t=<ms>ms entries=<n>` gives the
-same window as a period series; `entries` is what the list cost in recompiled
-function entries.
-
-A candidate is a **work loop** whose backward branch the heuristic
-(`is_yield_poll_loop`, `tools/N64Recomp/src/recompilation.cpp`) has mistaken for
-a poll: it terminates on a counter or on data already present, and not on a value
-another thread produces. The landed fixes are the branches in
-`config/banks/config-bankN.toml`'s `yield_work_loop_branches`
-(`0x801B3008`, `0x801DA2C0`, `0x801D0C08`, `0x8020A910`, `0x80204C48`; sessions
-80, 90, 98, 112, 115).
-
-### A repeated stutter — `tools/dlgaps.py` (session 116)
-
-A stutter that repeats at a constant period is one piece of periodic work, and
-not a slow screen. `tools/dlgaps.py` reads the `OGRE_DL_TRACE=1` series and
-reports the gap distribution plus the phase of every spike, which is what names
-the period:
-
-```sh
-OGRE_DL_TRACE=1 OGRE_EXIT_AFTER_MS=40000 ./build-app/ogrebattle64 assets/ogre64.z64 > /tmp/run.log 2>&1
-tools/dlgaps.py /tmp/run.log                 # summary + phase histogram
-tools/dlgaps.py /tmp/run.log --check         # exit 1 when the spikes are periodic
-tools/dlgaps.py /tmp/run.log --period 3000   # test another period
-```
-
-It skips the first 3 s by default (`--after`), because the boot's module
-streaming produces gaps that are not a stutter, and it treats a gap above
-`--spike` x p50 as a spike. `--check` fails when 5 or more spikes put at least
-60 % of themselves in one tenth of `--period`; that is the signature of the
-runtime's periodic `[snap]` snapshot (session 116) and of a
-`yield_work_loop_branches` misfire (sessions 80, 90, 98, 112, 115), and it is
-what a self-driving run should assert before and after a fix. The tool is a
-heuristic: a degraded run whose slow frames are spread across many phases
-reports `not periodic` even when the work is still there, so read the p90 and
-the spike count next to it.
-
-### `make elf-rom-check` — is the linked code the ROM's code? (session 65)
-
-`tools/elfcheck.py` compares every `CONTENTS` section of every linked ELF
-(`build/bank*.elf`, `build/ogrebattle64.elf`) with the ROM at the same ROM offset,
-and `--syms` (what the target passes) also asserts that every symbol whose *name*
-ends in eight hex digits is defined at that address — free, because the project
-names labels `D_ovlM_801A6FD8` / `func_ovlM_801A2A7C`.
-
-```
-$ make elf-rom-check
-bankM.elf: 0 differing bytes of 553504
-bankM.elf: 479 address-named symbols all at their named address
-ogrebattle64.elf: 0 differing bytes of 41943040
-ogrebattle64.elf: 4224 address-named symbols all at their named address
-```
-
-Run it whenever a scene draws the wrong *size*, the wrong *slice* or the wrong
-*string* from a table — before blaming the renderer or the game's data. Session 65
-found unit M's whole `.data` subsegment 8 bytes high this way: `mips-linux-gnu-as`
-pads `.text` to 16 bytes, unit M's code/data boundary is only 8-byte aligned, so
-the data subsegment moved up 8 and **every** `lui/%lo` data reference in the
-recompiled module read 8 bytes too high — which put the map's sprite table one
-entry late and made the party, the shadow, the cursor and the date panel all draw
-their neighbours' sizes for four sessions. A misalignment is fixed in the unit's
-config (`align`/`subalign`, or by ending the `asm` subsegment on the 16-byte
-boundary as unit M's now does), never in the generated `.s` or the generated C.
-`make bank-recomp` runs the check before recompiling, so a misaligned link fails
-the build instead of producing a scene that looks wrong.
-
-### The live console — query a running game (session 56)
-
-The offline tools can only look at a dump, and a bounded run can only dump at its
-exit; by then the buffer that mattered has usually been overwritten (session 56
-lost an afternoon to a framebuffer readback that had to be caught mid-frame).
-The console executes commands inside the running game, on the **main thread**,
-where RDRAM is available and a multi-megabyte write cannot race the game thread.
-
-**The console is off unless a run asks for it.** It is a development tool, and a
-command can write guest RAM (`w`) or restore a checkpoint (`load`), so a stock run
-does not poll any path and does not read the keyboard. Turn both triggers on with
-`OGRE_LIVE_CONSOLE=1`. Naming a trigger's own variable also turns that trigger on
-by itself: `OGRE_CONSOLE_FILE` (or `OGRE_CONSOLE_AT_MS`) for the file,
-`OGRE_KEY_<n>` for the keys. `OGRE_LIVE_CONSOLE=0` is an explicit off. Recipes
-written before session 117 write `/tmp/ogre-console.txt` with no variable set and
-need `OGRE_LIVE_CONSOLE=1` added. `OGRE_CONSOLE_ON_CMD` below is unaffected: it
-calls the console directly.
-
-Two triggers, both landing in the same command set:
-
-* **a watched command file** (default `/tmp/ogre-console.txt`, override with
-  `OGRE_CONSOLE_FILE`): when the file exists its lines are executed and the file
-  is **removed**, so an external tool can drive a live run:
-
-  ```sh
-  OGRE_LIVE_CONSOLE=1 OGRE_EXIT_AFTER_MS=600000 \
-    ./build-app/ogrebattle64 assets/ogre64.z64 | tee /tmp/live.log
-  # in another shell (or from an agent):
-  printf 'c\nr 0x8018FDAC 8\nk 0x80243E00 8192\ndump /tmp/at-now.bin\n' > /tmp/ogre-console.txt
-  ```
-
-* **number keys `1`..`9`** run `OGRE_KEY_1`..`OGRE_KEY_9` (edge-triggered, one
-  command per press), e.g.
-  `OGRE_KEY_1='dump /tmp/here.bin' OGRE_KEY_2='c' ./build-app/ogrebattle64 …`.
-
-Commands (all addresses are guest `0x80xxxxxx`; output goes to stdout prefixed
-`[console]` and is flushed):
-
-| command | what it does |
-|---|---|
-| `r <addr> [n]` | `n` words in the runtime's dump order (what `tools/rdram.py word` prints) |
-| `rh` / `rb` / `rk` | halfwords / logical bytes (`addr ^ 3`) / **raw** host-order words |
-| `d <addr> [len]` | hex + ASCII dump of a byte range |
-| `f <value> [max]` | find a 32-bit word anywhere in RDRAM (guest + file offset) |
-| `fb <hexbytes> [max]` | find a byte pattern |
-| `s <addr> [len] [max]` | strings in a range |
-| `k <addr> [len]` | fnv1a checksum of a range — the cheap before/after for A/B runs |
-| `w <addr> <value>` | store a word (A/B experiments; it is a real write) |
-| `c` | scene, pending scene, current descriptor + its record mask, step, next, spin |
-| `cover` | the recompiled functions entered so far (needs `OGRE_COVER=1`), one per line — a mid-run coverage snapshot without ending the run; `tools/recompcov.py --log` reads the same lines |
-| `dump [path]` | write the whole 8 MiB RDRAM image **at this instant**. A bare `dump` never overwrites: it writes `/tmp/ogre-rdram-NNNN.bin`, one new file per press, so the bound key can be hit as often as you like and every snapshot is kept |
-| `snap [prefix] [ms]` | **the one-key report for "something looks wrong on screen"**: writes the whole 8 MiB RDRAM image **at this instant** to `<prefix>.bin` (bare: `/tmp/ogre-snap-NNNN.bin`) with the game threads parked so the image is one instant, and turns RT64's presented-frame capture on for `ms` (default 400) so `<prefix>.<present>.ppm` files land for the same screen. The PPM path is fixed at `/tmp/ogre-shot.<present>.ppm`; the toggle sets a flag the app owns and never frees the path the present thread holds, so `OGRE_CAPTURE_PRESENT` is read once at startup and a value you set wins over `snap` (see the block comment in `sdl_platform.cpp`). Add `OGRE_VI_TRACE=1` to the run and the same log names the framebuffer, which renders out of the dump with `tools/rdram.py <dump> image <addr> <w> <h> --fmt rgba16` |
-| `save [path]` | write a **checkpoint** (whole RDRAM + the runtime's overlay state). A bare `save` writes `/tmp/ogre-checkpoint-NNNN.ckpt` and remembers it |
-| `load [path]` | **restore** a checkpoint this build wrote — the machine rewinds to the instant of the save and the game re-runs from there. A bare `load` uses the most recent bare `save` |
-| `press <buttons> [polls] [x] [y]` | **hold a synthetic pad press** for `polls` input polls and then release it, so an external tool can walk a menu interactively ("press right", look at the capture, "press a") instead of guessing a wall-clock tap schedule (session 68). `<buttons>` is the `+`-joined `OGRE_TAP_BUTTON` vocabulary (`start`, `a`, `up`, `left`, …), `polls` and the stick values are parsed as **hex** for the poll count and `atof` for `x`/`y`, so `press a 400` is 1024 polls and `press none 60 -1 0` is a full-left analog stick. **A short press is much shorter than it looks: the game polls input about once per VI retrace (measured, session 70: `min=1 max=2 mean=1.01` calls per retrace), so `polls` ≈ emulated frames — `press right 8` is invisible, `press right 2000` walks the map cursor across the world; budget a few hundred polls per cursor step** |
-| `help` | the list |
-
-`dump` is the one that fixes the "wrong moment" problem: run the game until the
-screen is in the state you want, then drop the command file (or press the bound
-key) and the image is written while that state is live. Pair it with
-`tools/rdram.py <dump> image …` / `diff …` as usual.
-
-`OGRE_CONSOLE_AT_MS=<n>` delays every watched-file read until `n` ms of wall
-clock have elapsed, so a scripted run can leave the command file in place at
-launch instead of racing it from a background writer.
-
-**Write the watched file atomically** (`printf … > f.tmp && mv f.tmp f`). The app
-polls the path, opens, reads and **removes** it; a plain `> f` truncates before
-the write, so the reader can catch an empty file, delete it and the bytes land in
-an unlinked inode — the command silently never runs (session 68 lost two rounds
-to this).
-
-**`OGRE_CONSOLE_ON_SCENE` / `OGRE_CONSOLE_ON_STEP` / `OGRE_CONSOLE_ON_CMD`** run
-one console command on the first frame a chosen scene (and optionally that exact
-sequence step) is active — the deterministic alternative to timing a command
-against wall-clock taps:
-
-```sh
-OGRE_CONSOLE_ON_SCENE=0x0D OGRE_CONSOLE_ON_STEP=974 \
-  OGRE_CONSOLE_ON_CMD='save /tmp/ck.ckpt' ./build-app/ogrebattle64 assets/ogre64.z64
-# [scene] console trigger: scene 0x000D step 974 -> save /tmp/ck.ckpt
-```
-
-`OGRE_CONSOLE_ON_SCENE` takes a name from the scene table (`new-game`, `tutorial`,
-`title`, …) or a hex id; `OGRE_CONSOLE_ON_STEP` is the value of the sequence step
-word `D_8018F1C0` (`docs/scenes.md` lists the opening's steps). It fires once per
-process. This exists because every tap route in this project is wall-clock while
-the game's own progress is not: a schedule tuned for a 2 s title lands in the
-attract loop when the title takes 9 s, and the trigger removes that failure mode
-(session 58).
-
-### Checkpoints — `save` / `load` (session 58)
-
-A checkpoint is a **full machine rewind**, so a long scripted path only has to be
-played once: reach the scene you are working on, `save`, then `load` it instead
-of replaying the New Game opening every run (the opening is ~45 s at 4x before
-the first form and ~60 s to the closing movie).
-
-```sh
-# leave `c\nsave /tmp/ck.ckpt\nc\n` in the watched file before launch:
-printf 'c\nsave /tmp/ck.ckpt\nc\n' > /tmp/ogre-console.txt
-OGRE_LIVE_CONSOLE=1 OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=1500 \
-  OGRE_TAP_BUTTON="start,a,start,a,start,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a" \
-  OGRE_CONSOLE_AT_MS=30000 OGRE_EXIT_AFTER_MS=600000 \
-  ./build-app/ogrebattle64 assets/ogre64.z64 | tee /tmp/live.log
-# later, from another shell:
-printf 'load /tmp/ck.ckpt\nc\n' > /tmp/ogre-console.txt
-```
-
-The file is `[8-byte magic][u32 version][u32 rdram_size][u32 host_size][u32
-flags][u64 fnv1a][overlay-state blob][whole RDRAM image]` (8 MiB + a few KiB).
-`load` verifies magic/version/sizes/checksum and refuses a file from another
-build; a bare `dump` is still the plain image `tools/rdram.py` reads.
-
-Why it is not just "write RDRAM to a file":
-
-* **The function map is host state.** Which recompiled body runs at each RAM
-  address is the runtime's `func_map`, not RDRAM. Restoring RDRAM alone would
-  rewind the game's data but leave the map on a later bank, so the restored
-  scene would run the wrong module's bodies at those addresses (the
-  session-45/55 mis-binding class). The blob carries the loaded section and
-  function-bank records and rebuilds the map from them
-  (`recomp::overlays::get_overlay_state_blob` / `restore_overlay_state_blob`).
-* **The game runs on its own host threads**, so reading or writing 8 MiB from
-  the console's main thread raced the game thread that was mid-frame. Session
-  58's first attempts produced **torn images**: the visible symptoms were a
-  checkpoint whose own checksum did not match its bytes and whose first `0x300`
-  bytes were zeros while the game kept submitting RSP tasks and building frames
-  during the write. `save`/`load` now wrap the file I/O in
-  `ultramodern::checkpoint_pause_begin()` / `checkpoint_pause_end()`, which
-  parks every thread executing recompiled code at a function-entry boundary
-  (`recomp_trace_entry`, the hook the recompiler emits at every function start)
-  for the duration, then releases it. The console reports how many threads
-  parked.
-
-Verified (session 58): a checkpoint's stored checksum matches its own bytes; a
-`load` 20 s later puts scene/step back to the saved values and the game
-**continues from there** (a checkpoint taken at the personality questions
-replays forward into scene `0x16`, the closing movie); a save/load pair in the
-*same* run reproduces the rewind.
-
-Verified again, and bounded, at the map (session 65): a `save` + `load` pair in
-the **same run**, taken on the live map (scene `0x05`, a busy screen with every
-N64 thread active), restores and continues with no crash. Loading the *same
-bytes* written by an **earlier process** (the developer's run, same binary)
-crashes deterministically and immediately in `do_send` (`SIGSEGV` at
-`do_send + 0x54C`, on an N64 thread, with a garbage host address) even though the
-load reports success and `c` shows the restored scene. Reason: the image holds
-**host pointers** — `OSThread::context` is "an actual pointer regardless of
-platform" and is written into guest RDRAM, one per N64 thread (~10 in a map
-image, values in the `0x00007F…` range in the file). Same process ⇒ still valid;
-another process ⇒ a stale address the scheduler dereferences. So a checkpoint
-is **not transferable between runs** yet — a session cannot hand one to the next
-one, and a `load` recipe must `save` and `load` in the same run. Making it
-transferable means rebuilding the runtime's host state from the restored guest
-state after the rewind (rebind a per-thread context registry, and reset the
-scheduler/blocked-thread host state), not just the RDRAM image.
-
-Limits: valid only in the process that wrote it (function pointers are
-process-local) and for the same binary — the file carries an FNV-1a hash of the
-running executable (`version 2`), so a **rebuild invalidates every checkpoint**
-and `load` says so. The app's own knobs (`OGRE_TAP_BUTTON` position,
-`OGRE_SCENE`, `OGRE_STEP`) are not part of the snapshot, and RT64's own render
-state is not rewound (the next frame redraws from the restored RDRAM).
-**Where** you save matters: a checkpoint taken while a *stable step* is live
-resumes and replays (verified at the cathedral and at the personality
-questions), but one taken at a scene/step **transition** (e.g. during the brief
-`0x02` loader visit, when the engine has already reset the step word to 0)
-restores into the "no step" movie-mode branch and the sequence bounces between
-`0x00` and `0x0D` instead of continuing — so save *inside* the step you want to
-replay, and check `c` reports the step you expect before `save` (session 58).
-
-### Saves — the cartridge battery (SRAM), and emulator interchange (session 66)
-
-**OB64 saves to the cartridge battery, and the chip is SRAM: 32 KiB, no
-Controller Pak and no EEPROM/FlashRAM.** The Controller Pak strings
-(`Controller Pak Menu`, `Data saved to Controller Pak.`) are the game's
-*copy/backup* feature, not the save. `app/src/main.cpp` sets
-`entry.save_type = recomp::SaveType::Sram`; the evidence is in the comment there.
-
-The runtime keeps the image at
-
-```
-<config>/saves/<game id>.bin          # ogrebattle64-us-rev1.bin, exactly 32768 bytes
-# <config> is the executable's own directory (so the save sits beside the app,
-# and a distributed package carries its saves with it), unless OGRE_PREF_DIR
-# relocates it or the install location is read-only — in which case the
-# per-user preference dir is used (macOS: ~/Library/Application Support/ogrebattle64/)
-```
-
-and the game's own DMA path reaches it: `func_8008BC40` queues an `OSIoMesg` to
-`D_800AA408`, and the runtime completes it inline in `librecomp/src/pi.cpp`
-(`pi_perform_dma`) — **the device is chosen from the OSPiHandle the message
-carries**, not from the address: the save handle `func_8008A040` builds has
-`baseAddress 0xA8000000` (physical `0x08000000` = the SRAM window), the cart one
-from `osCartRomInit` is `0xA0000000`. The game reads the whole image at boot in
-256-byte DMAs at device offsets `0..0x7F00` (`func_80074CF0` and friends) and
-writes it back the same way when its dirty flag is set (`func_80074BF0` →
-`func_80074C58`). Save slots are `0x1850` (6224) bytes at `0x10 + n*0x1850`; the
-device signature and slot-0 magic are the ASCII `QuestOG3`.
-
-**A slot's first 4 bytes are two `u16` checksums, and their seed is the slot's own
-device offset** (session 78). `func_8007541C` rejects a slot unless
-`memcmp(D_800B8240, slot+4, 8)` matches `QuestOG3` **and**
-
-```
-u16[+0x00] == (sum of the bytes of slot+0x0C .. slot+0x1850) + (0x10 + n*0x1850)   // func_80075A84
-u16[+0x02] == (count of their set bits)                     + (0x10 + n*0x1850)   // func_80075B00
-```
-
-So a slot is valid **only in the slot index it was checksummed for**. The game's
-own copy-to-pak path uses the *un-seeded* twins (`func_80075AC4`/`func_80075B60`),
-so a slot lifted out of a Controller Pak is seeded 0 and must be reseeded for the
-battery slot it lands in. Any tool that moves save data between slots, or from a
-pak, has to rewrite those two halfwords; `tools/sramsave.py` does, and `check`
-reports each slot as `ok` or `MISMATCH (the game will reject this slot)`.
-
-Diagnostics: the runtime prints one `[save]` line when it loads/creates the file,
-one on the game's first read and first write of the window, and one when the
-saving thread writes the file (`[save] wrote …`); a failed write also prints
-`[save] FAILED to write …` to stderr before its message box.
-
-**Bringing an emulator save in.** Ports/emulators all hold the same 32 KiB of
-logical bytes but wrap them differently, so use `tools/sramsave.py` rather than
-guessing:
-
-```sh
-tools/sramsave.py check  ~/Downloads/save.srm        # what is in the file
-tools/sramsave.py import ~/Downloads/save.srm \
-  "$HOME/Library/Application Support/ogrebattle64/saves/ogrebattle64-us-rev1.bin"
-tools/sramsave.py export <that .bin> out.sra         # 32-bit byteswapped, .sra-style
-```
-
-`import` finds the SRAM by its magic at any offset and byte order. It was
-written for a **parallel-n64** dump: 296960 bytes, SRAM at **0x20800**, every
-32-bit word byte-reversed (so the magic reads `seuQ3GOt`). mupen64plus/RetroArch
-`.srm` dumps are the bare logical 32 KiB (offset 0, "logical") and import
-unchanged. It never invents data: a file without the magic is refused.
-
-**DexDrive `.N64` files are Controller Pak dumps, not battery images** (session
-78). A DexDrive dump is a 0x1040-byte header (`"123-456-STD"` at 0x00) followed
-by a 32 KiB Controller Pak, so it is 36928 bytes — which is exactly what
-`assets/saves/*.n64` are. They hold **no** battery image at any offset (scanning
-every offset for the device magic finds none), but they do hold the game's
-*copy/backup* notes: one 25-page (6400-byte) note per save in the pak's own PFS
-filesystem, game code `NOBE`, publisher `EB`, named `OgreBATTLE64 <n>`, and each
-note carries a verbatim copy of a battery slot at `note+0x20`. `import` follows
-the pak's FAT to the **live** notes (a deleted note leaves its 25 pages behind,
-still readable), extracts each slot and reseeds it into battery slot 0 (then 1);
-the battery has **only two save slots** — slot index 2's offset `0x30B0` is where
-the game's 19176-byte map record begins, and it covers the rest of the image, so
-extra notes are dropped with a warning rather than written into it;
-`--all` also takes the stale records, and `pak --all` lists them:
-
-```sh
-tools/sramsave.py pak --all assets/saves/prologue.n64
-```
-
-### Running with one of these saves — `OGRE_SAVE`, or `tools/run-save.sh`
-
-```sh
-# one knob: import (if needed) and boot
-OGRE_SAVE=prologue ./build-app/ogrebattle64 [rom.z64]
-OGRE_SAVE=~/Downloads/save.srm OGRE_SAVE_RESET=1 ./build-app/ogrebattle64
-
-# or the wrapper, which gives each save its own config dir
-tools/run-save.sh --list             # the saves in assets/saves
-tools/run-save.sh prologue           # import it, then boot with it as the battery
-tools/run-save.sh prologue --reset   # re-import, discarding progress saved since
-```
-
-`OGRE_SAVE` writes the converted image to `<config>/saves/<game id>.bin` — the
-active config dir, i.e. the default one or whatever `OGRE_PREF_DIR` says — and
-never back into the source, so a run left on a battery keeps its progress and
-`OGRE_SAVE_RESET=1` starts over. `run-save.sh` does the same thing with a
-per-save config dir, `.ogre-prefs-save-<name>/` (gitignored like the other
-`.ogre-prefs-*` sandboxes), and its `--import-only` prints the path without
-booting. Both accept the same file kinds and pass every `OGRE_*` knob through:
-
-```sh
-OGRE_SAVE=prologue OGRE_TAP_MS=1500 \
-  OGRE_TAP_SCENE_BUTTON="title:start:1,0x12:a:3,0x05:a:1" \
-  OGRE_EXIT_AFTER_MS=60000 ./build-app/ogrebattle64
-```
-
-Verified (session 78): with `assets/saves/prologue.n64` imported, the tap route
-takes the game **title → `0x12` (the Load Game book) → `0x05` (the map)**, and
-battery slot 0 stays **byte-identical** to the converted note. The *discriminator*
-is what the game's own data screen reads back, not the route — a **blank** battery
-also reaches `0x12`/`0x05` (pressing A on the data screen starts a new game), so
-the route alone proves nothing:
-
-| battery image in the config dir | the book's GAME DATA 1 |
-|---|---|
-| `assets/saves/prologue.n64` converted | `Magnus / Prologue / Alba / 0:20:42` |
-| `assets/save-mission-1.srm` converted (the older import) | `Magnus / Prologue / Alba / 0:07:02` |
-
-Same screen, same route, two config dirs, different playtime — the game is reading
-the file this script installed. `OGRE_SAVE=prologue` rebuilds that battery
-**byte-identically** to `tools/sramsave.py import` (device header and slot 0
-compared directly), so the two entry points are one conversion. Proofs:
-`docs/proofs/native-load-game-prologue.png`,
-`docs/proofs/native-load-game-battery-ab.png`. The same file imported *without*
-reseeding the header checksums makes the game repair the whole image to its blank
-format (sha256 `ed38cfd7…`), which is what the seed rule above predicts.
-
-Verified (session 66, all on this build): boot with no file → the game formats a
-blank battery and the port writes a real 32768-byte image with the `QuestOG3`
-signature; restart → the game reads it back and does **not** re-write it (it is
-accepted); overwrite the file with `0xA5`-garbled bytes → the game reads,
-rejects and repairs it, and the file is valid again; a converted parallel-n64
-save with real progress → the game reads it and does not re-write it (accepted).
-A `[save]` write is followed by `[save] wrote <path>` unless the directory is
-unwritable, which raises the runtime's "Failed to write to the save file" box —
-**from the saving thread**, so a run that cannot write its `saves/` directory
-stalls (that is what the sandboxed first attempt of session 66 hit; use
-`OGRE_PREF_DIR`).
-
-### `tools/runlog.py <run.log>` — one screen per run
-
-```sh
-OGRE_SPEED=4 OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game,0x0D OGRE_SCENE_LOG=1 \
-  OGRE_EXIT_AFTER_MS=45000 ./build-null/ogrebattle64 > /tmp/run.log 2>&1
-tools/runlog.py /tmp/run.log              # scene timeline, RSP tasks, bank loads, problems
-tools/runlog.py /tmp/run.log --check      # exit 1 on crash / stub call / unknown module
-tools/runlog.py /tmp/run.log --json       # machine-readable
-```
-
-The **non-gfx RSP task table** is the part that matters: graphics tasks go to
-RT64 regardless, but a non-gfx task served by `stub microcode` is work the port
-silently drops. Session 46's four `M_NJPEGTASK` background-decode tasks were
-invisible inside 23k lines of gfx chatter and this prints them with their ucode,
-data and `data_ptr` on one screen. `--check` is the assertion a future
-`make smoke` should use.
-
-### `tools/rdram.py ... image` — is the buffer blank or an image?
-
-```sh
-tools/rdram.py /tmp/rdram.bin image 0x80243E28 --width 320 -o /tmp/bg.png
-tools/rdram.py /tmp/rdram.bin image 0x80243E28 --fmt ia8 --width 320
-tools/rdram.py /tmp/rdram.bin image 0x800D0000 --offset 0x18 --scale 3
-```
-
-Renders a region as an N64 texture (`rgba16`, `rgba32`, `ia16`, `ia8`, `ia4`,
-`i8`, `i4`, `ci8` + `--palette`) to an RGBA PNG (zlib only, no Pillow) and
-prints a luminance summary with a **`(near-)uniform` note** — the difference
-between "nobody drew this" and "an asset failed to decode".
-
-### `OGRE_NJREAD_LOG=1` — which framebuffer the njpeg readback copies
-
-```sh
-OGRE_NJREAD_LOG=1 OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=1000 \
-  OGRE_TAP_BUTTON="start,a,start,a,start,a,start,a,start,a,a,a,a" \
-  OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=25000 ./build-app/ogrebattle64 assets/ogre64.z64 \
-  > /dev/null 2> /tmp/njread.log
-grep njread /tmp/njread.log
-```
-
-One `[njread]` line per stage-3 pass. Each New Game njpeg assembly runs four
-passes — the four tiles of the backdrop's 2x2 grid, `width x height` 240x320
-(top-left, destination `0x801AAE90`), 240x176 (`0x801D06B0`, bottom-left),
-144x320 (`0x801E50D0`, top-right), 144x176 (`0x801FB8F0`, bottom-right) — each
-with its own YUV draw. The four correct sources are the deterministic frames
-`573FF47B8A5A3279`, `48892A76C362A4BA`, `3F79B6732153B2FD`, `38BCBEBE5B555C3C`
-in that order, so an off-by-one read shows as a frame mismatch. **Pass 0 (the
-top-left tile) is where a stale selection shows**: the scratch word still names
-the previous step's target while `gameSrc` is the current one. See
-`docs/HANDOFF-2026-09-16-session57.md` §1.
-
-To check the *result* rather than the selection — the assembled backdrop the game
-blits — drive the live console from game state, not wall time (the 8 MiB dumps
-shift the tap schedule, so a fixed-time schedule does not reproduce):
-
-```sh
-# poll `c` and dump only while the dispatcher is on a chosen scene+step
-OGRE_LIVE_CONSOLE=1 OGRE_EXIT_AFTER_MS=600000 ./build-app/ogrebattle64 assets/ogre64.z64
-printf 'c\n' > /tmp/ogre-console.txt            # read state...
-printf 'dump /tmp/at-cathedral.bin\n' > /tmp/ogre-console.txt   # ...then dump
-tools/rdram.py /tmp/at-cathedral.bin image 0x80243E28 --width 320 -o /tmp/dst.png
-```
-
-With the console reading `desc=0x8018FC3C` and `step=0x021D8002` (the cathedral
-step after the name form), `0x80243E28` is the backdrop: the fix shows the
-cathedral, the old scratch-first rule showed the name-entry form — that is the
-intermittent artifact (`docs/proofs/native-newgame-backdrop-old-rule.png` vs
-`-backdrop-fixed.png`).
-
-### `tools/rdram.py diff A.bin B.bin` — what did a run change, by module?
-
-```sh
-tools/rdram.py diff /tmp/stub.bin /tmp/with-fix.bin --min-run 16 --limit 20
-```
-
-Clusters changed bytes into runs, merges runs within `--gap`, and prints the
-running total **grouped by owning record/overlay** (from `tools/n64map.py`),
-flagging RAM that several records share. This replaces "add a probe to `rsp.cpp`
-that dumps a region before and after a call".
-
-### `tools/guestmap.py <addr>` — which module is this?
-
-```sh
-tools/guestmap.py 0x801B7EBC 0x802395E0 0x2F180    # vram or rom, auto-detected
-tools/guestmap.py 0x801B7EBC --context 4           # +-symbols
-tools/guestmap.py --list                           # the whole segment/record table
-```
-
-Prints the ROM offset (`vram - 0x80070C60 + 0x1060` and back), the owning
-segment/record and unit, whether the address is a **function entry in the ELF
-that owns that layout**, and — the mis-binding warning — the other records that
-map the same RAM. Example: `0x801B7EBC` is `func_801B7B9C + 0x320` (not an
-entry) in `ogrebattle64.elf`, but `func_ovlC_801B7EBC` (an entry) in `bankC.elf`
-and `func_ovlG_801B7EBC` in `bankG.elf`; which one is live is decided by the
-game's DMA.
-
-### `tools/scenemap.py` — the scene registry, the transitions, the script (session 64)
-
-```sh
-tools/scenemap.py                 # all three tables (~3 s, ROM-only, no run)
-tools/scenemap.py scenes          # 25 scene types -> accessor -> descriptor words
-tools/scenemap.py transitions     # every writer of the pending-scene word
-tools/scenemap.py steps           # the scripted step table summary
-tools/scenemap.py scenes --dump /tmp/map3.bin   # read descriptors from a live image
-```
-
-Answers *"do we have to link the scenes by hand?"* with numbers, and replaces
-hunting a scene's address one at a time. Three layers, only the first two code:
-
-1. **The registry** — `func_80075BC0` writes **25** accessor pointers into
-   `D_800AF028[0..24]`; each accessor is a 1-3 instruction stub returning a
-   descriptor, and the descriptor table is **static ROM data** (`streamedB`).
-   `scenes` prints `id → accessor → descriptor → enter/update/hook/leave/mask`
-   (20 resolve statically; ids 2, 3, 6, 8, 23 branch and say
-   `(indirect accessor)`). It reproduces every address earlier sessions found by
-   hand — id 5 → `0x8018FD70` (map), id 7 → `0x8018FDAC` (form), id 13 →
-   `0x8018FC3C` (the `0x0D` movie/dialogue engine).
-2. **The transitions** — every store into `D_800C4C26` in the game is
-   **39 sites in 30 functions**; 21 carry a statically-known value, the rest are
-   script-driven. That is the whole scene-to-scene *code*, so there is no graph
-   to author.
-3. **The content** — the scripted step table (asset `0x19A8804`, ROM
-   `0x1F3CA54`) holds **1693** per-step asset ids (1499 distinct), so the 200+
-   dialogues are *entries in one table* driven by the same few scene types, not
-   200 scene links.
-
-Pair it with `tools/guestmap.py <descriptor>` for the ROM offset and owning
-segment of a descriptor, and `tools/runlog.py` for which scenes a run actually
-entered.
-
-### `tools/arenamap.py` — every streamed arena, and whether we have it (session 73)
-
-```sh
-tools/arenamap.py                      # every arena, every bank (~10 s, offline)
-tools/arenamap.py --missing            # banks no unit links
-tools/arenamap.py --arena 0x80214FA0   # one RAM window
-tools/arenamap.py --verify             # every unit vs the loader that DMA's it
-tools/arenamap.py --coverage           # the ROM the scanned ELFs disassemble
-tools/arenamap.py --entries            # cross-record entry candidates
-tools/arenamap.py --md                 # markdown table (docs/scenes.md)
-```
-
-Answers *"what is this bank's size, and is it compiled?"* without a run, from the
-loader's own instructions. Every bank DMA is
-
-```
-lui/addiu x3  ->  jal func_8009DA50  ->  subu a2,a2,a0   (the size)
-func_800900C0(ram_base, code_size)   icache   (the brackets)
-func_80090010(code_end, data_size)   dcache
-func_80093380(data_end, bss_size)    bss
-```
-
-so the block yields ROM start, RAM base, size and the code/data boundary. **The
-size is the loader's `subu`, never the chunk count**; the tool reads the `subu`'s
-own operands because the assembler sometimes hoists it above the `jal`, and it
-evaluates each block in ascending address order because `addiu a1,a1,%lo` must run
-*after* the `lui` that gives it its base.
-
-`--verify` cross-checks every compiled record against the loader that DMA's it.
-A **split** difference is not automatically a bug: `mips-linux-gnu-as` pads
-`.text` to 16 bytes, so a record whose data starts on an 8-byte boundary links its
-data subsegment up to 8 bytes high (session 65's unit M), and several units'
-linker scripts declare their record as one subsegment; `make elf-rom-check` is
-what proves the bytes. `--coverage` is the negative check that matters: a loader
-can only be found in code some ELF disassembles, so it lists the uncovered ROM
-gaps and any `jal 0x8009DA50` inside them.
-
-Current answer: **27 bank loads across 5 arena RAM windows, 26 compiled**, the one
-gap being a `0xE80` scene-`0x14` setup fragment whose RAM another unit's record
-already owns (see `docs/scenes.md`).
-
-### `tools/stubmap.py` — which dispatches can find nothing, and who points at them
-
-```sh
-tools/stubmap.py report                 # every statically dispatched target, ranked
-tools/stubmap.py report --verbose       # also list inert gaps and resolved targets
-tools/stubmap.py report --json          # machine-readable, for triage scripts
-tools/stubmap.py report --strict        # exit 1 on a definite/unresolvable/likely gap
-tools/stubmap.py target 0x80219594      # one address: owners, bodies, callers, scenes
-tools/stubmap.py log /tmp/run.log       # attribute a run's stub hits
-tools/stubmap.py pointers               # data words pointing at risky targets (jalr)
-```
-
-`arenamap.py` answers *"is this bank compiled?"*; this answers the next question,
-*"does the function map have the address a call dispatches to?"* — the half of the
-whack-a-mole that a run only shows you one hit at a time as
-`[overlays] streamed function stub called @ 0xADDR (not yet loaded)`.
-
-It reads the runtime's own registration tables, not the generated C: the bank
-side from `app/src/bank_funcs.inc` (what `on_streamed_dma` registers), the base
-side from `RecompiledFuncs/recomp_overlays.inl`'s section table (what
-`load_overlays(0x1000, entrypoint, 0x3E1B0)` installs — the only place a
-*reimplemented* function such as `osSetIntMask_recomp` appears, because it has no
-generated body). Call sites come from the generated C's `jal` comments, so each
-finding names the caller, its unit and the file:line.
-
-The buckets are ordered by how much is actually known, and the tool refuses to
-claim more:
-
-* **DEFINITE** — either **no module registers the address at all**, or the bank
-  the caller executes from has no entry at the target while the target is inside
-  that bank's own DMA'd code. The first is the strongest form: `func_map` is
-  only ever filled from the registration tables, so if nothing in the model
-  lists the address, *no run state* can resolve the lookup — this is the
-  session-82 shape (a bank the port has no record for is resident, and the call
-  lands where a compiled module's layout has no function). Replayed against the
-  pre-session-82 tree, the tool marks both of that bug's call targets
-  (`0x801D1508`, `0x801D0AAC`) DEFINITE.
-* **MISSING FUNCTION** — a bank that can be resident lacks the entry, but its own
-  ROM bytes there open like a function prologue. That is either a function the
-  split missed (an indirect-only entry, which a disassembler cannot find) or a
-  bank the port has no record for. **The shortest list to act on.**
-* **UNRESOLVABLE** — no compiled module's *code* covers the address at all.
-* **BANK SELECTION** — the missing bank's bytes there are a body interior: the
-  caller disposed of another bank's address. Which bank of an arena the game
-  streams is scene data, so a run confirms these.
-* **INERT** — the missing bank's segment-table record is never loaded by a scene
-  that also loads the caller's record, so it cannot be resident when the call
-  runs (the scene-descriptor record-mask model from `cross_bank.py check`).
-* **RSP IMEM** — `0x84000000..`: recompiled microcode text the CPU never runs;
-  `get_function` accepts the window, so it would log as a stub.
-
-Current answer (session 83): **985 static dispatch targets, 0 definite, 0
-unresolvable, 129 missing-function candidates, 152 bank-selection candidates, 369
-inert, 332 resolvable** — i.e. every static `jal` target is registered by *some*
-compiled module, so the remaining whack-a-mole is `jalr` (288 indirect sites,
-which no static pass can name), a bank the port has no record for, or a load that
-missed `on_streamed_dma`. `log` mode covers all three.
-
-**`log` mode is the arbiter for a real hit.** The runtime already prints the live
-first words at a stub address (`[overlays] @0xADDR: …`); the tool matches them
-against every candidate module's ROM image, so it names the module that was
-*actually resident*, and then — using the run's own `loading overlay record`
-lines — says which of the two bugs it is:
-
-* the resident module **does** register the address → the bank was up but its load
-  never matched `kBankRecords` (`UNKNOWN module`), or it was registered and then
-  evicted by a later overlapping load (the tool says which, from the log);
-* it **does not** → the caller dispatched an address that does not exist in that
-  bank's layout, and the tool names the body it landed in.
-
-Worked example (the session-73 settings-menu stub, `ogre-s73-r5.log`):
-
-```
-0x80226B7C  1 hit(s)  status: partial
-    live words: 27BDFFE824020029AFBF0014AFB00010
-    RESIDENT: bankRec16b (unit AG, record 16) rom=0x279FF0 ram=0x802258B0 -- bytes
-      match its ROM image, it registers this address
-      the run has NO `loading overlay record` line for it: the DMA never matched
-      kBankRecords, so its load bypassed on_streamed_dma
-    dispatched from func_80178130(0x80178130)  RecompiledFuncs/funcs_11.c:8321
-```
-
-The log's own `UNCOMPILED streamed record 16` line says the port had no record
-for it that day; unit AG is that record, and the byte match proves it was the
-resident module. **A stub whose bytes match nothing compiled is a bank the port
-still has no record for** — the tool then searches the ROM for those bytes and
-names the record they belong to, which is the unit to add. The same day's
-`enc2.log` (session 82's pre-fix neutral encounter) reads the mirror image: 18
-records registered, none of them `bankRec10s`'s `0x23A370 → 0x801D0860`, and the
-stub at `0x801D1508` matches that record's own bytes.
-
-### `tools/recompcov.py` — how complete is the recompilation? (session 83)
-
-```sh
-tools/recompcov.py                       # the offline measurement (~20 s)
-tools/recompcov.py --no-scan             # fast: modules + dispatch only
-tools/recompcov.py --log /tmp/run.log    # + what a run executed (OGRE_COVER=1)
-tools/recompcov.py --json
-```
-
-There is no single "recomp %", because the question has four answers with
-different certainty. This tool reports all four and says which is which:
-
-| measure | value today | how |
-|---|---|---|
-| **code bytes** | **99.05%** — `0x2B11D0` of the code span `0x001000..0x2B8B70` | the ELFs' `CODE` `CONTENTS` sections vs the ROM; the one `0x6990`-byte gap (`0x0DDF80..0x0E4910`) classifies as data |
-| **modules** | **28/28** loader-pattern arenas have a unit; 44 bank records across 34 units + 10 base sections | `tools/arenamap.py`'s scan + `app/src/bank_funcs.inc` |
-| **dispatch** | **985 static targets, 0 unresolvable**; 288 `jalr` sites unmeasurable statically | `tools/stubmap.py`'s model |
-| **execution** | per run, from `OGRE_COVER=1` | the runtime prints every recompiled function it entered; the tool joins that with the registered set |
-
-`OGRE_COVER=1` is the one piece that needs the game. The runtime already kept a
-per-function entry counter for `OGRE_PROFILE`'s hot list, but only ever printed
-the per-second top 8; the counters' *keys* are never cleared, so their occupied
-slots are exactly the set of functions the run entered. `OGRE_COVER=<path>` dumps
-that set at exit — or when the window is closed, or on demand from the live
-console's `cover` — without starting the sampling thread.
-
-**The measurement is a session played by hand**, not a scripted run:
-
-```sh
-OGRE_COVER=/tmp/cover.txt ./build-app/ogrebattle64 assets/ogre64.z64
-# … play as long as you like, then close the window …
-tools/recompcov.py --log /tmp/cover.txt
-```
-
-Scripting it is a trap this session hit twice: taps drive the game to one screen
-and then stop, so the window sits idle, and `OGRE_EXIT_AFTER_MS` then kills a
-human's play mid-session. What it answers is *which parts of the port this route
-executed* — and the modules at 0% are the untested surface, which no offline
-measure can see.
-
-### Adding a streamed bank unit (the session-67 recipe)
-
-When a scene reaches RAM the port has no code for, the run says so — take it in
-this order, because each step is cheaper than the next and the later ones
-mislead if the earlier one is skipped.
-
-1. **The port names the missing module by itself.**
-   `[bank] UNKNOWN module rom=0x… ram=0x…` (a *segment-table* record the port
-   has no unit for) or `[overlays] streamed function stub called @ 0x…` (a
-   `LOOKUP_FUNC` onto an address nothing registered). Run it, read the address,
-   and only then look for the DMA.
-2. **Add the unit.** `config/banks/config-bank<U>.yaml` (splat: `type: code`, `start`/`vram`,
-   `[start, asm]` + `[<code end>, data]`, `symbol_name_format: "ovl<U>_$VRAM"`)
-   and `config/banks/config-bank<U>.toml` (N64Recomp), then `BANK_UNITS += <U>` in the
-   `Makefile`. A **bank's size is its DMA size**, and the code/data boundary is
-   its last `jr ra` **rounded up to a 16-byte boundary** — otherwise the
-   assembler pads `.text` and `make bank-recomp`'s ELF check fails loudly (the
-   session-65 trap; that is exactly what it is for).
-3. **Give records their BSS.** If the segment table's `ram_end` word is past
-   `ram start + rom size`, add the record to `RAM_END` in
-   `tools/gen_bank_funcs.py`; the runtime then zeroes it on load as the game's
-   loader does.
-4. **Declare cross-record function entries.** `config/symbols/symbol_addrs-bank<U>.txt`
-   (`name = 0xADDR; // type:func`, wired with `symbol_addrs_path` in the splat
-   config) for every address the game *calls* that the target record never `jal`s
-   from inside itself. Each record is disassembled as its own segment, so such an
-   address is emitted as a label inside the preceding body, N64Recomp has no
-   entry there, and `LOOKUP_FUNC` becomes the **no-op** streamed stub
-   (`get_function` has no interior fallback). Derive the list mechanically —
-   every `LOOKUP_FUNC(0x…)` in `Bank<U>Funcs/` whose target is inside the unit's
-   own RAM ranges and is not already a `recomp_trace_entry`. Do **not** try a
-   subsegment split at the same address: the assembler's 16-byte `.text` padding
-   breaks the ELF-vs-ROM identity.
-5. **Watch for a bank the trace cannot see.** `OGRE_DMA_TRACE=1
-   OGRE_DMA_TRACE_FULL=1` names the transfers, but its own overhead changes which
-   path the run takes — in session 67 it showed one arena bank and the clean runs
-   loaded a different one. A one-line probe in `recomp::do_rom_read` (log reads
-   whose destination is the arena, or whose source is the ROM region) is
-   lighter and found the second bank immediately.
-6. **Fix the binding, not the symptom.** If a call runs the wrong bank's body,
-   the unit that *contains* the target record is the problem: move the target
-   record to a unit that does not call it, so the caller compiles as
-   `LOOKUP_FUNC`. `make cross-bank-check` is the audit, and
-   `tools/cross_bank_known_hazards.txt` is the explicit allowlist of accepted
-   pre-existing hazards (a *new* one still fails `make bank-recomp`).
-
-### `tools/watch.sh <guest-addr>` — who writes this address?
-
-```sh
-OGRE_SPEED=4 OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game,0x0D \
-  tools/watch.sh 0x80243E28 --after func_80178920 --ignore 1 --hits 3
-```
-
-Arms an lldb watchpoint on `rdram + (guest - 0x80000000)` after a given guest
-symbol (skip its first `--ignore` hits to pick a later visit), and prints a
-backtrace per write.
-
-`--value <n>` makes it conditional: it keeps running until the watched word
-holds `<n>`, which is how a *specific* write is caught on an address that is
-written many times with different values (session 48 used
-`tools/watch.sh 0x800C4BB8 --value 0x80000400 --hits 2 --size 4` to catch the VI
-manager writing a placeholder into the display word, with the caller chain
-`func_8007307C ← func_80089540`).
-
-The app, the recompiled code and `librecomp`/`ultramodern` are built with
-`-fno-omit-frame-pointer` (RT64 is not), because the runtime's shadow *guest*
-call chain is empty when a fault happens inside runtime code reached through a
-bridge. With frame pointers a breakpoint in the runtime unwinds across the
-bridge to the guest caller:
-
-```
-frame #0  do_recv            frame #2  osRecvMesg_recomp
-frame #1  osRecvMesg         frame #3  func_80088F08 + 717   <- the guest caller
-```
-
-(`bt` at a *signal* stop can still print only the faulting frame — if the crash
-is a `SIGFPE`/`SIGBUS` inside the runtime, break on that function instead:
-`lldb -b -o "breakpoint set -n do_recv" -o run -o "bt 14" -- ./build-null/ogrebattle64`.)
-
-## Controller bindings and the in-game overlay
-
-The player's keyboard and gamepad bindings are data (`app/src/input_map.cpp`),
-edited from the start screen's **CONTROLS** tab and from the in-game `ESC`
-overlay, and saved as plain text at `<config>/controls.cfg`. The input callbacks
-in `sdl_platform.cpp` read the map on every poll.
-
-### The map
-
-One row per N64 button, in libultra's bit order, with a keyboard scancode and one
-gamepad source (a button, a right-stick direction, or none). The defaults are the
-mapping the port used before the tab existed:
+`tools/release-build.sh` is the single build entry point; the workflow exports
+`DIST_OS` and `CMAKE_ARGS` and runs it, so a release artifact is what `make dist`
+produces locally.
+
+### The data bundle
+
+A hosted runner has no ROM. With the Actions variable `OGRE_DATA_REPO` (the
+private repository slug) and the secret `OGRE_DATA_TOKEN` (fine-grained,
+`Contents: Read`) set, every job runs on its hosted runner and unpacks
+`files.tar.gz` from that repository. With the variable unset the jobs use
+self-hosted runners (`["self-hosted","Windows","X64"]`).
+
+- The archive holds `RecompiledFuncs/`, `Bank*Funcs/`, `RspFuncs/`,
+  `app/src/bank_funcs.inc`, `build/mods/*.nrm`, and `ogre-data.txt` with the
+  commit it was generated from.
+- The mods are in it because a runner cannot build them. `make dist`,
+  `tools/release-build.sh`, the unpack step and `tools/smoke-dist.sh` each fail
+  when they are absent (v0.4.0 shipped an empty `mods/`; session 108).
+- The unpack step fails when the recorded commit differs from the commit being
+  built. Regenerate the bundle for every release.
+- `tools/data-bundle.sh` excludes AppleDouble `._*` members and the unpack step
+  deletes any: `app/CMakeLists.txt` globs `*.c`.
+
+On the hosted Windows job the workflow clones N64ModernRuntime at
+`589bbf018a3e6d3646ddf7de1e7919f1b7e99bb1`, applies the runtime and RT64/plume
+patches with `--ignore-whitespace` (`apply_patch` skips one already applied),
+runs `choco install make ninja`, sets up MSVC with `ilammy/msvc-dev-cmd@v1`
+(`arch: x64`), and builds with the clang-cl `CMAKE_ARGS`. A self-hosted Windows
+runner needs Visual Studio 2022 with the C++ Clang tools, `ninja` and `make` in
+a developer environment.
+
+## Controls and settings
+
+### Controller bindings
+
+Bindings are data (`app/src/input_map.cpp`), edited from the CONTROLS tab of the
+start screen and the `ESC` overlay, and saved as text at `<config>/controls.cfg`
+(`<n64 tag>.<key|pad> = <value>`; `-` and `none` are unbound; key names are
+`SDL_GetScancodeName`'s). The input callbacks read the map on every poll.
 
 | N64 | key | gamepad |
 |---|---|---|
@@ -1887,694 +506,1064 @@ mapping the port used before the tab existed:
 | C-LEFT / C-RIGHT | `J` / `L` | (none; the right stick) |
 
 The left stick is always the N64 analog stick, and the right stick presses the C
-buttons on top of whatever the map binds to them. Both are fixed, and the
-CONTROLS tab says so. `ESC` is reserved for the overlay and cannot be bound.
-`=` and `-` step the game speed while the game runs, and the pad's **R3** cycles
-it (see "Game speed" below); none of the three is part of this map. Binding one of
-them to an N64 button would still work, but the press would change the speed as
-well.
+buttons on top of the map. `ESC` is reserved for the overlay. `=`/`-` and the
+pad's R3 change the game speed and are outside the map.
 
-The file is line-oriented (`<n64 tag>.<key|pad> = <value>`); `-` and `none` are
-unbound, and a missing file leaves the defaults. Key names are SDL's
-(`SDL_GetScancodeName`), so the file is readable and survives SDL updates.
-
-### Which N64 controller a pad drives
-
-The game reads N64 controller 1 only, so the first connected pad fills
-`Platform::controllers[0]` and the keyboard is OR'd into the same slot: both
-drive player 1 at the same time. A second pad fills slot 1 (N64 controller 2) and
-so on, and this game never polls those. Before session 118 a pad filled slots
-1..3, so it worked in the launcher and the overlay and did nothing in game
-(issue #13). SDL queues an `SDL_CONTROLLERDEVICEADDED` event for every pad that
-was already connected at startup, so the app enumerates the connected set once
-and skips an ADDED event for a device it already holds; the enumeration prints
-one `[input] controller <n>: <name>` line per filled slot.
+The game reads N64 controller 1 only. The first connected pad fills
+`Platform::controllers[0]` and the keyboard is OR'd into it; a second pad fills
+slot 1, which the game never polls. The app enumerates connected pads once,
+skips SDL's startup `SDL_CONTROLLERDEVICEADDED` for a pad it holds, and prints
+one `[input] controller <n>: <name>` line per slot (issue #13).
 
 ### The CONTROLS tab
 
 ```
 A          KEY X            PAD A              - Selects the highlighted object.
-B          KEY Z            PAD B              - Cancels a selection.
 …
 Reset bindings to defaults   Restore the default keyboard and gamepad map.
-```
-
-`SPACE` on a row arms a capture; the next keydown fills the keyboard slot and a
-pad button fills the pad slot. `BACKSPACE` clears the keyboard slot, `DELETE`
-clears the pad slot, `ESC` cancels. `TAB` / `SHIFT+TAB` (or a mouse click on the
-tab bar) switch tabs. The second column's action text comes from the game's
-controls description.
-
-The line under the bindings is the panel's own pad controls, and is not a
-binding:
-
-```
 MENU PAD NAVIGATION: D-PAD MOVE, A SELECT, SELECT MENU, LB/RB SWITCH TAB
 ```
 
-`D-PAD` moves the selection and steps a radio row or slider, `A` and `START`
-activate, `LB`/`RB` switch tab, and the pad's SELECT button is the overlay's
-Back/toggle (it does nothing in the launcher). The line is one section row, and a
-section row's title is wrapped to the whole panel width (`layout_rows` in
-`app/src/ui.cpp`) because a section has no description to its right. `app/src/ui.cpp` maps the SDL button to a `Panel::PadCommand`
-(`Panel::pad_command_for_button`), so the launcher and the overlay act on one
-table. The events are `SDL_CONTROLLERBUTTONDOWN`, which is why a pad press
-cannot auto-repeat; a rebind capture owns the pad while it is armed.
+`SPACE` arms a capture; the next keydown fills the key slot and a pad button the
+pad slot. `BACKSPACE` clears the key, `DELETE` the pad, `ESC` cancels.
+`TAB`/`SHIFT+TAB` or a click switch tabs. In the panel, `D-PAD` moves and steps,
+`A`/`START` activate, `LB`/`RB` switch tab (`Panel::pad_command_for_button` in
+`app/src/ui.cpp`, shared by launcher and overlay). Pad events are
+`SDL_CONTROLLERBUTTONDOWN` and do not repeat. The pad's SELECT
+(`SDL_CONTROLLER_BUTTON_BACK`) toggles the overlay while the map binds nothing to
+it (`pad_button_is_bound`).
 
-`SDL_CONTROLLER_BUTTON_BACK` (the pad's SELECT) opens and closes the in-game overlay, and only while
-the live map binds nothing to it (`pad_button_is_bound`), so opening the menu
-cannot also press an N64 button in the game. While the overlay is visible the
-game already receives an idle pad (`get_input` in `app/src/sdl_platform.cpp`), so
-navigating the panel does not move the game's own cursor. The pad's **R3** is the
-game speed's own button and is likewise ignored while the overlay is visible; see
-"Game speed" below.
+### GAME SPEED
 
-### Game speed (the SETTINGS tab)
+GAME SPEED is the emulated-clock multiplier `OGRE_SPEED` also sets: the CPU
+counter and the VI retrace schedule run `n` times faster. The row offers 1, 2, 4
+and 8, applies immediately (also from the overlay), and is saved as
+`game_speed = <n>` (`app/src/settings.cpp`). A value the row does not offer loads
+as the closest offered one. `ultramodern::set_speed_multiplier()` (`timer.cpp`)
+keeps the clock piecewise linear: `speed_start_us`/`speed_start_ticks` anchor
+the current multiplier, published under a seqlock.
 
-GAME SPEED is the runtime's emulated-clock multiplier, the same quantity
-`OGRE_SPEED` sets: `1` is real time, and `n` runs the emulated CPU counter and
-the VI retrace schedule `n` times faster, so a timed sequence completes in `1/n`
-of the wall time. The tab offers **1, 2, 4 and 8**; 8 was dropped when the row was
-added because the game's own cursor aiming is fast at that speed, and it is
-offered again at the developer's request (session 137). 6 stays out.
+- `=`/`-` (keypad `+`/`-` too) step 1 → 2 → 4 → 8 and stop at the ends; a
+  starting value outside the table steps from that value. Read in
+  `pump_sdl_events`, ignored while the `ESC` panel is up.
+- R3 cycles the table and wraps 8 → 1. It observes the event, so an R3 bound to
+  an N64 button still presses it. Ignored while the panel is open.
+- `app/src/speed_badge.cpp` shows `1x`..`8x` in the game window's lower-right
+  corner for two seconds after a change, as a borderless always-on-top SDL window
+  (0.85 opacity). It is not drawn in fullscreen and hides under the pointer,
+  because SDL2's hit test has no click-through.
 
-```
-GAME SPEED   [ ] 1 [ ] 2 [ ] 4 [x] 8
-```
-
-`LEFT`/`RIGHT` (or `SPACE`) step the group, and a mouse click on a marker sets
-that speed. The value is applied immediately, so it can be changed from the
-in-game `ESC` overlay while the game runs; the handoff's timing evidence shows
-the guest clock stays continuous across a change. It is saved as plain text at
-`<config>/settings.cfg` (`game_speed = <n>`, written by `app/src/settings.cpp`),
-read at startup by `load_settings()` before the game boots. `OGRE_SPEED` overrides
-the file for one run and does not write it; a file that names a value the tab does
-not offer is loaded as the closest offered one, so a stale `6` becomes `4`.
-
-The runtime's setter is `ultramodern::set_speed_multiplier()` (`timer.cpp`). The
-clock is piecewise linear: `speed_start_us`/`speed_start_ticks` anchor where the
-current multiplier took effect, and the three values are published under a
-seqlock, because the game, VI and timer threads read them while the app's main
-thread changes them.
-
-**The speed hotkeys.** `=` steps the multiplier up and `-` steps it down (the
-keypad `+` and `-` too), through the same four values and stopping at the ends:
-1 → 2 → 4 → 8 and back, with no press doing anything at 8 while stepping up or at
-1 while stepping down. They are read from the SDL event in `pump_sdl_events`
-(`app/src/sdl_platform.cpp`), so they work while the game has the keyboard, and
-they are ignored while the `ESC` panel is up, because the panel owns the keyboard
-and has its own GAME SPEED row. A run whose starting value is not one the row
-offers steps from that value, so `OGRE_SPEED=6` goes to 8 up and 4 down.
-`OGRE_SPEED_KEYS` exercises them from a script.
-
-**The pad's speed button.** Pressing **R3** (the right stick's click) cycles the
-same table with one button, so it wraps: 1 → 2 → 4 → 8 → 1. R3 is what the
-default pad map leaves free (`Z` is L3 and `BACK` opens the `ESC` panel), so the
-press does not also press an N64 button; a player who binds R3 to an N64 button
-still gets that button, because this handler only observes the event. It is read
-from `SDL_CONTROLLERBUTTONDOWN` in `pump_sdl_events`, on the same rule as the
-keys: ignored while the `ESC` panel is open and before the game window exists.
-A run whose starting value is not in the table joins at the first offered value
-above it, so `OGRE_SPEED=6` cycles to 8 and then wraps to 1. `OGRE_SPEED_PAD`
-exercises it from a script.
-
-**The speed badge.** `app/src/speed_badge.cpp` shows `2x`, `4x` and so on in the
-game window's lower-right corner for two seconds whenever the multiplier changes,
-from the panel, the hotkeys or the row's own value at startup being replaced.
-"1x" is drawn too, so stepping back down to normal speed is visible. The game's
-picture is drawn by RT64 straight to its own swap chain and the renderer has no
-UI pass, so the badge is a small borderless always-on-top SDL window placed over
-the corner of the game window, drawn with the same bitmap font as the panel and
-0.85 uniform window opacity (SDL2 has no per-pixel window alpha). No window is
-created until the first change. Two limits, both from that design: the badge is
-not drawn while the WINDOW row is `fullscreen`, because fullscreen is a display
-space of its own, and it hides itself when the pointer moves over it, because
-SDL2's window hit test has no click-through result and a click there would
-otherwise be swallowed instead of reaching the game.
-
-
-### Widescreen (the SETTINGS tab)
-
-WIDESCREEN puts RT64 into its **Expand** aspect ratio, which widens the field of
-view instead of stretching the picture. `rt64_workload_queue.cpp:134-211` derives
-an `aspectRatioScale` from the output window, and `ProjectionProcessor::
-processScene` (`rt64_projection_processor.cpp:101`) counter-scales the game's
-projection matrices by `1/scale` for the projections that cover the screen and
-are wider than tall, so the 3D field keeps its proportions and gains width. The
-setting reaches RT64 through the runtime: `ultramodern::renderer::
-set_graphics_config` flags an `UpdateConfigAction`, the renderer thread picks it
-up in `events.cpp`, and `RT64Renderer::update_config` (`app/src/renderer.cpp:917`)
-forwards it to `app_->updateUserConfig`.
-
-WIDESCREEN is a toggle, and its `ON` state is scoped by a scene gate rather than
-by the aspect ratio, because the game's 2D screens are authored for 4:3:
+### WIDESCREEN
 
 ```
 WIDESCREEN   [ ] OFF [x] ON
 ```
 
-* `OFF` (the default) never changes the aspect ratio.
-* `ON` turns Expand on only while the dispatcher's active scene (`D_800E810E`) is
-  `0x03`, the mission. The setting exists for this scene: the 3D field gains
-  width, and the game's 2D blits (the boot's publisher stills, njpeg story
-  backgrounds) keep their 4:3 proportions and are pillarboxed in the window.
+WIDESCREEN puts RT64 into its Expand aspect ratio, which widens the field of
+view: `rt64_workload_queue.cpp` derives `aspectRatioScale` from the window and
+`ProjectionProcessor::processScene` counter-scales screen-covering projections.
+`ON` turns Expand on only while the dispatcher's scene (`D_800E810E`) is in the
+widescreen set: `0x03` (mission) and `0x0D` (dialogue/cutscene) by default
+(`OGRE_WS_SCENES`), plus every scene the HD-background pack covers. The 2D
+screens are authored for 4:3 and are pillarboxed. `app/src/widescreen.cpp` is
+the only writer of `ar_option`, once per frame from `update_gfx`, and writes only
+on a difference. Saved as `widescreen = off|on`; the retired `missions`,
+`always`, `1` and `2` read as `on`.
 
-Earlier builds offered three options, `OFF` / `MISSIONS` / `ALWAYS`. Both
-widescreen options opened the same 16:9 window and pillarboxed the same 4:3
-scenes, so the split is gone (developer, session 105); the retired `missions`,
-`always`, `1` and `2` spellings in the file and in `OGRE_WIDESCREEN` are read as
-`on`.
+The window's shape follows the toggle and never changes with the scene.
+`create_window` asks `widescreen_initial_window_size`, and
+`widescreen_fit_window` re-derives the width from the height the window got.
+`OFF` opens 4:3; `ON` opens 16:9 and pillarboxes 4:3 scenes. Only a toggle change
+re-fits the window (`widescreen_update` reports it to `main.cpp`). The `MISSION`
+banner clipping at both edges is the game's own marquee and happens in 4:3 too.
 
-`app/src/widescreen.cpp` is the only writer of `ar_option`, and it is called
-once per frame from `update_gfx` beside `poll_scene`, because the active scene can
-change on any frame. It reads the live `GraphicsConfig` and writes only when the
-wanted value differs, so a steady scene costs one comparison per frame.
-
-`LEFT`/`RIGHT` (or `SPACE`) step the group, and a mouse click on a marker sets
-that option, exactly like GAME SPEED; the value is saved at
-`<config>/settings.cfg` (`widescreen = off|on`).
-
-#### The window's shape follows the toggle, not the scene
-
-The window is sized once, from the toggle, and never changes shape while the game
-runs. `create_window` asks `widescreen_initial_window_size` (`sdl_platform.cpp`)
-and then `widescreen_fit_window` re-derives the width from the height the window
-actually got, because the window manager can hand back a different height than
-the one requested.
-
-| toggle | window | a 4:3 scene | the mission |
-|---|---|---|---|
-| `OFF` | 4:3 | fills the window, no bars | 4:3, no bars |
-| `ON` | 16:9 | **pillarboxed: black bars on the sides** | fills the width |
-
-`widescreen_update` returns whether the **toggle** changed, and only that makes the
-app re-fit the window (`main.cpp`). A scene transition must not resize the
-window: the first version did exactly that, and the developer rejected it —
-*"the window changes its size while the game is running"*. Changing the toggle from
-the launcher or the `ESC` overlay re-fits the window once, which is the one case
-where the shape is expected to change. A manual resize or a double-click to fill
-the screen is left alone until the toggle changes.
-
-#### Observations
-
-Observations from the verification runs (2026-09-25, `docs/HANDOFF-2026-09-25-session102.md`):
-
-* Entering and leaving scene `0x03` toggles Expand and back. A mission that
-  interleaves the story scenes `0x02`/`0x0D` toggles on every visit, and the run
-  continues normally (`[widescreen]` lines in the log).
-* With `OFF` the window opens 953x715 (4:3 at a 715 window height) and the
-  4:3 picture reaches both edges — no pillarbox, which was the developer's first
-  report about the old fixed 1280x720 window.
-* With `ON` the window opens 1271x715 (16:9) and stays; the boot,
-  the title, the Load Game book and the story cutscenes are pillarboxed inside
-  it, which is what the developer asked for.
-* The mission field and its projected 2D HUD (the `NOTE` tooltip, the dialogue
-  box, the battle unit panels) keep their proportions and the field fills the
-  width.
-* The `MISSION` banner row clips at both screen edges in 4:3 as well: it is the
-  game's own scrolling marquee and not an Expand artifact.
-* Proofs: `native-widescreen-launcher.png` (the row) and
-  `native-widescreen-overlay.png` (the same row in the `ESC` overlay),
-  `native-widescreen-pillarbox.png` and `native-widescreen-43-window.png` (the
-  Load Game book in `ON` and `OFF` — the identical screen with and without
-  the side bars), `native-widescreen-mission-expand.png` and
-  `native-widescreen-mission-43.png` (a battle in the mission, in `ON` and
-  `OFF`; not the same battle frame, but the same area and camera).
-
-```bash
-# the row, as a PPM (a ROM is auto-found, so force the launcher)
-OGRE_LAUNCHER=1 OGRE_LAUNCHER_TAB=settings OGRE_LAUNCHER_SHOT=/tmp/ws.ppm \
-  ./build-app/ogrebattle64
-
-# the scene gate: Expand exactly while scene 0x03 runs, and the window unchanged
-OGRE_WIDESCREEN=on OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=30000 \
-  ./build-app/ogrebattle64 2>&1 | grep -E '\[scene\].*0x0003|\[widescreen\]'
-```
-
-### Display: window, and the experimental resolution and MSAA rows (the SETTINGS tab)
-
-Shipped:
+### Display: WINDOW, RESOLUTION, CRT FILTER, MSAA
 
 ```
 DISPLAY
 WIDESCREEN   [x] OFF [ ] ON
+RESOLUTION   [ ] NATIVE [ ] 2X [x] AUTO
+CRT FILTER   [x] OFF [ ] HYLLIAN [ ] CRTS [ ] LOTTES
+MSAA         [x] OFF [ ] 2X [ ] 4X [ ] 8X      (only with OGRE_DISPLAY_EXPERIMENTS=1)
 WINDOW       [x] WINDOWED [ ] FULLSCREEN
 ```
 
-`WINDOW` is `GraphicsConfig::wm_option`; the renderer calls its backend's
-`setFullScreen`, so the window is not recreated and the swap chain follows the
-display mode. It is saved as `window = windowed|fullscreen` and
-`OGRE_WINDOW=windowed|fullscreen` overrides the file for one run.
-
-**Fullscreen is the renderer's geometry, and the port must not touch it.** RT64's
-fullscreen is a raw `SetWindowPos` to the monitor rect on Windows and
-`[NSWindow toggleFullScreen:]` on macOS, and neither goes through SDL, so SDL's
-idea of the window's size does not follow. The WIDESCREEN row derives the
-window's shape from its height, so it must not run while fullscreen:
-`widescreen_fit_window` returns early when the live config asks for fullscreen and
-logs `[widescreen] fullscreen: the renderer owns the window's shape` once, and
-`widescreen_update` no longer reports a mode change on its first call (the window
-was created at that mode's shape already). A run that started fullscreen used to
-re-fit the window on its first frame — invisible on macOS, where SDL ignores a
-resize of a window it knows is fullscreen, and a 4:3 window in the display's
-top-left corner on Windows, where SDL did not perform the transition and applied
-the resize. Leaving fullscreen is the other direction: `RT64Renderer::update_config`
-calls `widescreen_request_refit()` after it has restored the window, and the next
-frame re-derives the shape, so a WIDESCREEN change made while fullscreen is
-honoured on the way out.
-
-**RESOLUTION and MSAA are experimental and off.** Both are implemented and both
-reach RT64, and a player run with them produced visual artifacts (developer,
-session 121), so they are hidden and inert until the artifacts are handled. With
-`OGRE_DISPLAY_EXPERIMENTS=1` they appear under WINDOW and are applied:
-
-```
-DISPLAY
-WIDESCREEN   [x] OFF [ ] ON
-RESOLUTION   [x] NATIVE [ ] 2X [ ] AUTO
-MSAA         [x] OFF [ ] 2X [ ] 4X [ ] 8X
-WINDOW       [x] WINDOWED [ ] FULLSCREEN
-```
+The game window opens 1080 points tall (1440x1080, or 1920x1080 with WIDESCREEN
+on), clamped to the primary display's usable area. The process is per-monitor
+DPI aware (`SDL_HINT_WINDOWS_DPI_SCALING` in `init_sdl`), so window sizes are
+points and the swap chain is real pixels. The boot logs
+`[SDL] game window <points> points, <pixels> pixels`.
 
 | row | options | what it changes |
 |---|---|---|
-| `RESOLUTION` | `NATIVE` / `2X` / `AUTO` | `res_option`. `NATIVE` is RT64's `Original`, the game's own 320x240 target, and what the port drew before the row existed. `2X` is `Original2x`, which `set_application_user_config` (`app/src/renderer.cpp`) turns into RT64's `Manual` at `resolutionMultiplier 2.0`. `AUTO` is `WindowIntegerScale`, the largest integer multiple of the native resolution that fits the window |
-| `MSAA` | `OFF` / `2X` / `4X` / `8X` | `msaa_option`, RT64's multisample antialiasing. A change also rebuilds the render targets (`updateMultisampling`) |
+| `RESOLUTION` | `NATIVE` / `2X` / `AUTO` | `res_option`. `NATIVE` is RT64's `Original` (320x240); `2X` is `Original2x`, which `set_application_user_config` (`app/src/renderer.cpp`) turns into `Manual` at `resolutionMultiplier 2.0`; `AUTO` (default) is `WindowIntegerScale`, the largest integer multiple of 320x240 that fits the window's pixels (4x at 100% scaling on 1080p, 9x at 200%) |
+| `CRT FILTER` | `OFF` / `HYLLIAN` / `CRTS` / `LOTTES` | RT64's `UserConfiguration::crtFilter`, polled by `RT64Renderer::apply_crt_filter` once per screen update; see "CRT filters" below |
+| `MSAA` | `OFF` / `2X` / `4X` / `8X` | `msaa_option`; a change rebuilds the render targets (`updateMultisampling`). Experimental |
+| `WINDOW` | `WINDOWED` / `FULLSCREEN` | `wm_option`; the backend's `setFullScreen`, without recreating the window |
 
-The gate is `OGRE_DISPLAY_EXPERIMENTS` (`1`/`on`/`true`/`yes`; `0`/`off`/`false`/
-`no` is off). A set `OGRE_RESOLUTION` or `OGRE_MSAA` also enables it, so the debug
-spellings below work on their own. While it is off:
+2D rectangles (`G_TEXRECT`) look the same at every resolution: the app sets
+RT64's `upscale2D = Original` (`set_application_user_config`), so the shader
+samples each rectangle at the console's pixel positions. RT64's default
+`ScaledOnly` upscaled every rectangle whose `dsdx`/`dtdy` is not exactly 1024,
+and the dialogue box (three rectangles stretched by 1026..1169/1024 over a 16x61
+window) then sampled one texel past its window in its last row and column: a
+broken row under the box's shadow and a sliver beside the portrait.
+`OGRE_UPSCALE_2D=scaled|all` restores RT64's modes. Triangles (3D, the cutscene
+backdrop strips) render at the full resolution, and HD replacement textures
+sample at full resolution in both modes. Saved keys:
+`render_resolution = native|2x|auto`, `crt_filter = off|hyllian|crts|lottes`,
+`msaa = off|2x|4x|8x`, `window = windowed|fullscreen`. The older `resolution`
+key is not read, so an existing `settings.cfg` gets `AUTO`.
 
-- the rows are absent from the tab, in the launcher and in the overlay
-  (`app/src/ui.cpp`, `Panel::build_rows`);
-- the two values are not applied at all, whatever the file or the environment
-  says (`applied_resolution`/`applied_antialias` in `app/src/settings.cpp`), and
-  the boot prints
-  `resolution 2x and msaa 4x are experimental and not applied; set OGRE_DISPLAY_EXPERIMENTS=1 to enable them`;
-- a value already in `settings.cfg` is kept, not overwritten: the file records
-  what was configured, and the flag decides whether it is used.
+#### CRT filters
 
-With the flag on they are saved as `resolution = native|2x|auto` and
-`msaa = off|2x|4x|8x`, and `OGRE_RESOLUTION`/`OGRE_MSAA` override the file for one
-run without writing it.
+The VI pass (`tools/RT64/src/render/rt64_vi_renderer.cpp`, patched) draws the
+filter in two steps. `VIRenderer::prepare` runs RT64's `BoxFilterCS` on the
+present command list before the swap chain framebuffer is bound, and averages
+the rendered frame to one texel per framebuffer pixel. The box is the
+resolution scale rounded to whole texels; widescreen's horizontal scale is
+fractional, so its input has slightly more or fewer columns. A framebuffer
+taller than 288 lines (an interlaced or high-resolution mode) is folded to one
+texel per two lines, so it still shows 240 scanlines. `VIRenderer::render` then
+draws one of three CRT shaders over the VI viewport
+(`tools/RT64/src/shaders/VideoInterfaceCrtPS.hlsl`, three variants by define).
+Each is a port of libretro's slang version (github.com/libretro/slang-shaders,
+`crt/shaders/`) with that version's default parameters:
 
-All three rows apply through `RT64Renderer::update_config`
-(`app/src/renderer.cpp:917`) on the next frame, so they can be changed from the
-in-game `ESC` overlay. `settings.cpp` and `widescreen.cpp` are two writers of one
-`GraphicsConfig`: each starts from the live config and changes only its own
-fields, so a widescreen scene transition does not reset the resolution and a
-resolution change does not reset the aspect ratio. The applied values are printed
-once per change:
+| option | source | license | texel reads per pixel | look |
+|---|---|---|---|---|
+| `HYLLIAN` | `crt-hyllian-fast` | MIT | 4 | Catmull-Rom horizontal filter, one beam per line, magenta/green dot mask, no curvature |
+| `CRTS` | `crt-lottes-fast` (Lottes' own name for it is CRTS; `lottes-fast` also parses) | public domain | 8 | two sine-shaped beams, RGB mask, a tone curve that restores the mask's brightness loss, curvature 0.02, rounded corners |
+| `LOTTES` | `crt-lottes` | public domain | 31 distinct | Gaussian beams over three lines, stretched-VGA shadow mask, bloom 0.15, curvature 0.031/0.041 |
 
-```
-[renderer] config: resolution 2x (mult 2.00), msaa 4x, window fullscreen
-```
+Shaders under the GPL (zfast-crt, crt-easymode, crt-geom, crt-pi) were left out
+because they would put the shipped executable under the GPL. Average brightness
+of the cathedral frame (0..255, red channel): off 127, HYLLIAN 101, CRTS 114,
+LOTTES 112. All three hold the present rate at 2880x2160 and 3840x2160 on
+an RTX 5070 Ti; no per-pass GPU time has been measured. Each change prints
+`[renderer] crt filter <MODE>`.
 
-`GRAPHICS API` is not a row. It is fixed at renderer creation, so it stays an
-environment variable (`OGRE_GRAPHICS_API`). `REFRESH RATE` and
-`HIGH-PRECISION FRAMEBUFFER` are also in `GraphicsConfig` and remain at their
-defaults.
+MSAA is gated by `OGRE_DISPLAY_EXPERIMENTS` (`1`/`on`/`true`/`yes`) or a set
+`OGRE_MSAA`. With the gate off the row is absent (`Panel::build_rows`), the value
+is not applied (`applied_antialias`; the boot prints `msaa 4x is experimental and
+not applied; set OGRE_DISPLAY_EXPERIMENTS=1 to enable it`), and a stored value
+is kept.
 
-Proofs: `native-launcher-settings.png` (shipped rows),
-`native-launcher-settings-experiments.png` (`OGRE_DISPLAY_EXPERIMENTS=1`) and
-`native-overlay-settings.png` (the shipped rows, with the pad script below having
-set WINDOW to FULLSCREEN).
+RT64's fullscreen is a raw `SetWindowPos` to the monitor rect, outside SDL, so
+`widescreen_fit_window` returns early while the config asks for fullscreen
+(`[widescreen] fullscreen: the renderer owns the window's shape`). On leaving
+fullscreen `RT64Renderer::update_config` calls `widescreen_request_refit()`, so
+a WIDESCREEN change made in fullscreen applies on the way out.
 
-### Sounds and volume (the SETTINGS tab)
+All rows apply through `RT64Renderer::update_config` on the next frame.
+`settings.cpp` and `widescreen.cpp` each start from the live `GraphicsConfig` and
+change only their own fields. Each change prints
+`[renderer] config: resolution 2x (mult 2.00), msaa 4x, window fullscreen`.
+The graphics API is fixed at renderer creation and stays an environment
+variable (`OGRE_GRAPHICS_API`).
+
+### SOUNDS and VOLUME
+
 ```
 AUDIO
 SOUNDS   [x] ON [ ] OFF
 VOLUME   ----------| 100%
 ```
 
-SOUNDS is the audio output's mute and VOLUME is its gain. `LEFT`/`RIGHT` (or
-`SPACE`) step both: SOUNDS wraps between `ON` and `OFF` like the other radio
-rows, and VOLUME moves the handle 5% per press and clamps at the ends rather than
-wrapping. A mouse click sets a radio marker or the slider cell it lands on (11
-cells, 10% each).
+VOLUME moves 5% per press and clamps; a click sets a slider cell (11 cells, 10%
+each). The gain is applied in `queue_audio_samples` (`sdl_platform.cpp`): 100
+queues the buffer unchanged, a lower gain scales a copy, 0 queues silence. The
+frame count is the same at every gain, because `ultramodern::audio_dma_busy()`
+paces the game's audio from the queued depth. Saved as `sounds = off|on` and
+`volume = <0..100>`; a file without the keys loads `ON` / `100`.
 
-The bar is `kVolumeCells` = 11 characters with the handle on the cell nearest the
-percent, so 0 renders `|----------`, 50 renders `-----|-----` and 100 renders
-`----------|`.
+### MOUSE ENABLED
 
-The gain is applied in `queue_audio_samples` (`app/src/sdl_platform.cpp`): 100
-queues the game's buffer unchanged, a lower gain scales a copy into a scratch
-buffer, and 0 queues silence. The frame count is the same at every gain. That is
-deliberate: `ultramodern::audio_dma_busy()` paces the game's audio generation
-from the queued depth (`get_frames_remaining`), so a mute that queued nothing
-would report the AI idle and make the game overproduce. Measured with a probe
-(session 106, reverted): at gain 50 `peak_out = peak_in/2`, and at gain 0
-`peak_out = 0` with 1104 samples still queued per buffer.
-
-Both values are saved at `<config>/settings.cfg` (`sounds = off|on`,
-`volume = <0..100>`). `OGRE_SOUNDS` and `OGRE_VOLUME` override the file for one
-run without writing it, the same rule as `OGRE_SPEED`. A file written before the
-rows existed has neither key and loads as `ON` / `100`, which is what the app did
-before them. The browser build does not read `settings.cfg` and has no settings
-UI, so `app/src/web_platform.cpp` still plays at full volume.
-
-Proofs: `native-launcher-settings.png`, `native-launcher-settings-experiments.png`
-and `native-overlay-settings.png` (the tab in the launcher, the same tab with the
-experimental rows enabled, and in the `ESC` overlay with the pad script above
-having set WINDOW to FULLSCREEN).
-
-### Mouse enabled (the SETTINGS tab)
 ```
 INPUT
 MOUSE ENABLED   [x] OFF [ ] ON
 ```
 
-MOUSE ENABLED is the switch for the port's mouse support, and `OFF` is the
-default. `ON` lets the pointer drive the two screen cursors the port implements:
-the world map's (scene `0x05`) and the mission field's (scene `0x03`), with the
-left click that acts as the game's `A` and the edge push that scrolls either
-view. `OFF` is what every build before the row did, and the operating system
-pointer is then left visible over the game window, because the game is played
-with the keyboard or a pad.
+`ON` lets the pointer drive the world map's and the mission field's cursors (see
+"Mouse cursors"). `OFF` (default) leaves the OS pointer visible. The row is
+published to `ogre_map_cursor_set_enabled` and `ogre_mission_cursor_set_enabled`
+on every change. Saved as `mouse = off|on`.
 
-The row is published to `ogre_map_cursor_set_enabled` and
-`ogre_mission_cursor_set_enabled` on every change, so a change under the `ESC`
-overlay takes effect on the next frame. The value is saved at
-`<config>/settings.cfg` as `mouse = off|on`; `OGRE_MOUSE=off|on` overrides the
-file for one run without writing it, and `OGRE_MAP_CURSOR` /
-`OGRE_MISSION_CURSOR` still force one screen on or off whatever the row says.
-A file written before the row existed has no key and loads as `OFF`.
+### The CHEATS tab
 
-Proofs: `docs/proofs/native-launcher-mouse-off.png` and
-`-mouse-on.png` (the SETTINGS tab with the row off, and after the scripted key
-run turned it on).
+```
+WHILE ON, A CHEAT IS RESTORED EVERY FRAME. SAVING KEEPS THE CHEATED VALUES.
+MAX GOTH          [x] OFF [ ] ON
+MAX ITEM COUNTS   [x] OFF [ ] ON
+```
+
+A tab between SETTINGS and DEBUG, in the launcher and the `ESC` overlay. While a
+row is `ON`, `cheats_tick()` (`app/src/cheats.cpp`, called once per frame from
+the frame callback in `main.cpp`) writes its value into RDRAM, like a GameShark
+constant write; `OFF` stops the writes and leaves the current values.
+
+| row | what it holds | evidence |
+|---|---|---|
+| `MAX GOTH` | goth, the u32 at `0x80196A8C`, at 9,999,999 | the shop compares it with the price (`lw` at `0x8021564C`, bank AB); the battle reward adds to it and clamps at the game's cap `0x0098967F` (bank N, `0x801E53B0`) |
+| `MAX ITEM COUNTS` | the count byte (`+0x03`) of every non-empty slot (u16 id at `+0x00` not 0) of the owned-item lists `0x80196B20` (278 slots) and `0x80193AE0` (40 slots), at 99 | the game's own debug cheat `func_ovlS_801C214C` walks the same two lists with the same test and sets 98 (`0x801C25B0`); 99 is the cap the grant routine keeps (`docs/notes-item-re.md`) |
+
+Each starts logging one line when it first changes the game
+(`[cheats] max goth: 0 -> 9999999`). Saved as `cheat_max_goth` and
+`cheat_max_items` (`off|on`). The published GameShark codes for the USA release
+target another revision: their goth address `0x80196A6C` is never read in this
+ROM, and their roster and goth addresses sit 0x20 bytes below this ROM's
+(`docs/symbols.md`).
+
+### Quick save (F5) and quick load (F9)
+
+The quick slot is a copy of the battery save, `<config>/saves/<game id>-quick.bin`
+beside the battery `<config>/saves/<game id>.bin` (`app/src/quick_save.cpp`).
+Both keys act while the game window exists and the `ESC` panel is closed.
+
+- `F5` copies the battery file to the slot. The runtime's saving thread writes
+  the battery file within about 10 ms of the game's last write, so the slot holds
+  what the game last saved at one of its save points. With no battery yet (or an
+  all-zero one) it shows `NO SAVE YET`.
+- `F9` shows `PRESS F9 AGAIN TO LOAD`; a second `F9` within 3 s puts the slot
+  back through the runtime's save buffer (`save_write_ptr`, librecomp
+  `pi.cpp`), waits until the battery file equals the slot (the saving thread
+  keeps the previous file as `.bak`), and ends the run through the normal exit
+  path. After the teardown `main()` starts the executable again with the same
+  command line and `OGRE_RELAUNCH=1`, which boots past the start screen with the
+  mods as they stand (the variable is cleared in the new process). The game boots
+  to the title, and Continue reads the restored battery.
+
+The result shows in the speed badge window (`speed_badge_message`; not in
+fullscreen) and as a `[quicksave]` log line. `OGRE_QUICK_KEYS=<ms>:<f5|f9>,...`
+delivers scripted presses through the event pump for a test run; the relaunch
+removes it from the new process's environment.
+
+Two other designs were rejected. A RAM snapshot (the console's `save`/`load`,
+"Checkpoints") is only safe to restore while every game thread is at the same
+place in the code, because the call stacks are native. A jump to the title
+inside the running game (`0x8004` into `D_800C4C26`) entered the title from the
+cutscene scene `0x0D`, and then the frame pump (N64 thread 4) called the cutscene
+engine's code after the title's bank had replaced it: six `[lookup]` lines, then
+an access violation. The game never goes from `0x0D` to the title itself.
 
 ### The in-game overlay
 
-`ESC` during play opens a borderless, always-on-top SDL window placed over the
-game window (`app/src/overlay.cpp`). It draws the same `ui::Panel` with the same
-bitmap font, so the two screens look identical; the tab bar shows MODS greyed and
-MAIN, CONTROLS, SETTINGS and DEBUG active. MAIN stays active because it carries
-the EXIT GAME row, which is the overlay's own way to end the run; MODS is the one
-tab a running game cannot use, because the runtime loads mods before it boots.
-`ESC` closes it and returns the keyboard to the game.
+`ESC` during play opens a borderless, always-on-top SDL window over the game
+window (`app/src/overlay.cpp`) drawing the same `ui::Panel`. MODS is greyed
+(mods load before boot). MAIN carries EXIT GAME. While open, `get_input` reports
+an idle controller and the game keeps running. The window is created on the
+first `ESC`, synced to the game window each frame, with
+`SDL_SetWindowOpacity` (default 0.90).
 
-EXIT GAME records a request and `update_gfx` (`app/src/main.cpp`) polls it next
-to the window-close flag, so both exit paths share one teardown, its dumps and
-`ultramodern::quit`. Both are checked against the game's own frame counter
-(`D_800AEFA4`, read by `overlay_frames_produced`): an exit before the game has
-produced frames leaves the process with `_Exit(0)` instead of running the
-runtime's teardown, because `ultramodern::quit` while the game thread is inside
-`ultramodern::preinit`, or while RT64 is still building its renderer, leaves
-`recomp::start` blocked in `game_thread.join` or throws out of the shutdown. That
-is the same reason the `OGRE_EXIT_AFTER_MS` path leaves through `_Exit`.
+EXIT GAME sets a request that `update_gfx` polls beside the window-close flag,
+so both exits share one teardown. Both check the game's frame counter
+(`D_800AEFA4`): before the first frame they leave with `_Exit(0)`, because
+`ultramodern::quit` during `ultramodern::preinit` or RT64's construction blocks
+in `game_thread.join` or throws.
 
-While it is open, `get_input` reports an idle controller (`buttons=0`, stick 0),
-so the game's own menus do not see the keys used to navigate the panel. The game
-keeps running: the overlay does not pause emulation.
+The hidden overlay stays in SDL's window list, and SDL synthesises `SDL_QUIT`
+only for the last window's close. `pump_sdl_events` therefore quits on a close
+event whose `windowID` is the game window's, and ignores one for the overlay.
 
-The window is created on the first `ESC`, sized and positioned from
-`SDL_GetWindowPosition`/`SDL_GetWindowSize` of the game window and re-synced each
-frame, and given `SDL_SetWindowOpacity` (default 0.90) because SDL has no
-per-pixel alpha for a normal window. It is not covered on macOS fullscreen: a
-fullscreen window lives in its own Space, which another window cannot overlay.
-No RT64 change was needed.
+### Verifying the UI without a human
 
-The overlay's window is a second SDL window for the whole run, which breaks the
-game window's close button unless the app handles the close event itself. SDL
-synthesises `SDL_QUIT` from a window's `SDL_WINDOWEVENT_CLOSE` only while that
-window is the last one in its global window list (`SDL_windowevents.c`), and the
-overlay is hidden and shown again rather than destroyed, so it stays in that list.
-`pump_sdl_events` (`app/src/sdl_platform.cpp`) therefore quits on a
-`SDL_WINDOWEVENT_CLOSE` whose `windowID` is the game window's, and ignores a close
-request for the overlay window, where `ESC` is the dismiss.
-
-### Verifying it without a human
-
-```bash
+```sh
 # every launcher tab, as a PPM
 for tab in main mods controls settings debug; do
-  OGRE_PREF_DIR=/tmp/ui OGRE_LAUNCHER=1 OGRE_LAUNCHER_TAB=$tab \
-    OGRE_LAUNCHER_SHOT=/tmp/ui-$tab.ppm ./build-app/ogrebattle64
+  OGRE_NO_AUDIO=1 OGRE_PREF_DIR=C:/tmp/ui OGRE_LAUNCHER=1 OGRE_LAUNCHER_TAB=$tab \
+    OGRE_LAUNCHER_SHOT=C:/tmp/ui-$tab.ppm "$APP"
 done
 
-# rebind A to P through the launcher's real key handler
-OGRE_PREF_DIR=/tmp/ui OGRE_LAUNCHER=1 OGRE_LAUNCHER_KEYS="Tab,Tab,Tab,Space,p" \
-  OGRE_LAUNCHER_SHOT=/tmp/ui-capture.ppm ./build-app/ogrebattle64
-grep '^a.key' /tmp/ui/controls.cfg      # a.key = P
+# rebind A to P through the launcher's key handler
+OGRE_NO_AUDIO=1 OGRE_PREF_DIR=C:/tmp/ui OGRE_LAUNCHER=1 OGRE_LAUNCHER_KEYS="Tab,Tab,Tab,Space,p" \
+  OGRE_LAUNCHER_SHOT=C:/tmp/ui-capture.ppm "$APP"
+grep '^a.key' /c/tmp/ui/controls.cfg            # a.key = P
 
-# the overlay's real ESC path, and its own rebind
-OGRE_PREF_DIR=/tmp/ov OGRE_ROM=assets/ogre64.z64 OGRE_OVERLAY_AT_MS=4000 \
-  OGRE_OVERLAY_KEYS="Space,p" OGRE_CAPTURE_OVERLAY=/tmp/overlay.ppm \
-  OGRE_EXIT_AFTER_MS=8000 ./build-app/ogrebattle64
-
-# change GAME SPEED from 1 to 4 in the overlay while the game runs
-OGRE_PREF_DIR=/tmp/gs OGRE_ROM=assets/ogre64.z64 OGRE_OVERLAY_AT_MS=2500 \
+# GAME SPEED 1 -> 4 in the overlay while the game runs
+OGRE_NO_AUDIO=1 OGRE_PREF_DIR=C:/tmp/gs OGRE_ROM="$ROM" OGRE_OVERLAY_AT_MS=2500 \
   OGRE_OVERLAY_TAB=settings OGRE_OVERLAY_KEYS="Right,Right" \
-  OGRE_CAPTURE_OVERLAY=/tmp/gs.ppm OGRE_OVERLAY_SHOT_MS=1200 \
-  OGRE_EXIT_AFTER_MS=7000 ./build-app/ogrebattle64
-grep '^game_speed' /tmp/gs/settings.cfg     # game_speed = 4
+  OGRE_CAPTURE_OVERLAY=C:/tmp/gs.ppm OGRE_OVERLAY_SHOT_MS=1200 OGRE_EXIT_AFTER_MS=7000 "$APP"
+grep '^game_speed' /c/tmp/gs/settings.cfg       # game_speed = 4
 
-# the experimental DISPLAY rows, from keys and then from a pad, in the launcher
-# (without OGRE_DISPLAY_EXPERIMENTS the two rows are absent and inert)
-OGRE_PREF_DIR=/tmp/dp OGRE_DISPLAY_EXPERIMENTS=1 OGRE_LAUNCHER=1 \
-  OGRE_LAUNCHER_TAB=settings \
-  OGRE_LAUNCHER_KEYS="Down,Down,Right,Down,Right,Down,Right" \
-  OGRE_LAUNCHER_SHOT=/tmp/dp.ppm ./build-app/ogrebattle64
-grep -E '^(resolution|msaa|window)' /tmp/dp/settings.cfg
-# resolution = 2x / msaa = 2x / window = fullscreen
+# a pad opens the overlay and steps a SETTINGS row; the game sees an idle pad
+OGRE_NO_AUDIO=1 OGRE_PREF_DIR=C:/tmp/pad OGRE_ROM="$ROM" OGRE_OVERLAY_TAB=settings \
+  OGRE_OVERLAY_PAD="back,ddown,ddown,dright" OGRE_CAPTURE_OVERLAY=C:/tmp/pad.ppm \
+  OGRE_OVERLAY_SHOT_MS=2500 OGRE_EXIT_AFTER_MS=14000 "$APP"
+# "[overlay] shown", "[renderer] config: ...", "[input] overlay open: game input suppressed"
 
-# a pad opens the overlay and changes WINDOW; the game sees an idle pad
-OGRE_PREF_DIR=/tmp/pad OGRE_ROM=assets/ogre64.z64 OGRE_OVERLAY_TAB=settings \
-  OGRE_OVERLAY_PAD="back,ddown,ddown,dright" OGRE_CAPTURE_OVERLAY=/tmp/pad.ppm \
-  OGRE_OVERLAY_SHOT_MS=2500 OGRE_EXIT_AFTER_MS=14000 ./build-app/ogrebattle64
-# must print "[overlay] shown", then a "[renderer] config:" line with window
-# fullscreen, then "[input] overlay open: game input suppressed"
-
-# the overlay's EXIT GAME (MAIN is the tab the panel opens on with OGRE_OVERLAY)
-OGRE_PREF_DIR=/tmp/ex OGRE_ROM=assets/ogre64.z64 OGRE_OVERLAY=1 \
-  OGRE_OVERLAY_TAB=main OGRE_OVERLAY_KEYS="Space" \
-  OGRE_EXIT_AFTER_MS=60000 ./build-dist/ogrebattle64
-# must print "[overlay] EXIT GAME" and exit 0 with no error.log
-
-# the game window's close button, after the overlay has been opened and closed
-OGRE_PREF_DIR=/tmp/cl OGRE_ROM=assets/ogre64.z64 OGRE_OVERLAY=1 \
-  OGRE_OVERLAY_KEYS="Escape" OGRE_WINDOW_CLOSE_AT_MS=9000 \
-  OGRE_EXIT_AFTER_MS=60000 ./build-dist/ogrebattle64
-# must print "[SDL] game window close requested" and exit 0 with no error.log
+# EXIT GAME, and the close button after the overlay opened and closed
+OGRE_NO_AUDIO=1 OGRE_PREF_DIR=C:/tmp/ex OGRE_ROM="$ROM" OGRE_OVERLAY=1 \
+  OGRE_OVERLAY_TAB=main OGRE_OVERLAY_KEYS="Space" OGRE_EXIT_AFTER_MS=60000 "$APP"
+OGRE_NO_AUDIO=1 OGRE_PREF_DIR=C:/tmp/cl OGRE_ROM="$ROM" OGRE_OVERLAY=1 \
+  OGRE_OVERLAY_KEYS="Escape" OGRE_WINDOW_CLOSE_AT_MS=9000 OGRE_EXIT_AFTER_MS=60000 "$APP"
+# "[overlay] EXIT GAME" / "[SDL] game window close requested", exit 0, no error.log
 ```
 
-Convert a PPM with `sips -s format png <in> --out <out>` on macOS.
+The SETTINGS rows are GAME SPEED, WIDESCREEN, RESOLUTION, CRT FILTER, (MSAA),
+WINDOW, SOUNDS, VOLUME, MOUSE ENABLED, with headings skipped, so a script's
+`Down` count depends on the MSAA gate.
+
+## Mouse cursors
+
+A click ORs the N64 `A` bit into controller 0 for a few pad polls in
+`get_input`, the path the keyboard and the console's `press` use. One click arms
+both screens' confirm, and each count is consumed on every poll, so an `A` armed
+on one screen cannot fire on the other. `pump_sdl_events` hides the OS pointer
+over the game window and shows it over the overlay or outside, from
+`SDL_GetMouseFocus()` and `overlay_visible()`; the close path restores it.
+
+**World map (scene `0x05`).** The cursor is a sprite at screen pixels in the map
+state object (`*(u32*)0x80197B18`): `func_ovlM_8019AF0C` keeps
+`state+0x52`/`+0x54` clamped to x `0x28..0x110`, y `0x28..0xC0`, and the cursor
+draw `func_ovlM_801A103C` reads the pair at `0x801A1C48`/`0x801A1C4C`.
+`app/src/map_cursor.cpp` aspect-fits the 320x240 framebuffer in the drawable and
+writes the pointer's pixel there; `tools/map_cursor.py` inserts the call into
+the bank unit and `make bank-recomp` re-applies it. A pointer within 24 px of a
+bound holds the matching D-pad bit, which scrolls the view, also from the
+pillarbox or a fullscreen border. The map also reads the analog stick at
+`*(0x800C47F0)+2`/`+3`.
+
+**Mission field (scene `0x03`).** The cursor is two f32 framebuffer pixels at
+`state+0x08`/`+0x0C`, `state = *(u32*)0x801AB870 = 0x800E91D0` (a fixed main-ELF
+BSS address the mission modules hold as a constant). The mover
+`func_ovlN_801BE4E0` (unit N, record 7) reads the held buttons `*(0x800E8108)`
+and the D-pad masks of the profile at `*(0x801F0CC0)`, integrates a ramped delta,
+stores the pair at `0x801BE974`/`0x801BE988`, and clamps it to x 40..280,
+y 30..210. It is D-pad driven; no mission bank reads the stick. The game moves
+this cursor every frame (its own integration, a pull to centre, snap-to-unit,
+command recentring), so the pointer adopts the game's position in these cases
+and places the cursor otherwise:
+
+| the game moves the cursor when | log |
+|---|---|
+| a D-pad direction is held | `pad=1` |
+| C-LEFT is held in a centring mode (profile `+0x1C`, field mode `*(0x801F0E00)` < 2 or == 42) | `centre=1` |
+| the mover integrated a delta this call (`state+0x06`/`+0x07`) | `nudge=1` |
+| the window after a click is running | `yield=1` |
+
+`tools/mission_cursor.py` inserts `ogre_mission_cursor_note_move` at
+`L_801BEC04` (the last point where the delta bytes hold this call's values) and
+`ogre_mission_cursor` at the epilogue `L_801BECC8`. The camera pans with the
+cursor: `func_ovlN_801BECF0` adds `delta/128 * 8.5 * table[e]` to the eye and
+look-at of the camera at `*(u32*)0x8018F5AC` while `*(0x801F3630)` is set. A
+pointer near a play-area bound holds the D-pad bit (right `0x100`, left `0x200`,
+up `0x800`, down `0x400`) to push the view.
+
+| Variable | Effect |
+|---|---|
+| `OGRE_MOUSE=off\|on` | MOUSE ENABLED for one run |
+| `OGRE_MAP_CURSOR=1\|0`, `OGRE_MISSION_CURSOR=1\|0` | force one screen's cursor on / off (`off`, `false`, `no` mean 0) |
+| `OGRE_MAP_CURSOR_LOG=1` | `[mapcursor]` per change of cursor, pointer, draw flag or edge push; `[cursor] hidden/shown` per OS pointer change |
+| `OGRE_MISSION_CURSOR_LOG=1` | `[missioncursor]` per change of cursor, pointer, D-pad or camera (`cam=<eye x>,<eye z>/<look x>,<look z>`, `edge=` mask), per edge push, confirm poll and click |
+| `OGRE_MAP_CURSOR_CONFIRM_POLLS`, `OGRE_MISSION_CURSOR_CONFIRM_POLLS=<n>` | pad polls a click holds `A` (default 8) |
+| `OGRE_MAP_CURSOR_EDGE`, `OGRE_MISSION_CURSOR_EDGE=<n>` | edge distance that pushes (default 24 px) |
+| `OGRE_MAP_CURSOR_EDGE_FORCE`, `OGRE_MISSION_CURSOR_EDGE_FORCE=<mask>` | hold that D-pad mask with no mouse event |
+| `OGRE_MISSION_CURSOR_YIELD=<n>` | frames after a click during which the pointer adopts the game's cursor (default 15), covering the camera settling |
+| `OGRE_MISSION_CURSOR_AT=<x>,<y>` | park the pointer at that framebuffer pixel once; not with a real mouse |
+| `OGRE_CURSOR=0` | keep the OS pointer visible over the game window |
 
 ## Mods
 
-The runtime (`librecomp/src/mods.cpp`) has a complete mod system: it opens every
-mod it finds, recompiles a code mod's MIPS at load time, applies the function
-hooks and replacements the mod declares, and persists the player's toggles and
-per-mod option values. The port wires it up and gives it a UI.
-
-**Enabling it was two lines and a screen.** `recomp::start()` already called
-`initialize_mods()` and `scan_mods()`, and `wait_for_game_started()` already
-loaded the enabled mods — but only when `GameEntry::mod_game_id` is non-empty,
-and it was never set, so every mod in `mods/` was parsed and thrown away.
-`app/src/main.cpp` now sets it to `MOD_GAME_ID` (`app/src/game.hpp`) and calls
-`initialize_mods()` + `scan_mods()` before the start screen, so the screen can
-list the mods and write a toggle before the game starts. The second scan inside
-`recomp::start` re-reads `mods.json` and keeps the toggles.
-
-### Where the files live
+The runtime (`librecomp/src/mods.cpp`) opens every mod, recompiles a code mod's
+MIPS at load time, applies its hooks and replacements, and persists toggles and
+options. `app/src/main.cpp` sets `GameEntry::mod_game_id` to `MOD_GAME_ID`
+(`app/src/game.hpp`) and calls `initialize_mods()` + `scan_mods()` before the
+start screen; the scan inside `recomp::start` re-reads `mods.json`.
 
 | path | what |
 |---|---|
-| `<config>/mods/*.nrm` | one file per mod; the packaged mod |
+| `<config>/mods/*.nrm` | one file per mod |
 | `<config>/mod_config/<mod id>.json` | that mod's option values |
-| `<config>/mods.json` | which mods are enabled, and their order |
-
-`<config>` is the executable's own directory unless `OGRE_PREF_DIR` overrides it.
+| `<config>/mods.json` | enabled mods and their order |
 
 ### The start screen
 
-`app/src/launcher.cpp` draws the start screen's list under the wordmark. The list
-is the shared tabbed `ui::Panel` (`app/src/ui.cpp`), so the in-game overlay shows
-the same rows. There are five tabs:
+`app/src/launcher.cpp` draws the shared `ui::Panel` (`app/src/ui.cpp`):
 
 ```
-[ MAIN ] [ MODS ] [ CONTROLS ] [ SETTINGS ] [ DEBUG ]
-```
-
-```
-MAIN         Start Game starts the game ([ ] and not selectable until a ROM is
-             loaded), then the ROM row, which reads [x] ROM loaded with the file
-             name or [ ] No ROM and opens the file picker, then Exit Game, which
-             quits. Exit Game is last on purpose: it is the one row a stray
-             SPACE or ENTER must not land on.
-MODS         one row per mod, then one row per visible option of that mod; a
-             mod's short description sits in a second column
-CONTROLS     one row per N64 button with its keyboard key, its gamepad source and
-             the field-map action; see "Controller bindings and the in-game
-             overlay"
-SETTINGS     GAME SPEED, then a DISPLAY section (WIDESCREEN, WINDOW, plus the
-             experimental RESOLUTION and MSAA rows when
-             OGRE_DISPLAY_EXPERIMENTS=1), an AUDIO section (SOUNDS, VOLUME) and
-             an INPUT section (MOUSE ENABLED); see the SETTINGS sections below
+MAIN         Start Game (selectable once a ROM is loaded), the ROM row (opens
+             the picker), Exit Game (last, so a stray SPACE or ENTER misses it)
+MODS         one row per mod, then one per visible option
+CONTROLS     one row per N64 button: key, pad source, field-map action
+SETTINGS     GAME SPEED; DISPLAY; AUDIO; INPUT
 DEBUG        the live Chaos Frame readout
+
+TAB / SHIFT+TAB  switch tab          UP / DOWN     select a row
+SPACE            activate the row    LEFT / RIGHT  step a value
+ENTER            play, or open the picker with no ROM or on the ROM row
+mouse            click a tab, a row or a marker; elsewhere plays
 ```
 
-```
-TAB / SHIFT+TAB  switch tab
-UP / DOWN        select a row (section headings, and Start Game before a ROM is
-                 loaded, are skipped)
-SPACE            activate the selected row: Start Game plays, Exit Game quits, the
-                 ROM row opens the file picker, a mod row toggles, an option row
-                 steps, the GAME SPEED row steps, a binding row arms a rebind
-LEFT / RIGHT     step the selected option's or setting's value
-ENTER            play, or open the ROM picker when no ROM is loaded or the ROM
-                 row is selected; on Exit Game it quits, the same as SPACE
-mouse            click a tab to switch, a row to activate it, a GAME SPEED radio
-                 marker to set that speed, elsewhere to play
-```
-
-Choosing a ROM — by picker or by dropping one on the window — **does not start
-the game**. The ROM row shows `[x] ROM loaded` with the file name, Start Game
-becomes selectable, and the selection moves to it; ENTER or SPACE then plays.
-That is what makes START GAME meaningful on the first run, and the ROM row is
-what makes the whole screen usable from the keyboard alone.
-
-A toggle goes to `recomp::mods::enable_mod`, which writes `mods.json`; an option
-value goes to `recomp::mods::set_mod_config_value`, which writes
-`mod_config/<mod id>.json` on the runtime's config thread. The start screen
-appears when no ROM is loaded and whenever a stored ROM is ready with at least
-one mod installed, so the player always has a way to turn a shipped mod off. Any
-mod can be removed by deleting its `.nrm`.
+Choosing a ROM moves the selection to Start Game without starting. A toggle
+calls `recomp::mods::enable_mod` (writes `mods.json`); an option calls
+`recomp::mods::set_mod_config_value` (writes `mod_config/<mod id>.json`).
+Deleting a `.nrm` removes a mod.
 
 ### Building an example mod
 
-`mods/skip-boot-logos/` is the reference: one code mod, one entry hook on a
-scene update, and the section macros in `include/`. It writes the pending-scene
-word from scene `0x09`'s update so the boot goes straight to the title, skipping
-the boot intro and the publisher stills (~26 s in total). Its manifest sets
-`enabled_by_default = false`, so the shipped package plays the vanilla boot until
-the player turns it on in the MODS section. The runtime has always read that
-field from `mod.json`; `RecompModTool` did not write it, so every mod was enabled
-— the tool now parses and emits it (`patches/n64recomp-ob64.patch`).
-
-**Skip to the title from scene `0x09`, not from scene `0x0A`.** Writing the word
-from scene `0x0A`'s update cuts the stills to one frame, and the title then
-produces no display lists at all and the last presented frame stays on screen.
-Scene `0x0A`'s enter and leave set up and tear down globals in overlay C that
-only its *completed* state machine leaves consistent. Entering the title from
-scene `0x09` never runs `0x0A` and renders correctly.
+`mods/skip-boot-logos/` is the reference: one code mod with one entry hook on a
+scene update. It writes the pending-scene word from scene `0x09`'s update, so
+the boot skips the intro and the publisher stills (~26 s); its manifest sets
+`enabled_by_default = false`, which `RecompModTool` emits
+(`patches/n64recomp-ob64.patch`). Skip from `0x09`: writing the word from
+`0x0A`'s update leaves overlay-C globals that only `0x0A`'s completed state
+machine makes consistent, and the title then produces no display lists.
 
 ```sh
+# WSL
 make mod-syms        # -> mods/reference/{dump,data_dump}.toml
-make example-mods    # -> build/mods/skip-boot-logos.nrm
+make example-mods    # -> build/mods/*.nrm
 ```
 
-`make mod-syms` runs N64Recomp with `--dump-context` on the linked
-`build/ogrebattle64.elf`; a mod names the functions it hooks and the mod tool
-resolves those names against that dump. Both files are generated and gitignored,
-for the same reason `RecompiledFuncs/` is: they need the ROM.
-
-`tools/build-example-mods.sh` compiles each mod's `src/*.c` to big-endian MIPS
-and runs `RecompModTool` on the result. Apple's clang has no MIPS target, so the
-script uses a `mips-linux-gnu-gcc` when one is on `PATH` and otherwise runs
-`gcc-mips-linux-gnu` in a `debian:bookworm-slim` container.
-
-`make dist` requires at least one `.nrm` in `build/mods/` and fails with the
-`make example-mods` instruction when there is none; it does not build mods
-itself. A package built from a release bundle gets them from `files.tar.gz`
-(see "Releases (GitHub Actions)"), and `tools/smoke-dist.sh` fails a package
-whose `mods/` directory carries no `.nrm`.
+`make mod-syms` runs N64Recomp with `--dump-context` on
+`build/ogrebattle64.elf`; the mod tool resolves hooked names against it.
+`tools/build-example-mods.sh` compiles each mod's `src/*.c` with
+`mips-linux-gnu-gcc` (or a `debian:bookworm-slim` container when it is absent)
+and runs `RecompModTool`. Copy `build/mods/*.nrm` to the Windows checkout.
 
 ### What a hook can reach
 
-A mod declares a hook as a *section ROM address + function vram* pair, and the
-runtime resolves it through `get_vrom_to_section_map()` — the sections
-registered by `register_base_overlays()`, which are the ELF's own sections
-(`.entry`, `.main`, `.streamedA/B/C`). A hook in a streamed bank unit
-(`app/src/bank_overlays.cpp`) is not covered by that map and is unproven; start
-with functions in the base sections.
+A hook is a section ROM address plus function vram, resolved through
+`get_vrom_to_section_map()`: the ELF's own sections registered by
+`register_base_overlays()` (`.entry`, `.main`, `.streamedA/B/C`). A hook in a
+streamed bank unit (`app/src/bank_overlays.cpp`) is outside that map and
+unproven. Bank-code insertions (the cursors, the HD backgrounds) go in through a
+generated-unit patch script instead.
 
-### Four runtime fixes this needed
+`patches/n64modernruntime-ob64.patch` carries the mod-loader fixes this needs:
+`context_from_regenerated_list` translates the recompiler's ELF section index
+(`get_code_section_index_from_section_index`; without it a mod fails with
+`Failed to load mod code (Code mod loading internal error)`), and a HI16/LO16
+relocation against a non-code section stays the absolute immediate it already
+is. The same patch makes `debug_dump_queue_snapshot` sign-extend 32-bit guest
+addresses, so a `[snap]` line with an impossible count is a report about the
+game.
 
-All four are in `patches/n64modernruntime-ob64.patch`; without them a hook either fails
-to load, corrupts memory, or the periodic snapshot kills the process.
+## Saves
 
-1. **Section indices.** A generated `RelocEntry.target_section` is the
-   *recompiler's* number for an ELF section (this port's code sections are
-   3/6/9/12/16 of 23). `populate_reference_symbols` looks the function up by its
-   *position* in the code-section table, so it found nothing and the mod failed
-   with `Failed to load mod code (Code mod loading internal error)`.
-   `context_from_regenerated_list` now translates the index
-   (`get_code_section_index_from_section_index`).
-2. **Data relocations.** A HI16/LO16 relocation against a section that holds no
-   code is a data reference. This project recompiles with absolute symbols, so
-   the immediate already holds the final address and the runtime has no load
-   address for that section (`section_addresses[data_section]` is zero).
-   Regenerating it as a reference-symbol relocation emitted a load from address
-   0 and the following store ran off the end of RDRAM. Those relocations are now
-   left as the immediates they are.
-3. **macOS code pages.** macOS maps the executable's `__TEXT` with an `r-x`
-   maxprot, so `mprotect` fails with `EACCES` and `vm_protect` returns
-   `KERN_PROTECTION_FAILURE`; patching a recompiled function's entry to point at
-   its hooked version is a write there, and it died with `SIGBUS` inside
-   `apply_regenlist` -> `patch_func`. `unprotect` now replaces the page with a
-   private anonymous copy whose maxprot is `rwx` (`vm_remap` with
-   `VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE`) before making it writable.
-4. **The periodic `[snap]` snapshot dereferenced 4 GiB past RDRAM.** The runtime
-   dumps a message-queue snapshot every ~90 VI retraces
-   (`ultramodern::debug_dump_queue_snapshot`), enabled with `OGRE_SNAP` (session
-   116 made it opt-in; it ran unconditionally before that). Its guest addresses are 32-bit,
-   and it converted them with `TO_PTR`/`addr - 0xFFFFFFFF80000000`, which only
-   works on a value that is already sign-extended: a bare `uint32_t` zero-extends,
-   so the computed host address was `rdram + addr + 0x80000000`. Whether that
-   faults depends on the process address map, which is why it was intermittent —
-   the snapshot had been printing garbage (`count=-1996517056`) and the
-   developer's run died in `debug_dump_queue_snapshot + 0xF7` with the fault
-   4 GiB past RDRAM. It now sign-extends before the map, as `function_trace.cpp`
-   already did. The snapshot is a diagnostic, so this is a fix to the diagnostic;
-   a `[snap]` line with an impossible count is now a bug report about the game,
-   not about the snapshot.
+### The cartridge battery (SRAM)
 
-## Config directory
+OB64 saves to 32 KiB of battery SRAM (`entry.save_type =
+recomp::SaveType::Sram`); the Controller Pak strings belong to the game's
+copy/backup feature. The image is `<config>/saves/ogrebattle64-us-rev1.bin`,
+32768 bytes. `func_8008BC40` queues an `OSIoMesg` to `D_800AA408`, and
+`pi_perform_dma` (`librecomp/src/pi.cpp`) completes it inline, choosing the
+device from the message's `OSPiHandle` (save handle `baseAddress 0xA8000000`,
+cart `0xA0000000`). The game reads the image at boot in 256-byte DMAs
+(`func_80074CF0`) and writes it back when dirty (`func_80074BF0` →
+`func_80074C58`). Slots are `0x1850` bytes at `0x10 + n*0x1850`; the signature
+is ASCII `QuestOG3`.
 
-The executable's own directory by default (`SDL_GetBasePath`), so saves and
-mods live beside the app. `OGRE_PREF_DIR` overrides it; a read-only install
-location falls back to the per-user preference dir:
+A slot's first 4 bytes are two `u16` checksums seeded with the slot's device
+offset; `func_8007541C` rejects a slot unless `slot+4` holds `QuestOG3` and
 
-- macOS: `~/Library/Application Support/ogrebattle64/`
-- Linux: `~/.config/ogrebattle64/`
-- Windows: `%APPDATA%\ogrebattle64\`
+```
+u16[+0x00] == (sum of the bytes of slot+0x0C .. slot+0x1850) + (0x10 + n*0x1850)   // func_80075A84
+u16[+0x02] == (count of their set bits)                     + (0x10 + n*0x1850)   // func_80075B00
+```
+
+A slot is valid only at the index it was checksummed for. The copy-to-pak path
+uses unseeded twins (`func_80075AC4`/`func_80075B60`), so a slot from a
+Controller Pak must be reseeded; an unreseeded import makes the game reformat
+the image. The runtime prints `[save]` lines on load or create, the first read,
+the first write and `[save] wrote <path>`. A failed write raises a message box
+from the saving thread and stalls the run; use a writable `OGRE_PREF_DIR`.
+
+### Importing emulator saves
+
+```sh
+tools/sramsave.py check  save.srm                      # what is in the file; ok / MISMATCH per slot
+tools/sramsave.py import save.srm <config>/saves/ogrebattle64-us-rev1.bin
+tools/sramsave.py export <that .bin> out.sra           # 32-bit byteswapped
+tools/sramsave.py pak --all assets/saves/prologue.n64  # list a pak's notes
+```
+
+`import` finds the SRAM by its magic at any offset and byte order and refuses a
+file without it (parallel-n64: 296960 bytes, SRAM at `0x20800`, words reversed;
+mupen64plus `.srm`: the bare 32 KiB). DexDrive `.N64` files (`assets/saves/*.n64`)
+are a 0x1040-byte header plus a 32 KiB Controller Pak holding the game's backup
+notes (`NOBE`/`EB`, `OgreBATTLE64 <n>`), each with a verbatim battery slot at
+`note+0x20`. `import` follows the pak's FAT to the live notes and reseeds them
+into battery slots 0 and 1. The battery has two save slots: slot 2's offset
+`0x30B0` is the game's 19176-byte map record. `--all` also takes deleted notes.
+
+### Running with a save — `OGRE_SAVE`
+
+```sh
+OGRE_NO_AUDIO=1 OGRE_SAVE=prologue OGRE_SCENE=title "$APP" "$ROM"
+OGRE_NO_AUDIO=1 OGRE_SAVE=C:/saves/save.srm OGRE_SAVE_RESET=1 "$APP" "$ROM"
+```
+
+| Variable | Effect |
+|---|---|
+| `OGRE_SAVE=<name\|path>` | use that save as the battery. A bare name is looked up as a path, then `<rom dir>/saves/<name>[.n64\|.bin]`, then `assets/saves/<name>[.n64\|.bin]`. Accepts everything `sramsave.py import` does. The result goes to `<config>/saves/<game id>.bin`, never back into the source |
+| `OGRE_SAVE_RESET=1` | re-import even when the config dir's battery is newer than the source; without it a run keeps its progress |
+| `OGRE_SAVE_ALL=1` | also take deleted notes (still two slots) |
+
+`tools/run-save.sh <name>` gives each save its own config dir
+(`.ogre-prefs-save-<name>/`, gitignored) with `--reset`, `--list` and
+`--import-only`. It runs `OGRE_APP` if set, else the first of
+`build-dist/ogrebattle64.exe`, `build-app/ogrebattle64.exe`, `build-dist/ogrebattle64`
+and `build-app/ogrebattle64` that exists, and copies `dxcompiler.dll`/`dxil.dll`
+beside a `.exe` from its `RT64/` directory. Arguments after the save go to the
+app, so pass the ROM there when `assets/ogre64.z64` is absent:
+`/usr/bin/bash tools/run-save.sh <save> <rom>`.
+
+The Load Game book (scene `0x12`) shows which battery the game read: with
+`prologue.n64` imported, GAME DATA 1 reads `Magnus / Prologue / Alba / 0:20:42`.
+A blank battery also reaches `0x12` and `0x05`, so the route alone proves
+nothing.
+
+## Environment knobs
+
+All knobs default to off. Settings overrides apply for one run and never write
+`settings.cfg`.
+
+### Run control and scripted input
+
+| Variable | Effect |
+|---|---|
+| `OGRE_NO_AUDIO=1` | open no audio output device (`[SDL] OGRE_NO_AUDIO: no output device opened`). Set on every test run. The audio microcode still runs |
+| `OGRE_EXIT_AFTER_MS=<n>` | after `n` ms print the last recompiled function and live call chain of every game thread, then exit 0 through `_Exit` (a graceful teardown mid-call segfaults intermittently) |
+| `OGRE_PREF_DIR=<dir>` | config dir |
+| `OGRE_ROM=<path>` | boot this ROM without an argument |
+| `OGRE_LAUNCHER=1` | force the start screen |
+| `OGRE_TEST_DROP=<path>` | one synthetic ROM drop to the start screen |
+| `OGRE_SCENE=<name\|hex>` | boot into a scene; see "Scene forcing" |
+| `OGRE_SCENE_AFTER_MS=<n>` | delay before the first scene request (default 0) |
+| `OGRE_FORCE_SCENE=<hex>` | the original hex-only spelling of `OGRE_SCENE`; `_AFTER_MS` likewise |
+| `OGRE_STEP=<n>` | seed the New Game step word `D_8018F1C0` once when the target scene is active, released when the step moves or after 1500 ms. It changes the sequence's state: entering `0x0D` at step 2 without step 1 makes the exit re-enter at step 0, the movie-mode branch, and crash. Drive the title with taps for a real New Game |
+| `OGRE_SMOKE=1` | print `[smoke] main reached`, try SDL once, exit 0 |
+| `OGRE_CRASH_TEST=<segv\|bus\|abrt\|fpe\|ill>` | raise that signal right after the crash logger is armed. The argument `--crash-test=<name>` does the same for a launch that cannot carry the variable (a shortcut started by Explorer); an unknown name in the argument exits 1 |
+| `OGRE_CONSOLE=1` | `AllocConsole()` for the standard streams |
+| `OGRE_LIVE_CONSOLE=1` | the live console; see "The live console" |
+| `OGRE_TAP_MS=<n>` | controller 0 presses Start (or `OGRE_TAP_BUTTON`) for 150 ms every `n` ms |
+| `OGRE_TAP_BUTTON=<list>` | buttons the taps press, one per tap (`start`, `a`, `b`, `down`, …; `none` skips). On the name-entry form (`0x07`) a tap in a text field opens a tooltip that blocks the sequence; the working shape is a few `start,a` pairs then a long run of `a` (`"start,a,start,a,start,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a,a"`). An endless `start,a` stalls on `0x07` |
+| `OGRE_TAP_SCENE=<list>` / `OGRE_TAP_NOT_SCENE=<list>` | tap only while / except while `D_800E810E` is in the list (`kScenes` names or hex). `OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game` presses through the title and stops at New Game |
+| `OGRE_TAP_SCENE_BUTTON=<scene>:<button>[:<count>],…` | press that button every `OGRE_TAP_MS` while that scene runs, at most `<count>` times, in order per scene; replaces the slot schedule. `"title:start:5,0x12:a:3,0x05:right:3,0x05:a:1"` |
+| `OGRE_LAUNCHER_TAB` / `_KEYS` / `_PAD` / `_SHOT` / `_SHOT_MS` | start-screen tab; synthetic keydowns (SDL scancode names) or pad presses (`controls.cfg` tags) every 150 ms through the real handlers; write a PPM and quit (after the scripts, or after `_SHOT_MS`) |
+| `OGRE_OVERLAY=1`, `OGRE_OVERLAY_AT_MS=<n>` | open the overlay at startup / push one `ESC` after `n` ms |
+| `OGRE_OVERLAY_TAB` / `_KEYS` / `_PAD` / `_OPACITY` | overlay tab (`start` = `main`); keydowns while visible (`main` + `Space` = EXIT GAME); pad presses always delivered (a first `back` opens it); opacity 0.2..1.0 (default 0.90) |
+| `OGRE_CAPTURE_OVERLAY=<path>` | the overlay as a PPM once; `OGRE_OVERLAY_SHOT_MS` delays it |
+| `OGRE_WINDOW_CLOSE_AT_MS=<n>` | one `SDL_WINDOWEVENT_CLOSE` for the game window |
+| `OGRE_SPEED_KEYS=<up\|down>,…` / `OGRE_SPEED_PAD=<tag>,…` | synthetic `=`/`-` or R3 presses every 150 ms; `_AT_MS` (default 1000) |
+| `OGRE_CAPTURE_BADGE=<path>` | the speed badge as a PPM on every show |
+
+### Settings overrides
+
+| Variable | Effect |
+|---|---|
+| `OGRE_SPEED=<n>` | GAME SPEED, 1..64. `OGRE_SPEED=8` reaches the attract loop's second variant in ~42 s instead of ~360 s |
+| `OGRE_WIDESCREEN=off\|on` | WIDESCREEN; each transition prints `[widescreen]` |
+| `OGRE_WS_SCENES=<hex>[,<hex>…]` | Expand scenes (default `0x03`, `0x0D`; HD-background scenes added) |
+| `OGRE_RESOLUTION=native\|2x\|auto` | RESOLUTION |
+| `OGRE_CRT=off\|hyllian\|crts\|lottes` | CRT FILTER |
+| `OGRE_UPSCALE_2D=original\|scaled\|all` | RT64's `upscale2D` for 2D rectangles; default `original` (see "Display") |
+| `OGRE_DISPLAY_EXPERIMENTS=1` | show and apply MSAA |
+| `OGRE_MSAA=off\|2x\|4x\|8x` | MSAA (enables the row) |
+| `OGRE_WINDOW=windowed\|fullscreen` | WINDOW |
+| `OGRE_SOUNDS=off\|on`, `OGRE_VOLUME=<0..100>` | SOUNDS, VOLUME |
+| `OGRE_MOUSE=off\|on` | MOUSE ENABLED |
+| `OGRE_CHEAT_MAX_GOTH=off\|on`, `OGRE_CHEAT_MAX_ITEMS=off\|on` | the CHEATS rows |
+| `OGRE_GRAPHICS_API=<auto\|d3d12\|vulkan>` | pin RT64's backend. RT64 switches D3D12 to Vulkan on an old driver (NVIDIA ≤ 475.14, AMD ≤ Jan 2019, Intel 6th-gen ≤ 31.0.101.2115); the boot log names the GPU and whether the fallback ran |
+
+### Logs, traces and dumps
+
+| Variable | Effect |
+|---|---|
+| `OGRE_SCENE_LOG=1` | one `[scene]` line per scene change, with descriptor and record mask |
+| `OGRE_SCENE_TRACE=1` | the forcing state every 500 ms |
+| `OGRE_RSP_LOG=1` | two `[rsp]` lines per RSP task (~58 tasks/s). `tools/runlog.py` needs them |
+| `OGRE_DL_TRACE=1` | one `[renderer] display list N at t=…ms entries=<n>` line per list plus RT64's time for it |
+| `OGRE_DEBUG_TRACES=1` | `[ev]`/`[mq]`/`[sch]`/`[vi-debug]`, and `[pi] inline DMA` per streamed load; `OGRE_DEBUG_VI=1` adds every `osViSetMode` and VI geometry change |
+| `OGRE_HANG_MS=<ms>` | the hang watch threshold (default 5000; `0` = off): no game frame for that long prints `[hang]`, runs the `[snap]` snapshot once and writes `error.log`. See "Crash reports" |
+| `OGRE_LOOKUP_CHECK=0` | turns off the check of streamed lookups against resident code (`[lookup]` lines). See "The lookup check" |
+| `OGRE_SNAP=1\|<frames>` | the periodic message-queue snapshot `[snap]` (default every 90 VI frames), for a boot whose threads are all parked. It runs on the Critical-priority VI thread and sleeps 100 x 200 us; on Windows each sleep takes ~16 ms (the 15.6 ms timer), so one snapshot stalls the VI ~1.6 s |
+| `OGRE_CHAIN_HISTORY=<tid>` | the sequence of live call chains thread `<tid>` goes through |
+| `OGRE_SCHED_TRACE=1` | scheduler traces and the `[sched-ring]` event ring at exit; `_TID=<tid>` filters it |
+| `OGRE_PROFILE=1` | the sampling profiler and shadow call chain. Its per-thread function is the most recently entered one: `recomp_trace_return` does not restore `last_func_vram` |
+| `OGRE_COVER=1\|<path>` | at exit, window close or console `cover`, one `[cover] 0xADDR count` line per recompiled function entered; a path writes its own file. No sampling thread |
+| `OGRE_DMA_TRACE=1` | at `OGRE_EXIT_AFTER_MS`, every streamed PI DMA grouped by `(rom, ram)` base in `0x80190000..0x801C0000`; `_FULL=1` all bases. Changes timing, and can change which bank loads |
+| `OGRE_PROBE55=1` / `OGRE_PROBE57=1` | New Game sequence state on change: scene, `D_8018F1C0`, `D_8018F1C2`, plus script-buffer words (55) or the `0x0D` exit vtable `0x801D0830` and engine words `0x8023A994`/`0x8023A960`/`0x801DFC90` (57) |
+| `OGRE_DUMP_RDRAM=<path>` | the 8 MiB host RDRAM image at exit and beside `error.log` on a crash. See "Reading a dump" |
+| `OGRE_RAM_KEY=<1..9>` | that key writes `ram-<n>.bin` and `.txt` to `OGRE_RAM_KEY_OUT`, else `OGRE_PREF_DIR`, else `/tmp`. `_ADDR` (default `0x802696C8`), `_LEN` (`0x1000`), `_STRIDE` (summary slot size, `0x80`; marks empty slots), `_AT_MS` (one timed dump), `_FULL=1` (whole image, ROM order, `ram-<n>-full.bin`). `tools/ogre_ram.py` reads it (`find-ptr`, `cell`, `empty-cells`) |
+
+### Renderer diagnostics
+
+| Variable | Effect |
+|---|---|
+| `OGRE_DL_ANALYZE=1` / `OGRE_DL_DECODE=<n>\|all` | per-list F3DEX2 counts / the decoded command stream. Both decode every list as F3DEX2, so an S2DEX2 list reads wrong |
+| `OGRE_TEX_TRACE=1` | one `[tex]` line per `G_TEXRECT` before RT64 parses: rectangle, `s`/`t`/`dsdx`/`dtdy`, `SETTILESIZE`, tile line and palette, `SETTIMG` |
+| `OGRE_TEX_TRACE_KEY=<1..9>` / `_KEY2` / `_MS` / `_AFTER_MS` | arm on a key press, closed after `_MS` (default 2000; `0` = until close); a second key; a one-shot timer |
+| `OGRE_TEX_TRACE_DUMP=<dir>` | also write the sampled RDRAM (`tex/<n>_src.bin`, `_pal.bin`, `.json`); `tools/ogre_tex_uv.py <dir>` summarises |
+| `OGRE_TEX_TRACE_COLOUR=1` | decode each window and print `colour: mean N/255`, plus one `[tex] BLACK DRAW:` line for the first draw at or below `OGRE_TEX_TRACE_BLACK` (default 4/255, ≥ 32 opaque texels) |
+| `OGRE_TEX_TRACE_DRAW` / `_MAX` / `_MIN_PX` / `_IMAGES` | only the nth rectangle / a cap / skip small rectangles / each bound image once with a nonzero-byte count |
+| `OGRE_PRESENT_TRACE=1` | `[present]`/`[state]` per present |
+| `OGRE_RDP_TRACE=1` / `=2` | `[rdp]` `setColorImage`/`fillRect`/`drawRect`; `=2` a `[cimg]` histogram and `[cimgseq]` list of colour-image targets |
+| `OGRE_WORKLOAD_TRACE=1`, `OGRE_FBRENDER_TRACE=1`, `OGRE_VI_TRACE=1` | `[workload]` framebuffer pairs; `[fbrender]` per-call cycle/fill/rect; `[vi]` the decoded VI to present |
+| `OGRE_RECT_STATE=<y0>-<y1>` | render state of rectangles inside those rows: cycle type, combiner cycles, blender, primitive colour, tile |
+| `OGRE_TILE_TRACE=1` / `OGRE_TILE_TRACE_ALL=1` | `[gpu-tile]` for degenerate tiles / every tile (`_MAX`, `_MAXH=<n>`, `_MISS=1`, `_COPY=1`) |
+| `OGRE_SPRITE_TRACE=1` | `[spr]` per tile of a two-texture draw after the upload decision: path taken, hash, `tileCopy`, `rawTMEM`, RDP tile |
+| `OGRE_TILE_DECODE=1` | per hashed tile, the RGBA decoded from its TMEM snapshot (`TextureDecodeCS.hlsl` rules); `[fbcopy]`, `[fbcopy-stale]`, `[fbcopy-outside]`, `[fbcopy-nowrite]` for framebuffer tile copies and refusals |
+| `OGRE_DUMP_TEX=<dir>` | RT64's decoded-texture dump (`.tmem` + `.tile.json`) |
+| `OGRE_EMPTY_TILE_TRACE=1` | rectangles skipped because their tile covers no texels |
+| `OGRE_S2D_TRACE=1` | `[s2d]` the first 40 S2DEX object commands with the decoded `uObjSprite` and destination |
+| `OGRE_CONVERT_TRACE=1` | `[convert]` the raw 9-bit `G_SETCONVERT` fields |
+| `OGRE_FB_WRITEBACK=1` | `[fbpair]` framebuffer pairs and `[fbwrite]` the RDP→RDRAM writeback |
+| `OGRE_SYNC_TRACE=1` | `[syncfb]` the framebuffer manager at the CPU readback; `[njpair]` pairs for `0x400`/`0x25C00`/`0x4B400` |
+| `OGRE_YUV_TRACE=1` | `[yuv]` per `G_SETTIMG` with `fmt=YUV` |
+
+### Renderer behaviour
+
+| Variable | Effect |
+|---|---|
+| `OGRE_RECT_LR_FIX=1` | restore RT64's "Fix LR with Scissor" (off here): it widened a rectangle one pixel inside the scissor, and the unit profile's last DEF/MDEF digit sampled the next font cell (session 101) |
+| `OGRE_OVERSCAN=<0..8>` | crop off the framebuffer's right/bottom edge (default 1 px). OB64's scissor covers 319x239 of 320x240, and the last row and column flicker with leftovers. Framebuffers are sized from the VI (`framebufferHeightForDisplay`) |
+| `OGRE_FB_GPU_COPY=0` | turn off RT64's `framebuffer.copyWithGPU`, so every texture load reads RDRAM |
+| `OGRE_NOP_RECT=<selectors>` | replace matching `G_TEXRECT`s with `G_SPNOOP` (`any`, `tex:<hex>`, `flip`, `x:<a>-<b>`, `y:<a>-<b>`, `n:<index>`) |
+| `OGRE_EMPTY_TILE=draw` | draw rectangles whose tile covers zero texels |
+| `OGRE_FOG=0` / `=alternate` | disable / alternate the repair that makes OB64's fog "wrap" rectangles sample the layer image (layer table `D_801B80E0`); it draws the title fog and the `©1999 QUEST` sweep |
+| `OGRE_FOG_SCALE=<percent>`, `OGRE_FOG_TRACE=1`, `OGRE_FOG_SUMMARY=1` | fog intensity (default 100 = the game's asset); per-group and per-list fog traces |
+| `OGRE_PRESENT_ALWAYS=1` | present on every VI |
+| `OGRE_PRESENT_FBTARGET=1` | with no framebuffer at the VI address, present a non-empty render target |
+| `OGRE_INSTANT_PRESENT=1` | RT64 `PresentEarly` |
+
+### Captures and the synthetic probe
+
+| Variable | Effect |
+|---|---|
+| `OGRE_CAPTURE_PRESENT=<path>` | GPU-read the swap-chain texture at each present into `<path>.<n>.ppm` |
+| `OGRE_CAPTURE_TARGET=<path>` | the render target the VI renderer sampled, `<path>.<n>.bin` (`R16G16B16A16_UNORM`) |
+| `OGRE_CAPTURE_AFTER=<n>` / `OGRE_CAPTURE_EVERY=<n>` | skip the first `n` presents / capture every `n`th |
+| `OGRE_SYNTH_FRAME=1` | submit a seven-bar F3DEX2 list through the task path; sets `OGRE_PRESENT_ALWAYS` and `OGRE_PRESENT_FBTARGET` unless set |
+| `OGRE_SYNTH_AT_MS` / `_PERIOD` | first submit (keep above ~600 ms, before the game's ucode is in RDRAM) / VIs between submits (default 30) |
+| `OGRE_SYNTH_RAW` / `_ANIMATE` / `_NO_DL` / `_FORCE_VI=0` | also write the bars into RDRAM / rotate their palette / skip the list / do not pin the VI to the probe |
+| `OGRE_NO_DUMMY_VI=1` | skip the pre-start dummy VI workload |
+
+### njpeg and HD backgrounds
+
+| Variable | Effect |
+|---|---|
+| `OGRE_NJPEG=0` | stub the `M_NJPEGTASK` decoder (the recompiled microcode runs by default, 0-1 ms per image) |
+| `OGRE_NJPEG_TRACE=1` | `[njpeg]` the colour image the YUV draw landed in (RT64's never-cleared scratch word) |
+| `OGRE_NJREAD_LOG=1` | `[njread]` per stage-3 pass; see "`OGRE_NJREAD_LOG`" |
+| `OGRE_BG=0`, `OGRE_BG_DIR=<dir>` | run without the `mods/backgrounds/` pack / use only that folder (`docs/guides/hd-backgrounds.md`) |
+| `OGRE_BG_LOG=1`, `OGRE_BG_DEBUG=1` | `[hdbg]` per pass and chunk / paint the four passes in solid colours |
+| `OGRE_BG_DUMP=<dir>` | write the game's 496x384 backdrop as `original-step<NNNN>.png` (`tools/backgrounds.py`, `make bg-extract`) |
+| `OGRE_BG_HD=0` | keep the pack's game-resolution backdrop and skip its HD strips (`mods/backgrounds/hd/`, `make bg-hd`) |
+
+## Scripted runs and captures
+
+Scripted taps are for short, exact routes. A played state is reached from a save
+(`OGRE_SAVE`, AGENTS.md rules 11 and 13).
+
+```sh
+OGRE_NO_AUDIO=1 OGRE_TAP_MS=5000 OGRE_EXIT_AFTER_MS=60000 "$APP" "$ROM" > C:/tmp/ogre.out 2>&1
+grep -A 12 "per-thread last" C:/tmp/ogre.out
+```
+
+### Scene forcing: jumping straight into a screen
+
+`OGRE_SCENE` names: `title` (0x04), `intro` (0x09), `publishers` (0x0A),
+`story` (0x0B), `unit-info` (0x0C), `tutorial` (0x17), `menu` (0x18), `new-game`
+(0x02), or a hex id. The app stores the game's own scene request,
+`0x8000 | id` into `D_800C4C26`, once a scene after the boot's `0x00` runs with
+no request pending (`0xFFFF`). The dispatcher `func_80075BC0` then runs the
+running scene's leave hook and replaces it with the target (`0x800760A0`), as
+in a natural transition. The request is repeated, from the per-frame poll and
+the streamed-DMA hook, until `D_800E810E` reports the target. `OGRE_SCENE=title`
+reaches `0x04` at about 1.25 s, from the intro `0x09`. The root id
+`D_800E8214`, which the old poke wrote, is read only at the dispatcher's loop
+top, so that poke had no effect. A forced scene enters without the pre-state a
+natural path builds, so a forced scene that misbehaves is not by itself a
+finding; forced `menu` and `new-game` were recorded as crashing.
+
+```sh
+OGRE_NO_AUDIO=1 OGRE_SCENE=title OGRE_SCENE_TRACE=1 OGRE_EXIT_AFTER_MS=6000 "$APP" "$ROM"
+OGRE_NO_AUDIO=1 OGRE_SCENE=title OGRE_TAP_MS=2500 \
+  OGRE_TAP_BUTTON="start,a,start,a,start,a,a,a,a,a,a,a,a" "$APP" "$ROM"   # New Game
+```
+
+### Capturing the presented frame
+
+A desktop screenshot can return a stale frame; `OGRE_CAPTURE_PRESENT` reads the
+swap-chain texture.
+
+```sh
+OGRE_NO_AUDIO=1 OGRE_SCENE=title OGRE_SPEED=4 OGRE_CAPTURE_PRESENT=C:/tmp/title \
+  OGRE_CAPTURE_AFTER=1700 OGRE_CAPTURE_EVERY=10 OGRE_EXIT_AFTER_MS=26000 "$APP" "$ROM"
+OGRE_NO_AUDIO=1 OGRE_SYNTH_FRAME=1 OGRE_SYNTH_AT_MS=900 OGRE_NO_DUMMY_VI=1 \
+  OGRE_CAPTURE_PRESENT=C:/tmp/frame OGRE_CAPTURE_AFTER=200 OGRE_EXIT_AFTER_MS=8000 "$APP" "$ROM"
+```
+
+`OGRE_CAPTURE_TARGET` separates "the RDP did not draw" from "the presenter
+dropped it". The port reads `OGRE_CAPTURE_PRESENT` once at startup and hands the
+path to RT64 through `ogre_present_capture_path()`; the console's `snap` toggles
+a flag the app owns, because the UCRT's `_putenv` copies the string (toggling
+the environment left the capture on in v0.4.0 and crashed D3D12; session 107).
+An environment value wins over `snap`. Without `OGRE_PRESENT_ALWAYS` a stalled
+boot keeps an old frame; without `OGRE_PRESENT_FBTARGET` an RDP-only fill
+presents empty RDRAM.
+
+## Diagnostics toolkit
+
+### Reading a dump
+
+The runtime stores RDRAM with each 32-bit word byte-reversed: the logical word
+at guest `a` is the little-endian word at host offset `a & 0x1FFFFFFF`, the
+halfword is at `(a & 0x1FFFFFFE) ^ 2`, the byte at `(a & 0x1FFFFFFF) ^ 3`
+(`console_word`/`console_half` in `sdl_platform.cpp`, `logical_byte` in
+`ram_key.cpp`). Two dump layouts exist:
+
+| writer | layout |
+|---|---|
+| `OGRE_DUMP_RDRAM` (`main.cpp`, `crash_log.cpp`), console `dump`/`snap` (`write_rdram_image`) | the host buffer: byte-reversed words |
+| `OGRE_RAM_KEY_FULL=1` (`ram_key_dump_full`) | ROM order |
+
+The tools accept both. `rdram.load_image` (used by `tools/rdram.py`,
+`tools/ogre_ram.py`, `tools/ogre_frame.py`, `tools/refscan.py` and
+`tools/scenemap.py --dump`) counts `jr $ra` (`0x03E00008`) in the main segment
+(`0x80070C00..0x800AEDB0`): `03 E0 00 08` means ROM order, `08 00 E0 03` means the
+host layout, which it byte-swaps per word on load. Every read is then ROM order
+(word = `int.from_bytes(d[a & 0x1FFFFFFF : +4], 'big')`, byte =
+`d[a & 0x1FFFFFFF]`), and `Dump.layout` says which file it was. Both layouts of
+one run read `3C08800B` at `0x80070C00`, the ROM's word at `0x1000`.
+
+```sh
+tools/rdram.py <dump> word|half|byte|string|hexdump|find|ptr …
+tools/rdram.py <dump> banks        # which module is resident in each streamed window
+```
+
+`banks` compares the image with every record in `app/src/bank_funcs.inc` plus
+the uncompiled segment-table records and names the ROM offset live at each
+streamed RAM base. Streamed RAM holds different modules at different times
+(`0x802395E0` is `bankRec14b` for the movie visit, `bankRec14c` after), so a
+wrong-bank call shows as another module's bytes at the faulting address.
+
+### The live console
+
+The console runs commands in the running game on the main thread. It is off
+unless asked for, because `w` writes guest RAM and `load` restores a checkpoint.
+`OGRE_LIVE_CONSOLE=1` turns on both triggers; `OGRE_CONSOLE_FILE` or
+`OGRE_CONSOLE_AT_MS` turns on the file, `OGRE_KEY_<n>` the keys;
+`OGRE_LIVE_CONSOLE=0` is an explicit off.
+
+- A watched file (default `/tmp/ogre-console.txt`, i.e. `C:\tmp\`): its lines run
+  and the file is removed. Write it atomically; a plain `> f` truncates first,
+  and the app can read the empty file and delete it. `OGRE_CONSOLE_AT_MS=<n>`
+  delays reads until `n` ms, so a script can leave the file in place at launch.
+- Keys `1`..`9` run `OGRE_KEY_1`..`OGRE_KEY_9`, one command per press.
+
+```sh
+OGRE_NO_AUDIO=1 OGRE_LIVE_CONSOLE=1 OGRE_CONSOLE_FILE=C:/tmp/ogre-console.txt \
+  "$APP" "$ROM" | tee C:/tmp/live.log
+printf 'c\nr 0x8018FDAC 8\ndump C:/tmp/at-now.bin\n' > C:/tmp/oc.tmp \
+  && mv C:/tmp/oc.tmp C:/tmp/ogre-console.txt
+```
+
+Output is `[console]` lines on stdout; addresses are guest `0x80xxxxxx`.
+
+| command | what it does |
+|---|---|
+| `r <addr> [n]` / `rh` / `rb` / `rk` | logical words / halfwords / bytes (`addr ^ 3`) / raw host-order words |
+| `d <addr> [len]` | hex and ASCII dump |
+| `f <value> [max]` / `fb <hexbytes> [max]` | find a word / a byte pattern in RDRAM |
+| `s <addr> [len] [max]` | strings in a range |
+| `k <addr> [len]` | FNV-1a checksum, for A/B runs |
+| `w <addr> <value>` | store a word (a real write) |
+| `c` | scene, pending scene, descriptor and record mask, step, next, spin |
+| `cover` | functions entered so far (needs `OGRE_COVER`) |
+| `dump [path]` | the image at this instant (host layout); bare `dump` writes a new `/tmp/ogre-rdram-NNNN.bin` |
+| `snap [prefix] [ms]` | the image with game threads parked (`<prefix>.bin`, bare `/tmp/ogre-snap-NNNN.bin`) plus RT64's frame capture for `ms` (default 400) to `/tmp/ogre-shot.<present>.ppm`. With `OGRE_VI_TRACE=1` the log names the framebuffer |
+| `save [path]` / `load [path]` | write / restore a checkpoint (bare: `/tmp/ogre-checkpoint-NNNN.ckpt` / the last bare save) |
+| `press <buttons> [polls] [x] [y]` | hold a pad press for `polls` input polls (hex); `<buttons>` is `+`-joined `OGRE_TAP_BUTTON` names, `x`/`y` the stick (`press none 60 -1 0` = full left). The game polls about once per VI, so a map-cursor step needs a few hundred polls |
+| `help` | the list |
+
+`OGRE_CONSOLE_ON_SCENE=<name|hex>`, `OGRE_CONSOLE_ON_STEP=<n>` and
+`OGRE_CONSOLE_ON_CMD=<cmd>` run one command on the first frame that scene (and
+step word `D_8018F1C0`) is active, once per process, with no other variable:
+
+```sh
+OGRE_NO_AUDIO=1 OGRE_CONSOLE_ON_SCENE=0x0D OGRE_CONSOLE_ON_STEP=974 \
+  OGRE_CONSOLE_ON_CMD='save C:/tmp/ck.ckpt' "$APP" "$ROM"
+```
+
+### Checkpoints
+
+A checkpoint rewinds the machine, so a route is played once. The file is
+`[8-byte magic][u32 version][u32 rdram_size][u32 host_size][u32 flags][u64
+fnv1a][overlay-state blob][RDRAM image]`. `load` checks magic, version, sizes,
+checksum and the executable's FNV-1a build id, so a rebuild invalidates every
+checkpoint.
+
+- The blob carries the loaded section and bank records and rebuilds the
+  runtime's `func_map` (`recomp::overlays::get_overlay_state_blob` /
+  `restore_overlay_state_blob`); RDRAM alone would run a later bank's bodies.
+- `save`/`load` park every thread running recompiled code at a function entry
+  (`ultramodern::checkpoint_pause_begin()`/`_end()`, via `recomp_trace_entry`)
+  during the I/O, so the image does not tear.
+
+Limits: a checkpoint is valid only in the process that wrote it, because the
+image holds host pointers (`OSThread::context`, one per N64 thread) and a `load`
+in another process crashes in `do_send`; transferable checkpoints need the
+per-thread context registry and scheduler state rebuilt after the rewind. The
+app's knob state and RT64's render state are not rewound. Save inside a stable
+step: a checkpoint taken at a scene/step transition (the `0x02` loader visit)
+restores into the movie-mode branch and bounces between `0x00` and `0x0D`.
+Check `c` before `save`.
+
+### `tools/runlog.py` — one screen per run
+
+```sh
+OGRE_NO_AUDIO=1 OGRE_SPEED=4 OGRE_TAP_MS=1500 OGRE_TAP_NOT_SCENE=new-game,0x0D OGRE_SCENE_LOG=1 \
+  OGRE_RSP_LOG=1 OGRE_DL_TRACE=1 OGRE_EXIT_AFTER_MS=45000 "$APP" "$ROM" > C:/tmp/run.log 2>&1
+tools/runlog.py C:/tmp/run.log              # scene timeline, RSP tasks, bank loads, problems
+tools/runlog.py C:/tmp/run.log --check      # exit 1 on crash / stub call / unknown module
+tools/runlog.py C:/tmp/run.log --json
+```
+
+Graphics tasks always reach RT64; a non-gfx task served by `stub microcode` is
+work the port drops, and the task table lists each with its ucode, data and
+`data_ptr`. `--check` fails a log with no task lines.
+
+### `tools/dlgaps.py` — a repeated stutter
+
+```sh
+OGRE_NO_AUDIO=1 OGRE_DL_TRACE=1 OGRE_EXIT_AFTER_MS=40000 "$APP" "$ROM" > C:/tmp/run.log 2>&1
+tools/dlgaps.py C:/tmp/run.log                 # gap distribution + spike phase histogram
+tools/dlgaps.py C:/tmp/run.log --check         # exit 1 when the spikes are periodic
+tools/dlgaps.py C:/tmp/run.log --period 3000
+```
+
+It skips the first 3 s (`--after`) and counts a gap above `--spike` x p50 as a
+spike. Spikes less than three median frames apart merge into one stall event.
+The period is the median spacing between events unless `--period` names one, so
+a periodic stall that stretches its own wall-clock period stays in one phase
+bin. `--check` fails when 5 or more events put 60% of themselves in one tenth of
+the period, the signature of the `[snap]` snapshot and of a
+`yield_work_loop_branches` misfire. Spread-out slow frames report
+`not periodic`, so read the p90 and the spike count too.
+
+### A slow screen
+
+Read `OGRE_PROFILE=1`'s `t4` line as a lead (it is the most recently entered
+function). `OGRE_DL_TRACE=1` gives the frame period series, and `entries` is a
+list's cost in recompiled function entries. A host stack sample of the game
+threads names the function each is in; a chain through `yield_self` means the
+frame period is a recompiler-injected poll-loop wait. `debug/menu-probe.sh` is
+built on macOS `sample` and has no Windows equivalent yet; per-thread CPU is
+available through the thread names ("Windows setup" step 8).
+
+The usual cause is a work loop whose backward branch `is_yield_poll_loop`
+(`tools/N64Recomp/src/recompilation.cpp`) took for a poll: it terminates on a
+counter or on data already present. The fix is an entry in the unit's
+`yield_work_loop_branches` (`config/banks/config-bank<U>.toml`); current entries
+are `0x801B3008`, `0x801DA2C0`, `0x801D0C08`, `0x8020A910`, `0x80204C48`.
+
+### `make elf-rom-check`
+
+`tools/elfcheck.py` compares every `CONTENTS` section of every linked ELF with
+the ROM at the same offset, and `--syms` asserts every symbol named with eight
+hex digits (`func_ovlM_801A2A7C`) is at that address. Run it (in WSL) when a
+scene draws the wrong size, slice or string from a table. `mips-linux-gnu-as`
+pads `.text` to 16 bytes, so a record whose code/data boundary is only 8-byte
+aligned links its data 8 bytes high and every `%lo` data reference reads 8
+bytes off (unit M, session 65). Fix it in the unit's config (`align`/`subalign`,
+or end the `asm` subsegment on a 16-byte boundary). `make bank-recomp` runs the
+check first.
+
+### `tools/rdram.py` image and diff
+
+```sh
+tools/rdram.py C:/tmp/rdram.bin image 0x80243E28 --width 320 -o C:/tmp/bg.png
+tools/rdram.py C:/tmp/rdram.bin image 0x80243E28 --fmt ia8 --width 320
+tools/rdram.py diff C:/tmp/a.bin C:/tmp/b.bin --min-run 16 --limit 20
+```
+
+`image` renders a region as an N64 texture (`rgba16`, `rgba32`, `ia16`, `ia8`,
+`ia4`, `i8`, `i4`, `ci8` + `--palette`) to a PNG with a luminance summary and a
+`(near-)uniform` note, which separates "nobody drew this" from "an asset failed
+to decode". `diff` clusters changed bytes into runs (`--gap` merges) and groups
+them by owning record (`tools/n64map.py`), flagging shared RAM. Both read ROM
+order.
+
+### `OGRE_NJREAD_LOG`
+
+One `[njread]` line per njpeg stage-3 pass (`func_ovlE_8019976C`): pass, scene,
+step, the framebuffer the game's `state[0x64]` selects, the rule applied
+(`game`/`scratch`), the scratch word, the display word `D_800C4BB8`, and the
+destination and size. A New Game assembly runs four passes, the tiles of the 2x2
+backdrop: 240x320 top-left `0x801AAE90`, 240x176 bottom-left `0x801D06B0`,
+144x320 top-right `0x801E50D0`, 144x176 bottom-right `0x801FB8F0`. The correct
+sources are the frames `573FF47B8A5A3279`, `48892A76C362A4BA`,
+`3F79B6732153B2FD`, `38BCBEBE5B555C3C`; pass 0 is where a stale selection
+shows. To check the result, dump while `c` reads `desc=0x8018FC3C`,
+`step=0x021D8002` (the cathedral) and render `0x80243E28` at width 320. See
+`docs/guides/njpeg-backgrounds.md`.
+
+### `tools/guestmap.py`
+
+```sh
+tools/guestmap.py 0x801B7EBC 0x802395E0 0x2F180    # vram or rom, auto-detected
+tools/guestmap.py 0x801B7EBC --context 4
+tools/guestmap.py --list
+```
+
+Prints the ROM offset (`vram - 0x80070C60 + 0x1060`), the owning segment,
+record and unit, whether the address is a function entry in the ELF that owns
+that layout, and the other records mapping the same RAM. `0x801B7EBC` is
+`func_801B7B9C + 0x320` in `ogrebattle64.elf` and an entry in `bankC.elf` and
+`bankG.elf`; the game's DMA decides which is live.
+
+### `tools/scenemap.py`
+
+```sh
+tools/scenemap.py                 # all three tables (~3 s, ROM only)
+tools/scenemap.py scenes | transitions | steps
+tools/scenemap.py scenes --dump C:/tmp/map3.bin   # descriptors from a live image
+```
+
+`func_80075BC0` writes 25 accessor pointers into `D_800AF028[0..24]`, each
+returning a descriptor from static ROM data; 20 resolve statically, ids 2, 3, 6,
+8, 23 print `(indirect accessor)`. Every store into `D_800C4C26` is 39 sites in
+30 functions (21 static). The step table (asset `0x19A8804`, ROM `0x1F3CA54`)
+holds 1693 per-step asset ids; the dialogues are entries in it.
+
+### `tools/arenamap.py`
+
+```sh
+tools/arenamap.py                      # every arena and bank (~10 s, offline)
+tools/arenamap.py --missing | --verify | --coverage | --entries | --md
+tools/arenamap.py --arena 0x80214FA0
+```
+
+Every bank DMA is `lui/addiu x3 -> jal func_8009DA50 -> subu a2,a2,a0` (the
+size) followed by `func_800900C0(ram_base, code_size)`,
+`func_80090010(code_end, data_size)` and `func_80093380(data_end, bss_size)`, so
+each block yields ROM start, RAM base, size and the code/data split. A bank's
+size is the loader's `subu` (the assembler sometimes hoists it above the `jal`),
+never the chunk count. `--verify` checks every unit against its loader;
+`--coverage` lists uncovered ROM gaps and any `jal 0x8009DA50` in them. Last
+answer: 27 bank loads in 5 arena windows, 26 compiled; the gap is a `0xE80`
+scene-`0x14` setup fragment whose RAM another unit owns.
+
+### `tools/stubmap.py`
+
+```sh
+tools/stubmap.py report [--verbose] [--json] [--strict]
+tools/stubmap.py target 0x80219594      # owners, bodies, callers, scenes
+tools/stubmap.py log C:/tmp/run.log     # attribute a run's stub hits
+tools/stubmap.py pointers               # data words pointing at risky targets (jalr)
+```
+
+It reads the registration tables (`app/src/bank_funcs.inc`,
+`RecompiledFuncs/recomp_overlays.inl`) and the generated C's `jal` comments.
+Buckets: DEFINITE (no module registers the address), MISSING FUNCTION (a
+resident-capable bank lacks the entry and its bytes start a function; act on
+these first), UNRESOLVABLE (no compiled code covers it), BANK SELECTION (a body
+interior in the missing bank), INERT (never co-resident with the caller), RSP
+IMEM. A MISSING FUNCTION needs the code before the address to end in `jr ra`
+plus its delay slot, no branch in the containing body to reach the address, no
+word of the module to hold the address (a jump-table case), and a frame or a
+leaf return at the address. The old test also accepted `lui`, `sw`, `j`, `jal`
+and `jr` as openers; its 131 candidates were mid-function code, switch cases
+and data. Last measurement (2026-10-31): 988 static targets, 0 definite, 0
+missing-function, 0 unresolvable, 284 bank-selection, 369 inert, 332
+resolvable, 3 IMEM; 288 `jalr` sites. The runtime's lookup check (below)
+verifies the bank-selection targets and the `jalr` sites as they run.
+`log` matches the live words the runtime prints at a stub
+(`[overlays] @0xADDR: …`) against every module's ROM image, names the resident
+module, and says whether its load bypassed `on_streamed_dma` or the caller
+dispatched an address the bank does not have; bytes that match nothing compiled
+are a bank the port has no record for, and the tool names the ROM record.
+
+### The lookup check — `[lookup]` lines
+
+`get_function` asks `lookup_check` (`app/src/bank_overlays.cpp`) about every
+address in `0x8016A000..0x80400000`, which covers every `LOOKUP_FUNC` and every
+indirect `jalr` into streamed RAM. It compares the resident words with the
+mapped body's ROM words, from the entry to the delay slot of the first `jr ra`
+(at most 256 bytes). On a mismatch, or on a miss, it calls the body from any
+bank record or main-ELF section whose ROM words are the resident ones, and logs
+once per address:
+
+```
+[lookup] 0x8019A884: the map has the body at rom 0x…; the resident code is rom 0x…, so that body runs
+[lookup] 0x8019A884: not in the map; the resident code is rom 0x…, so that body runs
+[lookup] 0x8019A884: the resident code matches no compiled body; the map's body (rom 0x…) runs
+```
+
+The first two are a bank load `on_streamed_dma` did not recognise; the third is
+a module the port has not compiled. `tools/guestmap.py` names the unit of a ROM
+offset. A verdict is cached per address until the next DMA into the window; a
+30 s run costs the same CPU with and without it. `OGRE_LOOKUP_CHECK=0` turns it
+off. Direct calls bypass it: `make cross-bank-check` lists the main unit's
+direct calls into another section's swappable RAM (30 on 2026-10-31, each bound
+to the only module `stubmap.py target` finds resident with the caller).
+
+### `tools/recompcov.py`
+
+```sh
+tools/recompcov.py [--no-scan] [--json] [--log cover.txt]
+```
+
+| measure | last value |
+|---|---|
+| code bytes | 99.05% of `0x001000..0x2B8B70`; the one gap (`0x0DDF80..0x0E4910`) is data |
+| modules | 28/28 loader-pattern arenas have a unit; 44 bank records in 34 units + 10 base sections |
+| dispatch | 985 static targets, 0 unresolvable; 288 `jalr` sites |
+| execution | per run, from `OGRE_COVER` |
+
+Measure execution from a session played by hand
+(`OGRE_NO_AUDIO=1 OGRE_COVER=C:/tmp/cover.txt "$APP" "$ROM"`, close the window,
+copy the file to WSL). Modules at 0% are the untested surface.
+
+### Adding a streamed bank unit
+
+1. Read the port's report: `[bank] UNKNOWN module rom=0x… ram=0x…` or
+   `[overlays] streamed function stub called @ 0x…`.
+2. Add `config/banks/config-bank<U>.yaml` (splat: `type: code`, `start`/`vram`,
+   `[start, asm]` + `[<code end>, data]`, `symbol_name_format: "ovl<U>_$VRAM"`),
+   `config/banks/config-bank<U>.toml`, and `BANK_UNITS += <U>` in the
+   `Makefile`. The size is the DMA size; the code/data boundary is the last
+   `jr ra` rounded up to 16 bytes.
+3. If the segment table's `ram_end` is past `ram start + rom size`, add the
+   record to `RAM_END` in `tools/gen_bank_funcs.py` so its BSS is zeroed on load.
+4. Declare every address the game calls that the record never `jal`s internally
+   in `config/symbols/symbol_addrs-bank<U>.txt` (`name = 0xADDR; //
+   type:func`). Otherwise it is a label inside a body and `LOOKUP_FUNC` resolves
+   to the no-op stub. Derive the list from the `LOOKUP_FUNC(0x…)` targets in
+   `Bank<U>Funcs/` inside the unit's RAM that are not a `recomp_trace_entry`.
+5. `OGRE_DMA_TRACE` changes timing; a one-line probe in `recomp::do_rom_read` is
+   lighter for finding a bank.
+6. If a call runs the wrong bank's body, move the target record to a unit that
+   does not call it, so the caller compiles as `LOOKUP_FUNC`.
+   `make cross-bank-check` is the audit; `tools/cross_bank_known_hazards.txt`
+   lists accepted hazards, and a new one fails `make bank-recomp`.
+
+Then regenerate in WSL and copy the outputs ("Windows setup" step 3).
+
+### `tools/watch.sh`
+
+`tools/watch.sh <guest-addr> [--after SYMBOL] [--ignore N] [--hits N] [--size N]
+[--value V] [--read]` arms an lldb watchpoint on `rdram + (guest - 0x80000000)`
+after a guest symbol runs and prints a backtrace per hit. It has been used on
+macOS only. On Windows, set a debugger data breakpoint on the same host address:
+the crash handler prints the RDRAM base.
 
 ## Troubleshooting
 
-### RT64 submodules won't check out ("Unable to find current revision")
-
-RT64 pins contrib submodules (imgui, xxHash) to commits that aren't always
-fetchable by plain `git submodule update`. Fix by fetching the pinned commit
-explicitly:
-
-```sh
-git -C tools/RT64/src/contrib/imgui fetch origin <pinned-sha>
-git -C tools/RT64/src/contrib/imgui checkout <pinned-sha>
-```
-
-### DXC shader compiler aborts ("Library not loaded: libz.dylib")
-
-The bundled `dxc-macos` needs `libz.dylib` next to it (its `DYLD_LIBRARY_PATH`
-includes `tools/RT64/src/contrib/dxc/lib/x64`). Install zlib and symlink it in:
-
-```sh
-brew install zlib
-ln -sf "$(brew --prefix zlib)/lib/libz.dylib" tools/RT64/src/contrib/dxc/lib/x64/libz.dylib
-```
-
-### `metal` tool missing ("missing Metal Toolchain")
-
-RT64's macOS shader build calls `xcrun -sdk macosx metal`. Newer Xcode releases
-require the separate Metal toolchain component:
-
-```sh
-xcodebuild -downloadComponent MetalToolchain
-```
-
-### RT64 build still fails after changes
-
-The RT64 CMake cache is sticky; after touching `tools/RT64/CMakeLists.txt` or
-fixing toolchain issues, delete the `build-app` directory and reconfigure.
-
+- **RT64 submodules do not check out** ("Unable to find current revision"):
+  `git -C tools/RT64/src/contrib/imgui fetch origin <sha>`, then `checkout <sha>`.
+- **A patch does not apply** (`\ No newline at end of file`): add
+  `--ignore-whitespace`.
+- **`cl : command line error D8021`**: `build-dist/` was configured without the
+  clang-cl `CMAKE_ARGS`. Delete it and rerun `make app` with them.
+- **The exe exits at once from `build-dist/`**: copy `dxcompiler.dll` and
+  `dxil.dll` beside it from `build-dist/RT64/`.
+- **`tools/smoke-dist.sh` fails in `pe_imports.py`**: `python3` is the Store
+  stub.
+- **A script runs in WSL**: call it with `/usr/bin/bash`.
+- **A console command never runs**: the file went to Git Bash's `/tmp`
+  (`%TEMP%`) while the app polls `C:\tmp\`, or it was written non-atomically.
+- **RT64 build still fails after changes**: delete `build-dist/` and rebuild.

@@ -101,3 +101,22 @@ function_sizes = [
 # The game's main() is renamed to avoid conflicting with the C entry point.
 [patches]
 renamed = ["main"]
+
+# The idle thread. Thread 1's entry, func_8007F8E4, starts thread 3
+# (func_80071EB0), drops its own priority to 0, and then loops forever at
+# 0x8007F968..0x8007F99C: it reads an idle callback at 0x800E7A18, calls it when
+# it is non-zero, and jumps back. Nothing in the ROM writes that word except the
+# zeroing store at 0x8007F904. On hardware a priority-0 loop runs only when every
+# other thread is blocked; here N64 threads are native threads, so the loop held
+# a whole host core for the whole run (session 145: "N64 Thread 1" at 100% of a
+# core at the title). The loop's back edge is an unconditional `j` and its body
+# has a `jalr`, so the poll-loop heuristic never yields there. The hook sleeps
+# the native thread for about a millisecond per pass (`ogre_idle_wait`,
+# app/src/overlays.cpp); the loop still re-reads the callback and still calls it
+# when it is set. It does not use yield_self: that puts the idle thread into the
+# N64 scheduler's running queue, and one boot in four froze at the
+# publishers -> title transition with it.
+[[patches.hook]]
+func = "func_8007F8E4"
+before_vram = 0x8007F998
+text = "{ void ogre_idle_wait(uint8_t* rdram); ogre_idle_wait(rdram); }"

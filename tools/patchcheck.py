@@ -234,7 +234,9 @@ def main(argv: list[str] | None = None) -> int:
                     print("        more than one patch targets this tree; not rewriting")
                 else:
                     regenerated = tree_changes(repo)
-                    patch_path.write_text(regenerated)
+                    # LF on every host: .gitattributes pins *.patch to eol=lf,
+                    # and text mode on Windows would write CRLF (session 145).
+                    patch_path.write_text(regenerated, newline="\n")
                     print(f"        rewritten from {repo_rel}: "
                           f"{len(regenerated.splitlines())} lines, "
                           f"{len(split_patch(regenerated))} file(s)")

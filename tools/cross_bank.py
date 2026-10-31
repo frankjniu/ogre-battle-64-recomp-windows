@@ -1011,9 +1011,26 @@ def check(regions, swap_ranges, strict_main: bool = False) -> int:
                 else:
                     bank_bad.append(line)
 
+    # A call from a streamed main-ELF section into the same section is resident
+    # whenever the caller runs (919 of the 949 calls on 2026-10-31). The rest are
+    # calls between sections; `tools/stubmap.py target` says, per target, which
+    # modules can be resident with the caller.
+    main_sections = list(main_section_ranges().values())
+
+    def main_section_of(addr: int) -> tuple[int, int] | None:
+        for lo, hi in main_sections:
+            if lo <= addr < hi:
+                return (lo, hi)
+        return None
+
+    main_same_section = 0
     for path in sorted(RECOMP_DIR.glob("*.c")):
         for caller, caller_name, target, line_no in direct_calls(path):
             if in_ranges(target, swap_ranges):
+                section = main_section_of(caller)
+                if section is not None and section == main_section_of(target):
+                    main_same_section += 1
+                    continue
                 main_bad.append((target, f"{path.relative_to(ROOT)}:{line_no}: {caller_name} "
                                          f"(0x{caller:08X}) calls 0x{target:08X} directly"))
 
@@ -1024,10 +1041,14 @@ def check(regions, swap_ranges, strict_main: bool = False) -> int:
               f"(listed in {KNOWN_HAZARDS_PATH.relative_to(ROOT)})")
     print(f"cross_bank: bank units: {bank_total} direct call(s) into swappable RAM, "
           f"{len(bank_bad)} outside their own record")
+    print(f"cross_bank: main unit: {main_same_section} direct call(s) into swappable RAM stay "
+          f"inside their own section")
     if main_bad:
         targets = sorted({t for t, _ in main_bad})
-        print(f"cross_bank: main unit: {len(main_bad)} direct call(s) into swappable RAM across "
-              f"{len(targets)} target(s) (known backlog; `dispatch --only` fixes them one by one)")
+        print(f"cross_bank: main unit: {len(main_bad)} direct call(s) into another section's "
+              f"swappable RAM across {len(targets)} target(s) (`stubmap.py target` names the "
+              f"modules resident with each caller; `dispatch --only` routes one through the "
+              f"lookup)")
         for t in targets[:12]:
             print(f"cross_bank:   0x{t:08X}  ({sum(1 for u, _ in main_bad if u == t)} site(s))")
         if len(targets) > 12:

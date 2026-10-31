@@ -167,6 +167,18 @@ RadioLayout layout_resolution(const Font& font, int scale, int max_width, int cu
     return layout_radio(font, scale, max_width, resolution_labels(), current);
 }
 
+std::vector<std::string> crt_filter_labels() {
+    std::vector<std::string> labels;
+    for (int i = 0; i < kCrtFilterModeCount; i++) {
+        labels.push_back(crt_filter_mode_label(i));
+    }
+    return labels;
+}
+
+RadioLayout layout_crt_filter(const Font& font, int scale, int max_width, int current) {
+    return layout_radio(font, scale, max_width, crt_filter_labels(), current);
+}
+
 std::vector<std::string> antialias_labels() {
     std::vector<std::string> labels;
     for (int i = 0; i < kAntialiasModeCount; i++) {
@@ -215,9 +227,14 @@ RadioLayout layout_mouse(const Font& font, int scale, int max_width, int current
     return layout_radio(font, scale, max_width, mouse_labels(), current);
 }
 
+// The CHEATS rows are OFF/ON toggles with MOUSE ENABLED's labels.
+RadioLayout layout_toggle(const Font& font, int scale, int max_width, int current) {
+    return layout_radio(font, scale, max_width, mouse_labels(), current);
+}
+
 // --- radio rows ---------------------------------------------------------------
-// Seven row kinds draw as a radio group (GAME SPEED, WIDESCREEN, RESOLUTION,
-// MSAA, WINDOW, SOUNDS, MOUSE ENABLED). The measure, draw, step, click and pad
+// Ten row kinds draw as a radio group (GAME SPEED, WIDESCREEN, RESOLUTION,
+// CRT FILTER, MSAA, WINDOW, SOUNDS, MOUSE ENABLED, and the two CHEATS rows). The measure, draw, step, click and pad
 // paths each need the layout and the live option, so both are looked up in one
 // place: a kind added to the table is handled by all of them.
 
@@ -226,10 +243,13 @@ bool is_radio_row(Panel::RowKind kind) {
         case Panel::RowKind::GameSpeed:
         case Panel::RowKind::Widescreen:
         case Panel::RowKind::Resolution:
+        case Panel::RowKind::CrtFilter:
         case Panel::RowKind::Antialias:
         case Panel::RowKind::Display:
         case Panel::RowKind::Sound:
         case Panel::RowKind::Mouse:
+        case Panel::RowKind::CheatMaxGoth:
+        case Panel::RowKind::CheatMaxItems:
             return true;
         default:
             return false;
@@ -246,6 +266,8 @@ int radio_row_current(Panel::RowKind kind) {
             return widescreen_mode_index();
         case Panel::RowKind::Resolution:
             return resolution_mode_index();
+        case Panel::RowKind::CrtFilter:
+            return crt_filter_mode_index();
         case Panel::RowKind::Antialias:
             return antialias_mode_index();
         case Panel::RowKind::Display:
@@ -254,6 +276,10 @@ int radio_row_current(Panel::RowKind kind) {
             return sound_mode_index();
         case Panel::RowKind::Mouse:
             return mouse_mode_index();
+        case Panel::RowKind::CheatMaxGoth:
+            return cheat_max_goth_index();
+        case Panel::RowKind::CheatMaxItems:
+            return cheat_max_items_index();
         default:
             return -1;
     }
@@ -264,10 +290,13 @@ int radio_row_count(Panel::RowKind kind) {
         case Panel::RowKind::GameSpeed:   return kGameSpeedCount;
         case Panel::RowKind::Widescreen:  return kWidescreenModeCount;
         case Panel::RowKind::Resolution:  return kResolutionModeCount;
+        case Panel::RowKind::CrtFilter:   return kCrtFilterModeCount;
         case Panel::RowKind::Antialias:   return kAntialiasModeCount;
         case Panel::RowKind::Display:     return kDisplayModeCount;
         case Panel::RowKind::Sound:       return kSoundModeCount;
         case Panel::RowKind::Mouse:       return kMouseModeCount;
+        case Panel::RowKind::CheatMaxGoth:
+        case Panel::RowKind::CheatMaxItems: return kMouseModeCount;
         default:                          return 0;
     }
 }
@@ -281,12 +310,17 @@ RadioLayout radio_row_layout(Panel::RowKind kind, const Font& font, int scale, i
             return layout_widescreen(font, scale, max_width, current);
         case Panel::RowKind::Resolution:
             return layout_resolution(font, scale, max_width, current);
+        case Panel::RowKind::CrtFilter:
+            return layout_crt_filter(font, scale, max_width, current);
         case Panel::RowKind::Antialias:
             return layout_antialias(font, scale, max_width, current);
         case Panel::RowKind::Display:
             return layout_display(font, scale, max_width, current);
         case Panel::RowKind::Mouse:
             return layout_mouse(font, scale, max_width, current);
+        case Panel::RowKind::CheatMaxGoth:
+        case Panel::RowKind::CheatMaxItems:
+            return layout_toggle(font, scale, max_width, current);
         default:
             return layout_sound(font, scale, max_width, sound_mode_index());
     }
@@ -309,6 +343,9 @@ RowAction store_radio_row(Panel::RowKind kind, int option) {
         case Panel::RowKind::Resolution:
             set_resolution_mode(static_cast<ResolutionMode>(option));
             break;
+        case Panel::RowKind::CrtFilter:
+            set_crt_filter_mode(static_cast<CrtFilterMode>(option));
+            break;
         case Panel::RowKind::Antialias:
             set_antialias_mode(static_cast<AntialiasMode>(option));
             break;
@@ -320,6 +357,12 @@ RowAction store_radio_row(Panel::RowKind kind, int option) {
             break;
         case Panel::RowKind::Mouse:
             set_mouse_mode(static_cast<MouseMode>(option));
+            break;
+        case Panel::RowKind::CheatMaxGoth:
+            set_cheat_max_goth(option == 1);
+            break;
+        case Panel::RowKind::CheatMaxItems:
+            set_cheat_max_items(option == 1);
             break;
         default:
             return RowAction::None;
@@ -463,6 +506,71 @@ RowsLayout layout_rows(const Font& font, const Panel& panel, const std::vector<P
 }
 
 }  // namespace
+
+// --- CachedText ---------------------------------------------------------------
+// The panel's view of a TextCache, with TextLayer's build/draw shape: `build`
+// picks the run from the cache and `draw` draws it.
+class CachedText {
+public:
+    explicit CachedText(TextCache& cache) : cache_(cache) {}
+
+    void build(SDL_Renderer* renderer, const Font& font, const std::string& text, int scale,
+               SDL_Color color) {
+        current_ = &cache_.layer(renderer, font, text, scale, color);
+    }
+
+    void draw(SDL_Renderer* renderer, int center_x, int left, int top, bool centered) const {
+        if (current_ != nullptr) {
+            current_->draw(renderer, center_x, left, top, centered);
+        }
+    }
+
+    int width() const { return current_ != nullptr ? current_->width() : 0; }
+
+private:
+    TextCache& cache_;
+    const TextLayer* current_ = nullptr;
+};
+
+// --- TextCache ----------------------------------------------------------------
+
+TextCache::~TextCache() {
+    clear();
+}
+
+const TextLayer& TextCache::layer(SDL_Renderer* renderer, const Font& font, const std::string& text,
+                                  int scale, SDL_Color color) {
+    std::string key = text;
+    key.push_back('\0');
+    key += std::to_string(scale);
+    key.push_back('\0');
+    key.push_back(static_cast<char>(color.r));
+    key.push_back(static_cast<char>(color.g));
+    key.push_back(static_cast<char>(color.b));
+    key.push_back(static_cast<char>(color.a));
+    auto [it, inserted] = entries_.try_emplace(std::move(key));
+    if (inserted) {
+        it->second.layer.build(renderer, font, text, scale, color);
+    }
+    it->second.used = true;
+    return it->second.layer;
+}
+
+void TextCache::end_frame() {
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        if (!it->second.used) {
+            it = entries_.erase(it);
+        }
+        else {
+            it->second.used = false;
+            ++it;
+        }
+    }
+}
+
+void TextCache::clear() {
+    entries_.clear();
+}
 
 // --- TextLayer ----------------------------------------------------------------
 
@@ -663,6 +771,8 @@ std::string Panel::tab_label(Tab tab) const {
             return "CONTROLS";
         case Tab::Settings:
             return "SETTINGS";
+        case Tab::Cheats:
+            return "CHEATS";
         case Tab::Debug:
             return "DEBUG";
         default:
@@ -773,11 +883,12 @@ std::vector<Panel::Row> Panel::build_rows(Tab tab) const {
             rows.push_back(Row{RowKind::GameSpeed, {}, 0, 0, -1});
             rows.push_back(Row{RowKind::Section, "DISPLAY", 0, 0, -1});
             rows.push_back(Row{RowKind::Widescreen, {}, 0, 0, -1});
-            // RESOLUTION and MSAA are experimental and off unless the run asks
-            // for them, so their rows are absent by default rather than present
-            // and inert (settings.hpp -> display_experiments_enabled).
+            rows.push_back(Row{RowKind::Resolution, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::CrtFilter, {}, 0, 0, -1});
+            // MSAA is experimental and off unless the run asks for it, so its row
+            // is absent by default rather than present and inert (settings.hpp ->
+            // display_experiments_enabled).
             if (display_experiments_enabled()) {
-                rows.push_back(Row{RowKind::Resolution, {}, 0, 0, -1});
                 rows.push_back(Row{RowKind::Antialias, {}, 0, 0, -1});
             }
             rows.push_back(Row{RowKind::Display, {}, 0, 0, -1});
@@ -786,6 +897,17 @@ std::vector<Panel::Row> Panel::build_rows(Tab tab) const {
             rows.push_back(Row{RowKind::Volume, {}, 0, 0, -1});
             rows.push_back(Row{RowKind::Section, "INPUT", 0, 0, -1});
             rows.push_back(Row{RowKind::Mouse, {}, 0, 0, -1});
+            break;
+
+        case Tab::Cheats:
+            // Each cheat is held every frame while ON (cheats.hpp). The note is a
+            // section row, so it wraps across the panel and is not selectable.
+            rows.push_back(Row{RowKind::Section,
+                               "WHILE ON, A CHEAT IS RESTORED EVERY FRAME. SAVING KEEPS THE "
+                               "CHEATED VALUES.",
+                               0, 0, -1});
+            rows.push_back(Row{RowKind::CheatMaxGoth, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::CheatMaxItems, {}, 0, 0, -1});
             break;
 
         case Tab::Debug:
@@ -976,6 +1098,8 @@ std::string Panel::left_text(size_t index) const {
             return "WIDESCREEN";
         case RowKind::Resolution:
             return "RESOLUTION";
+        case RowKind::CrtFilter:
+            return "CRT FILTER";
         case RowKind::Antialias:
             return "MSAA";
         case RowKind::Display:
@@ -986,6 +1110,10 @@ std::string Panel::left_text(size_t index) const {
             return "MOUSE ENABLED";
         case RowKind::Volume:
             return "VOLUME";
+        case RowKind::CheatMaxGoth:
+            return "MAX GOTH";
+        case RowKind::CheatMaxItems:
+            return "MAX ITEM COUNTS";
         case RowKind::ChaosFrame:
             return "Chaos Frame";
     }
@@ -1028,6 +1156,8 @@ std::string Panel::right_text_for(const Row& row) const {
             return widescreen_mode_text();
         case RowKind::Resolution:
             return resolution_mode_text();
+        case RowKind::CrtFilter:
+            return crt_filter_mode_text();
         case RowKind::Antialias:
             return antialias_mode_text();
         case RowKind::Display:
@@ -1038,6 +1168,10 @@ std::string Panel::right_text_for(const Row& row) const {
             return mouse_mode_text();
         case RowKind::Volume:
             return volume_text(volume_percent());
+        case RowKind::CheatMaxGoth:
+            return cheat_max_goth_text();
+        case RowKind::CheatMaxItems:
+            return cheat_max_items_text();
         case RowKind::ChaosFrame: {
             if (!chaos_frame_known_) {
                 return "GAME NOT RUNNING";
@@ -1149,10 +1283,13 @@ RowAction Panel::activate(size_t index, int direction) {
         case RowKind::GameSpeed:
         case RowKind::Widescreen:
         case RowKind::Resolution:
+        case RowKind::CrtFilter:
         case RowKind::Antialias:
         case RowKind::Display:
         case RowKind::Sound:
         case RowKind::Mouse:
+        case RowKind::CheatMaxGoth:
+        case RowKind::CheatMaxItems:
             // Left/Right and Space step the radio group, wrapping at the ends
             // like a mod option row. Each setting applies itself (the runtime for
             // GAME SPEED, `widescreen.cpp` or the renderer for the DISPLAY rows),
@@ -1341,7 +1478,7 @@ PanelMetrics measure_panel(const Font& font, Panel& panel, int output_width,
     return metrics;
 }
 
-PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, Panel& panel,
+PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, TextCache& text, Panel& panel,
                      int output_width, int output_height, int top_y, float ui_scale) {
     (void)output_height;
     auto px = [ui_scale](int value) {
@@ -1357,7 +1494,7 @@ PanelDraw draw_panel(SDL_Renderer* renderer, const Font& font, Panel& panel,
     const int description_width = panel_left + panel_width - description_x;
     const int left_width = description_x - panel_left - px(16);
 
-    TextLayer layer;
+    CachedText layer(text);
     Panel::Geometry geometry;
 
     // The panel background is drawn first: the tab bar and the rows both sit on

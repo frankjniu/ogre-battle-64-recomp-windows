@@ -1,44 +1,68 @@
-# Ogre Battle 64: Person of Lordly Caliber (PC port project)
+# Ogre Battle 64: Person of Lordly Caliber — Windows recomp
 
 Static recompilation of the N64 game *Ogre Battle 64: Person of Lordly Caliber*
-(USA, Rev A) to a native PC executable, using the [N64Recomp] toolchain.
+(USA, Rev A) to a native Windows executable, using the [N64Recomp] toolchain and
+the RT64 renderer.
 
 **This repository contains no copyrighted game data.** You must supply your own
-ROM dump (see below).
+ROM dump.
 
-## System Requirements
+## System requirements
 
-A 64-bit PC and a GPU the renderer supports:
-
-* **GPU** — Direct3D 12.0 (Shader Model 6.0) or Vulkan 1.2 on Windows, Vulkan
-  1.2 on Linux, Metal on macOS. The oldest GPUs those cover are roughly GeForce
-  GT 630, Radeon HD 7750 (2012) and Intel HD 510 (Skylake).
-* **CPU** — x86-64 with SSE4.1 (Intel Core 2 Penryn, AMD Bulldozer or newer).
-  The macOS build needs Apple Silicon.
-* **OS** — Windows 10 or 11 (64-bit); macOS 11 or newer on Apple Silicon; a
-  glibc Linux with a Vulkan 1.2 driver.
+* **OS** — Windows 10 or 11 (64-bit).
+* **GPU** — Direct3D 12.0 (Shader Model 6.0) or Vulkan 1.2. The oldest GPUs that
+  covers are roughly GeForce GT 630, Radeon HD 7750 (2012) and Intel HD 510.
+* **CPU** — x86-64 with SSE4.1.
 * **RAM** — 2 GB. The emulated N64 machine commits 512 MB.
 * **Disk** — about 150 MB for the app, plus the ROM.
 * **Game data** — your own Ogre Battle 64 (USA, Rev A) cartridge dump, 40 MB in
-  `.z64`, `.n64` or `.v64`. No game data is included.
+  `.z64`, `.n64` or `.v64`.
 
-A keyboard is enough to play; a gamepad with XInput (Windows) or SDL controller
-support is optional. An audio device is optional too: with none, the game runs
-silently. On Windows no Visual C++ redistributable is required — the package
+A keyboard is enough to play; an XInput gamepad is optional. With no audio device
+the game runs silently. No Visual C++ redistributable is required: the package
 carries the runtime its shader compiler needs.
 
-If the game crashes as it starts, update the graphics driver first. On an older
-GPU, `OGRE_CONSOLE=1` opens a console with the boot log and `OGRE_GRAPHICS_API`
-pins the backend (`vulkan` or `d3d12`).
+The game opens a 1440x1080 window (1920x1080 with WIDESCREEN on) and renders at
+the window's pixel size. SETTINGS → RESOLUTION switches to the original 320x240
+(`NATIVE`) or `2X`.
 
-## AI Disclaimer
+If the game crashes as it starts, update the graphics driver first.
+`OGRE_CONSOLE=1` opens a console with the boot log, `OGRE_GRAPHICS_API` pins the
+backend (`vulkan` or `d3d12`), and a crash writes `error.log` beside the
+executable.
 
-This project is mostly an experiment of checking "How far can DeepSeek go?". So far,
-the results are quite impressive!
+## Playing
 
-## Status
+Unzip the release, then start `ogrebattle64.exe`. The start screen (`OGRE BATTLE
+64: RECOMP`, tabs MAIN, MODS, CONTROLS, SETTINGS, DEBUG) asks for the ROM once:
+press `SPACE` to pick it, drag it onto the window, or put it next to the
+executable. `ESC` opens the same panel over the running game. The battery save is
+`saves/` beside the executable.
 
-See [PLAN.md](PLAN.md) for the full plan, current status, and technical findings.
+## Building
+
+The full Windows recipe (Visual Studio 2022 Build Tools with clang-cl, the code
+generation in WSL, the build, the package and the traps) is in
+[`docs/guides/app-build.md`](docs/guides/app-build.md) → "Windows setup". In
+short:
+
+1. Generate the recompiled code from your ROM with `make regenerate` (it needs a
+   MIPS toolchain, so it runs in WSL), and copy the generated directories into
+   the Windows checkout. The generated C is not committed.
+2. Build: `make app DIST_OS=windows CMAKE_ARGS="-G Ninja
+   -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl"`.
+3. Package and check: `make dist DIST_OS=windows`, then
+   `tools/smoke-dist.sh`.
+
+The ROM must be the USA Rev A dump (SHA-1
+`d26b14bee422a09581ce438d45ba9fec9783fbb8` as `.z64`). `tools/convert_rom.py`
+converts a byte-swapped `.n64`.
+
+## Project docs
+
+* [`PLAN.md`](PLAN.md) — where the port stands and the to-do list.
+* [`AGENTS.md`](AGENTS.md) — working rules and durable technical facts.
+* [`docs/README.md`](docs/README.md) — documentation index.
 
 ## Directory layout
 
@@ -46,94 +70,22 @@ See [PLAN.md](PLAN.md) for the full plan, current status, and technical findings
 app/                   the port's CMake project (the executable)
 assets/                your ROM (gitignored; big-endian .z64 expected)
 asm/                   splat-generated disassembly
-config/                every config the build reads
-config/config.yaml     splat config (segments, vram mapping)
-config/config.toml     N64Recomp config
-config/banks/          per-unit splat + N64Recomp configs (config-bank<U>.{yaml,toml})
-config/symbols/        symbol_addrs*.txt, config/symbols/reloc_addrs.txt, config/symbols/extra_syms.txt,
-                       config/symbols/relocatable_sections.txt, the generated undefined_*.txt
-config/rsp-*.toml      RSPRecomp configs (njpeg, audio)
-debug/                 headless-browser probes for the wasm build (see debug/README.md)
-patches/               our upstream patches (N64Recomp, N64ModernRuntime, RT64)
-Makefile               assemble + link + recompile
-tools/rt64-plume-sdl.patch
-                       our RT64 plume patch — SDL >= 2.0.22 guard (apply to the
-                       tools/RT64 submodule on systems with older SDL2, e.g. Ubuntu 22.04)
-PLAN.md                the project plan
+config/                every config the build reads (splat, N64Recomp, banks,
+                       symbols, RSPRecomp)
+patches/               our patches to N64Recomp, N64ModernRuntime and RT64
+mods/                  example mods and the HD backgrounds pack
+tools/                 build and diagnostics scripts; RT64 submodule
+Makefile               assemble + link + recompile + build + package
 ```
 
 splat, N64Recomp and RSPRecomp resolve the paths inside a config relative to
 that config's directory, which is why the configs carry `../` entry points and
-why the bank configs set `base_path: ../..`.
+the bank configs set `base_path: ../..`.
 
-## Getting started
+## AI disclaimer
 
-See **Reproduce** in [PLAN.md](PLAN.md). Summary:
-
-```sh
-# tools (macOS)
-brew install mips-linux-gnu-binutils cmake
-python3 -m venv tools/venv && tools/venv/bin/pip install 'splat64[mips]'
-git clone --recurse-submodules https://github.com/N64Recomp/N64Recomp.git tools/N64Recomp
-git -C tools/N64Recomp apply ../../patches/n64recomp-ob64.patch
-cmake -S tools/N64Recomp -B tools/N64Recomp/build -DCMAKE_BUILD_TYPE=Release
-cmake --build tools/N64Recomp/build --target N64RecompCLI -j4
-
-# ROM: put your .z64 dump in assets/, then regenerate the recompiled code
-# (see docs/guides/app-build.md -> "Regenerating the recompiled code")
-make regenerate
-```
-
-The ROM must be the USA Rev A dump (40 MB, `.n64` 16-bit byte-swapped or already
-converted `.z64`). `tools/convert_rom.py` converts `.n64` → `.z64`.
-
-**A fresh clone cannot build the app until `make regenerate` has run once**: the
-recompiled C (`RecompiledFuncs/`, `Bank*Funcs/`, `RspFuncs/`,
-`app/src/bank_funcs.inc`) is generated from your own ROM and is deliberately not
-committed. `make regenerate` runs splat, the MIPS link, the 34 bank units, the
-main recompilation and the RSP microcode in the one order that works.
-
-### Build and run the app
-
-```sh
-cmake -S app -B build-app -DCMAKE_BUILD_TYPE=Release
-cmake --build build-app -j
-./build-app/ogrebattle64
-```
-
-On launch the app shows the start screen — `OGRE BATTLE 64: RECOMP` with a tab
-bar (**START GAME**, **MODS**, **CONTROLS**, **SETTINGS**, **DEBUG**). The START
-GAME tab carries the ROM row, which reads `[ ] No ROM` until a ROM is loaded and
-is the selected row while there is none: press `SPACE` to pick one, drag the ROM
-onto the window, or put the ROM next to the executable. `ESC` opens the same panel
-over the running game, at the same position. The ROM is validated by hash and
-stored, so later launches go straight into the game. The battery save lands in
-`saves/` **beside the executable**.
-
-### A playable build
-
-```sh
-make dist        # -> dist/ogre-battle-64-recomp/   (one self-contained executable)
-make dist-zip    # -> dist/ogre-battle-64-recomp-<platform>.zip
-```
-
-The package is a single file: SDL2 is linked statically (`make dist` fetches and
-builds a pinned real SDL2 once, because Homebrew's `sdl2` is the SDL3-based
-compat shim and has no static library). No game data is included, so the player
-supplies their own ROM on the start screen. See `docs/guides/app-build.md` →
-"Distribution".
-
-The renderer (`tools/RT64`) is a git submodule pinned to an upstream commit and
-needs its own one-time patch on systems with SDL < 2.0.22 (e.g. Ubuntu 22.04
-ships SDL 2.0.20, but `SDL_GetWindowSizeInPixels` requires 2.0.22+):
-
-```sh
-git submodule update --init --recursive
-git -C tools/RT64/src/contrib/plume apply ../../../../rt64-plume-sdl.patch
-```
-
-Re-apply after any `git submodule update` inside `tools/RT64`, which resets the
-submodule and discards the patch.
+This project is mostly an experiment of checking "How far can DeepSeek go?". So far,
+the results are quite impressive!
 
 ## Legal
 

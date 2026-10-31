@@ -13,7 +13,7 @@ machine, so a phase where the game runs at 2 fps instead of 30 shows up as a
 hot list an order of magnitude longer than its neighbours.
 
     tools/proflog.py /tmp/ogre-lag-prof.log            # slow phase + hot list
-    tools/proflog.py /tmp/ogre-lag-prof.log --dl       # join with display lists
+    tools/proflog.py /tmp/ogre-lag-prof.log --dl       # join with display lists (OGRE_DL_TRACE=1)
     tools/proflog.py /tmp/ogre-lag-prof.log --names    # resolve every hot address
 """
 import argparse

@@ -107,6 +107,14 @@ installed (so a shipped mod can always be turned off). It has five tabs:
                      gamepad button bound to it, and what the button does
     [ SETTINGS ]     GAME SPEED: [ ] 1  [ ] 2  [x] 4. The game runs that many
                      times faster than real time; 1 is normal speed.
+                     CRT FILTER draws the picture like a CRT television:
+                     HYLLIAN (sharp, lightest on the GPU), CRTS (balanced,
+                     slight curve) or LOTTES (shadow mask, bloom and curve;
+                     heaviest).
+    [ CHEATS ]       MAX GOTH holds your goth at 9,999,999 and MAX ITEM COUNTS
+                     holds every item you own at 99, for as long as the row is
+                     ON. Saving while a cheat is ON keeps the cheated values in
+                     your save.
 
     TAB / SHIFT+TAB  switch tab
     UP / DOWN        select a row
@@ -122,8 +130,13 @@ installed (so a shipped mod can always be turned off). It has five tabs:
 
 Bindings are saved in `controls.cfg` in this folder, and the game speed in
 `settings.cfg`. **ESC** opens the same panel over the running game, with the ROM
-and MODS tabs disabled and CONTROLS and SETTINGS active, so bindings and the
-game speed can be changed mid-game; **ESC** closes it again.
+and MODS tabs disabled and CONTROLS, SETTINGS and CHEATS active, so bindings,
+settings and cheats can be changed mid-game; **ESC** closes it again.
+
+During play, **F5** (quick save) copies your save, as of the last time you
+saved in the game, to a quick slot. **F9** (quick load), pressed twice, puts the
+quick slot back as your save and restarts the game; choose Continue at the
+title. The save it replaced is kept as `saves/ogrebattle64-us-rev1.bin.bak`.
 
 A mod's own options live in `mod_config/<mod id>.json`; the start screen is the
 normal way to change them.
@@ -175,7 +188,8 @@ address, the N64 thread call chain and the last lines of the app's own log (the
 
 `error.log` is overwritten by the next crash. Closing the window normally writes
 nothing. A developer can also make the app crash on demand to check the file:
-set `OGRE_CRASH_TEST=segv` in the environment before launching.
+set `OGRE_CRASH_TEST=segv` in the environment before launching, or start the
+app with the argument `--crash-test=segv` (on Windows, from a shortcut).
 
 If the game does not start at all, the `[boot]` lines name the resolved ROM,
 the renderer and the folder where saves are written. On macOS they are not
@@ -200,3 +214,27 @@ data. Supply your own legally obtained dump.
 
 The executable includes SDL2 (https://libsdl.org), Copyright (C) 1997-2025
 Sam Lantinga, under the zlib license — see SDL2-LICENSE.txt in this folder.
+
+The CRT FILTER options are ports of Timothy Lottes' public domain CRT shaders
+(crt-lottes and crt-lottes-fast) and of Hyllian's CRT shader, which is under
+this license:
+
+    Copyright (C) 2011-2015 Hyllian - sergiogdb@gmail.com
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to
+    deal in the Software without restriction, including without limitation the
+    rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+    sell copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+    IN THE SOFTWARE.

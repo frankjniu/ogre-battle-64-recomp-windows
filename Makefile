@@ -79,7 +79,7 @@ recomp: recomp-prep $(ELF)
 	@# emits (session 58, after moving bankRec10a out of unit C). Clear first.
 	rm -rf RecompiledFuncs
 	$(N64RECOMP) config/config.toml
-	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0,0x8019A7C0,0x8019A884,0x8019AF0C,0x8019B060,0x8019B340,0x8019C4A8,0x8019C69C,0x8019D67C,0x801A103C,0x801C19B0,0x801C214C,0x801B7FC0
+	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0,0x8019A7C0,0x8019A884,0x8019AF0C,0x8019B060,0x8019B340,0x8019C4A8,0x8019C69C,0x8019D67C,0x801A103C,0x801C19B0,0x801C214C,0x801B7FC0,0x801AB740,0x801AB76C
 
 # The cross-bank dispatch inside `recomp` can only see bank records that
 # `make bank-recomp` has already written to app/src/bank_funcs.inc. Without it
@@ -199,6 +199,14 @@ regenerate:
 # The `func_8019D568` override is left in place: 0x8019D67C is a genuine
 # continuation of that body, and the one *call* to it is the site dispatched
 # here.
+# 0x801AB740 and 0x801AB76C are the pair session 86 left latent (session 145).
+# func_80079BD8 reads a size with `jal 0x801AB740` (@0x80079C4C), allocates it,
+# and decodes into it with `jal 0x801AB76C` (@0x80079C78). Both are unit A
+# (bankRec3) entries: a big-endian u32 reader and a (dst, src) decoder. The main
+# ELF's .streamedC (bankRec06) has func_801AB568's epilogue at both addresses,
+# so N64Recomp bound them to func_801AB568 and func_801AB740 with the
+# redirect-plus-early-`return` shape. No route on record has executed
+# func_80079BD8, so the fix is checked in the generated C, not in a run.
 # The remaining targets stay on the recompiler's bindings (session 33's
 # behaviour); dispatching the other resolvable ones is still an opt-in
 # experiment. See docs/DECISIONS.md (sessions 34, 37, 38, 41, 55, 88).
@@ -293,6 +301,16 @@ example-mods: mod-syms
 bg-extract:
 	python3 tools/backgrounds.py extract $(or $(BG_ID),01)
 
+# The HD strips for one mapping: an RT64 texture pack in mods/backgrounds/hd/,
+# cut from the mapping's PNG (and its -wide variant) by the hash of each strip
+# the game draws. Needs a built app, the ROM and Pillow; gitignored output.
+#
+#   make bg-hd                   # id 01 (the cathedral)
+#   make bg-hd BG_ID=02 BG_ROM=<rom>
+.PHONY: bg-hd
+bg-hd:
+	python3 tools/backgrounds.py hd $(or $(BG_ID),01) $(if $(BG_ROM),--rom "$(BG_ROM)")
+
 # ---------------------------------------------------------------------------
 # Streamed-overlay bank units (Phase 4). Independent splat + link + N64Recomp
 # runs for the streamed overlay records the game loads into RAM that overlay C
@@ -347,12 +365,6 @@ build/bank%.elf: config/banks/config-bank%.yaml | build/bank%.ld
 		$$(ls build/bank$*/asm/*.o build/bank$*/asm/data/*.o build/bank$*/assets/*.o 2>/dev/null)
 	@echo "==> linked $@"
 
-# --- session bookkeeping helpers ---------------------------------------------
-# `make handoffs`: every docs/HANDOFF-*.md newest-first with its first heading,
-# so the per-session record is one command away (and the newest one is obvious).
-handoffs:
-	python3 tools/handoffs.py
-.PHONY: handoffs
 
 # `make midfunc`: the fall-through / shared-tail report (see tools/midfunc.py).
 # These are `jal` targets that are the tail of the function above them, so the

@@ -25,6 +25,7 @@ app/
     input_map.{hpp,cpp}   the rebindable controller map
     settings.{hpp,cpp}    player settings (GAME SPEED)
     crash_log.{hpp,cpp}   `error.log` and the fatal-signal handlers
+    hang_watch.{hpp,cpp}  `error.log` when the game's frame counter stops
     gbi.cpp, font.cpp, save_import.cpp, synth_frame.cpp
     null_renderer.cpp, main_web.cpp, web_platform.cpp, web_renderer.cpp
 ```
@@ -55,7 +56,7 @@ app/
 
 | Callback | Source | Notes |
 |---|---|---|
-| `renderer_callbacks.create_render_context` | `renderer.cpp` | RT64 renderer (Metal/Vulkan/D3D12) wrapping `RT64::Application`; parses the game's display lists via RT64's GBI interpreters. `OGRE_GRAPHICS_API` pins the backend |
+| `renderer_callbacks.create_render_context` | `renderer.cpp` | RT64 renderer (D3D12 or Vulkan on Windows) wrapping `RT64::Application`; parses the game's display lists via RT64's GBI interpreters. `OGRE_GRAPHICS_API` pins the backend |
 | `rsp_callbacks.get_rsp_microcode` | `rsp.cpp` | dispatches the recompiled njpeg (type 4) and audio (type 2) microcodes; `OGRE_NJPEG=0` / `OGRE_AUDIO_UCODE=0` force the stub, which completes a task without executing microcode |
 | `audio_callbacks` | `sdl_platform.cpp` | SDL audio queue (`queue_samples` / `get_frames_remaining` / `set_frequency`) |
 | `input_callbacks` | `sdl_platform.cpp` | keyboard (N64 mapping from `input_map.cpp`) + SDL GameController |
@@ -69,7 +70,7 @@ app/
   names, so N64Recomp's libultra reimplementation (which matches symbols like
   `osCreateThread` → `osCreateThread_recomp`) does not fire on its own.
   `config/symbols/symbol_addrs.txt` names the libultra functions, and the runtime
-  provides the native `osXxx_recomp` services. See `docs/LIBULTRA-BRIDGING.md`.
+  provides the native `osXxx_recomp` services.
 - **MMIO is redirected in the runtime.** Writes to `0xA4800000`-style addresses
   would otherwise land in the 4GB rdram mapping. The hardware-touching libultra
   functions the game uses (`osViSetMode`, `osContInit`, PI DMA, AI status, ...)

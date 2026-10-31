@@ -108,7 +108,8 @@ recompiler, ucode dispatch, renderer, RDRAM contents, or game state.
 
 1. **Which GBI?** §3 above. (`OGRE_DL_TRACE=1` + hash the dump.)
 2. **Did an RSP task go missing?** `tools/runlog.py <run.log>` lists tasks by
-   type and flags any non-gfx task the stub swallowed. For scene `0x05` the
+   type and flags any non-gfx task the stub swallowed (run with
+   `OGRE_RSP_LOG=1`). For scene `0x05` the
    answer (session 64, forced scene at 4×) is: type 1 (gfx, `ucode=0x8009F540`)
    and type 2 (audio, `ucode=0x8009E050`, 1706 tasks in 9 s), **and nothing
    else** — so no missing task explains this screen. (The audio microcode is
@@ -141,9 +142,10 @@ recompiler, ucode dispatch, renderer, RDRAM contents, or game state.
 
 ## 5. Recipe: borrow a reference emulator
 
-`~/Documents/RetroArch/system/Mupen64plus/mupen64plus.ini` is mupen64plus's game
-database, and RetroArch is installed with `mupen64plus_next_libretro.dylib` and
-`parallel_n64_libretro.dylib`. Ground truth for "what is in RDRAM at the moment
+On the developer's Windows machine RetroArch is installed at `C:\RetroArch-Win64`
+with the `mupen64plus_next_libretro.dll` core, and
+`C:\RetroArch-Win64\system\Mupen64plus\mupen64plus.ini` is mupen64plus's game
+database. Ground truth for "what is in RDRAM at the moment
 this screen draws" means a reference emulator's memory image, which is what the
 port cannot produce.
 
