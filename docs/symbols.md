@@ -1,27 +1,25 @@
 # Proposed symbol names
 
-`func_XXXXXXXX` / `D_XXXXXXXX` names carry an address and nothing else, and this
-project's record is full of "the function at 0x8023C894". This file is the
-vocabulary: address → proposed name → evidence → confidence. **No rename has
-been applied** — see "Promoting a name" at the end for what that costs.
+`func_XXXXXXXX` / `D_XXXXXXXX` names carry only an address. This file maps
+address → proposed name → evidence → confidence. No rename has been applied;
+"Promoting a name" at the end lists what a rename costs. Item, gold and save
+addresses are in [`items.md`](items.md).
 
-Convention (proposed):
+Convention:
 
-* `<meaning>_<addr>` — keep the address in the name, so every older handoff,
-  PLAN bullet, probe tag and comment stays greppable, and two units can never
-  collide on a bare descriptive name.
-* Bank-overlay code keeps its `ovlX_` provenance (`func_ovlC_8023C894` →
-  `dl_emit_8023C894` loses which unit owns it; prefer
-  `ovlC_dl_emit_8023C894`). Records overlap in RAM by design.
-* Do **not** invent a name that the runtime already implements (`osXxx`,
-  `alXxx`, `guXxx`, …): `config/symbols/symbol_addrs.txt` warns that a name must exist in the
-  runtime or the recompiled output will not link.
-* Confidence: **high** = instruction-level evidence recorded below; **medium** =
-  strong but partial; **low** = a hypothesis worth a name but not a rename.
+* `<meaning>_<addr>`: keep the address in the name, so comments and probe tags
+  stay greppable and two units cannot collide on a bare name.
+* Bank-overlay code keeps its `ovlX_` prefix (`ovlC_dl_emit_8023C894`), because
+  records overlap in RAM.
+* Do not use a name the runtime already implements (`osXxx`, `alXxx`,
+  `guXxx`, …): `config/symbols/symbol_addrs.txt` binds those names to the
+  runtime, and a clash does not link.
+* Confidence: **high** = instruction-level evidence below; **medium** = strong
+  but partial; **low** = a hypothesis.
 
-## Globals that pay off first
+## Globals
 
-These are read in dozens of places; a name here makes whole functions readable.
+These are read in many places; a name here makes whole functions readable.
 
 | address | proposed name | evidence | conf |
 |---|---|---|---|
@@ -45,10 +43,10 @@ These are read in dozens of places; a name here makes whole functions readable.
 | `0x800E8294` | `g_scene_descriptor` | scene manager stores the accessor's return here; words are enter/update/hook/leave/mask | high |
 | `0x8022A9A4/8/AC` | `g_render_matrix_*` | written by the `0x80239874` render tail and consumed by its callers | medium |
 | `0x802395E0` | `g_rec14_arena` (RAM range `0x802395E0..0x80243DC0`) | record 14's arena: the game streams **two banks** here, `bankRec14b` (ROM `0x2AE390`, 0xA7E0 — scene `0x0D` visit 1 / the movie) and `bankRec14c` (ROM `0x2A8CF0`, 0x56A0 — steps ≥ 2); unit F / unit G, and the reason the arena's call sites must be `LOOKUP_FUNC` | high |
-| `0x80239C24` | `func_ovlG_80239C24` (rec14c) | descriptor-interpreter opcode 42 calls it (`jal` at `0x80229004`) with `(6, 0x20, 0x20)`; a real function in rec14c (`addiu sp,sp,-0x60`), a body interior of `func_ovlC_80239874` in rec14b — session 45's wall | high |
-| `0x80197B18` | `g_screen_state` (ptr) | the map's module entry stores `malloc(0x470)` here (`0x8019A82C`) and every map draw loads `state = *(0x80197B18)` from it (`func_ovlM_801A2A7C` `0x801A2ADC`). **It is a heap pointer that changes per run** — read it from this global, never hardcode an observed value (`0x801F1570` in sessions 60/63 is run-specific) | high |
-| `0x801A6FE0` | `g_sprite_table` (stride 8) | entries `{u16 W, u16 H, s16 u, s16 v}`, static module data (unit M's data half, byte-identical to ROM); the consumer is `sprite_rect_emit` (`0x8019F87C`: `(a2 & 0xFFFF)*8 + 0x801A6FE0`, `lhu`/`lh` the four fields). Live: slot 10 `(16,11)`, 11 `(144,23)`, 12-15 `(16,24)` | high |
-| `0x80196A8C` | `g_goth` (u32) | the player's goth. The shop compares it with the price (`lw v0,27276(0x8019)` at `0x8021564C`, bank AB, `sltu` against the price) and five sites write it (bank B `0x8019AA8C`, `0x8019BC5C`, `0x8019BFAC`, `0x8019C1F0`; streamedB `0x80184F10`); the battle reward clamps it at `0x0098967F` (bank N, `0x801E53B0`). The USA v1.1 GameShark code writes this address; the v1.0 address `0x80196A6C` has no read or write in this ROM (USA Rev 1). The CHEATS tab's MAX GOTH holds it (`app/src/cheats.cpp`) | high |
+| `0x80239C24` | `func_ovlG_80239C24` (rec14c) | descriptor-interpreter opcode 42 calls it (`jal` at `0x80229004`) with `(6, 0x20, 0x20)`; a real function in rec14c (`addiu sp,sp,-0x60`), a body interior of `func_ovlC_80239874` in rec14b, so a build-time binding runs the wrong code | high |
+| `0x80197B18` | `g_screen_state` (ptr) | the map's module entry stores `malloc(0x470)` here (`0x8019A82C`) and every map draw loads `state = *(0x80197B18)` from it (`func_ovlM_801A2A7C` `0x801A2ADC`). It is a heap pointer that changes per run: read it from this global and never hardcode an observed value | high |
+| `0x801A6FD8` | `g_sprite_table` (stride 8) | entries `{u16 W, u16 H, s16 u, s16 v}`, static module data (unit M's data half, `D_ovlM_801A6FD8`); the consumer is `sprite_rect_emit` (`0x8019F870`-`0x8019F878`: `lui 0x801a; addiu 0x6FD8`, added to `(a2 & 0xFFFF)*8`, then `lhu`/`lh` the four fields) | high |
+| `0x80196A8C` | `g_goth` (u32) | the player's goth ([`items.md`](items.md) → "Gold"). The shop compares it with the price (`lw v0,27276(0x8019)` at `0x8021564C`, bank AB, `sltu` against the price) and five sites write it (bank B `0x8019AA8C`, `0x8019BC5C`, `0x8019BFAC`, `0x8019C1F0`; streamedB `0x80184F10`); the battle reward clamps it at `0x0098967F` (bank N, `0x801E53B0`). The USA v1.1 GameShark code writes this address; the v1.0 address `0x80196A6C` has no read or write in this ROM (USA Rev 1). The CHEATS tab's MAX GOTH holds it (`app/src/cheats.cpp`) | high |
 | `0x80196A4C` | `g_hour` (u16) | the hour of day, 0..23. `func_8016C81C` (`.main`) advances it when the minute byte `0x80196A4E` reaches 60 and wraps it at 24 (`0x8016C8A4`-`0x8016C8D0`), then calls `func_8016C5BC(0x80196A50)` (the date); the game-state initialiser `func_8016C900` stores 6 (`0x8016C960`); the mission clock `func_ovlN_801B134C` reads its low byte `0x80196A4D` (`0x801B147C`). The v1.1 GameShark time code writes that byte; the CHEATS tab's TIME OF DAY holds it | high |
 | `0x80196A96` | `g_class_list_bits` (11 bytes) | one bit per class id 0..80: byte `id/8`, mask `1 << (id%8)` (table `0x801EF3D0`, bank S). `func_ovlS_801D736C` ORs in the class of each roster unit (`0x801D73E4`-`0x801D740C`, `0x801D74A8`-`0x801D74C4`); the class list `func_ovlS_801CF36C` tests it (`0x801CF418`). The CHEATS tab's UNLOCK ALL CLASSES ORs in the v1.1 GameShark bytes | high |
 | `0x801F108C` | `g_mission_day` (u8, record 7 BSS) | the mission field's day counter: `func_ovlN_801AD6BC` clears it (`0x801ADA34`), `func_ovlN_801B134C` adds 1 when the date byte `0x80196A53` changes and caps it at 99 (`0x801B141C`-`0x801B1434`), and the field HUD draws it as two digits (`0x801BD168`, `0x801BD278`). Unit X's record 10c and unit S's record 06 use this RAM while record 7 is not resident. The CHEATS tab's DAY ALWAYS 00 holds it at 0 | high |
@@ -92,46 +90,16 @@ These are read in dozens of places; a name here makes whole functions readable.
 | `0x8019F83C` | `sprite_rect_emit` | `(a0 = x, a1 = y, a2 = sprite-table index)`; emits `G_RDPPIPESYNC`, the `G_TEXRECT` (**w0 = lower-right `(x+W, y+H)`, w1 = upper-left `(x, y)`**, both in quarter-px), `G_RDPHALF_1` carrying **s,t** (`u<<21 \| v<<5`), `G_RDPHALF_2` with `dsdx = dtdy = 1.0`, `G_RDPPIPESYNC`. It emits **no `G_SETTILESIZE`** — the caller supplies that | high |
 | `0x801A2A7C` | `map_party_draw` | `(a0 = x, a1 = y)`; two `sprite_rect_emit` calls — **call 1 = the shadow** (ROM `0x81B50`, `a2=0xB`, origin `(x-8, y)`, texture `state[+0x04]+0x1068`, static) and **call 2 = the knight** (ROM `0x81BFC`, `a2=0xA`, origin `(x-16, y-24)`, texture `state[+0x34] + ((3*state[0x1DC] + f) << 12)`, i.e. 24 frames of `0x1000` bytes). Each call writes its own `SETTIMG`/`SETTILE`/`LOADBLOCK`/`SETTILESIZE` block into `g_dl_cursor` first | high |
 
-## Save (battery SRAM) — the whole access path
+## Save
 
-OB64 saves to 32 KiB of battery SRAM; the Controller Pak is only the game's
-copy/backup device. Read at instruction level in `build/ogrebattle64.elf`
-(session 78):
-
-| address | proposed name | evidence | conf |
-|---|---|---|---|
-| `0x80074CF0` | `save_image_read(dst, dev_off, size)` | if `*(0x800B83B8)` is null: `malloc(0x8000)` then read the whole image in 256-byte `save_dma(dev, off, 256, dir=0)` calls (`0x80074D24`-`0x80074D60`); then `memcpy(dst, image + dev_off, size)` (`0x80074D68`) | high |
-| `0x80074C58` | `save_image_write(image)` | allocates a 16-byte handle holding `save_dma`, then writes `0x8000` bytes in 256-byte chunks with direction `1` (`0x80074CA8`-`0x80074CC4`); skipped while `*(0x800C4800)` is set | high |
-| `0x80074BF0` | `save_commit(magic)` | if `*(0x800B83BC)` (dirty) **and** `magic == 0x37081383`: `save_image_write(*(0x800B83B8))`; then clears the flag and frees the cached image | high |
-| `0x80074AD4` | `save_slot_summary_load(slot)` | `malloc(6224)`; `save_slot_validate(slot, buf)`; `save_image_read(buf, 0x10 + slot*0x1850, 6224)`; returns a 26-byte `memcpy` of `buf + (*(0x800B8258) + 12)` when `*(buf+0x0C) != 0`, else NULL. `slot == 15` takes the other arm: `malloc(19176)`, `save_record15_validate`, `save_image_read(buf, 0x30B0, 19176)` | high |
-| `0x8007541C` | `save_slot_validate(slot, buf)` | reads 6224 bytes from `*(0x800B83B8) + 0x10 + slot*0x1850`; `memcmp(D_800B8240, buf+4, 8)` — the 8-byte `QuestOG3` signature; `u16[0x00] == checksum_sum_seeded(buf+0x0C, 6212, 0x10+slot*0x1850)`; `u16[0x02] == checksum_bits_seeded(same)` | high |
-| `0x80075578` | `save_record15_validate(buf)` | the same magic check for the 19176-byte record at device `0x30B0`; **a zero first word is accepted as it stands** (`beqz` at `0x80075620`), otherwise the two checksums over `buf+0x0C`, length `0x4ADC` = 19164, seed `0x30B0` | high |
-| `0x80075A84` | `checksum_sum_seeded(data, len, seed)` | loop of `lbu`/`addu`; returns `(sum + seed) & 0xFFFF` | high |
-| `0x80075B00` | `checksum_bits_seeded(data, len, seed)` | per byte, 8 `srl`/`andi` steps counting set bits; returns `(count + seed) & 0xFFFF` | high |
-| `0x80075AC4` / `0x80075B60` | `checksum_sum` / `checksum_bits` | the same two loops **without** the seed; the un-seeded pair is what the copy-to-pak path uses, so every note slot inside a Controller Pak validates with seed 0 | high |
-| `0x80093060` / `0x80092F50` | `memcpy` / `memcmp` | the two `jal` helpers this cluster is built from | high |
-
-Globals:
-
-| address | proposed name | evidence | conf |
-|---|---|---|---|
-| `0x800B83B8` | `g_save_image` (ptr) | the cached 32 KiB image, allocated by `save_image_read` and freed by `save_commit` | high |
-| `0x800B83BC` | `g_save_dirty` (byte) | set by the writers, tested by `save_commit` | high |
-| `0x800B8240` | `g_save_signature` (8 bytes) | the `memcmp` target in `save_slot_validate`; BSS, filled at boot, and every valid slot carries `QuestOG3` at `+0x04` | high |
-| `0x800B8250` | `g_save_field_table[13]` (stride `0x1C`) | `func_800749C0` walks 13 entries reading `[+0x00]` (a function) and `[+0x08]` (an offset into the slot); entry 0's offset is also `*(0x800B8258)`, added to `+0x0C` to locate a slot's 26-byte summary | medium |
-
-**Slot geometry**: slot `n` is the 6224-byte (`0x1850`) record at device
-`0x10 + n*0x1850`. Slot index **15 is special** — the 19176-byte (`0x4AE8`)
-record at device `0x30B0`; the game writes it at the map, which is why even a
-"blank" battery image has a `QuestOG3` at `0x30B4` (with a zero first word, which
-`save_record15_validate` accepts without checking its checksums). A slot's first
-4 bytes are two `u16` checksums over `slot+0x0C .. slot+0x1850`, each **seeded
-with the slot's device offset**, so the same 6224 bytes validate only in the slot
-they were checksummed for (`reseed_slot` in `tools/sramsave.py`).
+The save functions and globals (`save_image_read`, the checksums,
+`g_save_image` at `0x800A83B8`, the field table at `0x800A824C`) are in
+[`items.md`](items.md) → "The battery save". `func_80093060` is a
+`bcopy(src, dst, len)`: it copies `a0` → `a1`, the reverse of `memcpy`.
 
 ## Shared tails (`jal` targets with no prologue)
 
-`make midfunc` lists all 67; the ones that have bitten this project:
+`make midfunc` lists all of them; these are the ones that caused mis-bindings:
 
 | address | head | what the tail inherits | conf |
 |---|---|---|---|
@@ -139,26 +107,24 @@ they were checksummed for (`reseed_slot` in `tools/sramsave.py`).
 | `0x80239AA4` | tail of `0x802399AC` | `s2` (the tail chain continues past the label splat chose) | high |
 | `0x8023C824` | `0x8023C804` | `a3` = `g_dl_cursor`, `v0` = the new cursor, `t0`/`t1` = the RDP words | high |
 | `0x8023C894` | `0x8023C824` | `a3`, `t0`, `v1` (same emitter contract) | high |
-| `0x801AFC2C` | `0x801AFAF4` | `s1`, `s3`, `s2`, `s7`, `s6` and `0x2C/0x46/0x4E($sp)` — the session-41 mis-binding | high |
+| `0x801AFC2C` | `0x801AFAF4` | `s1`, `s3`, `s2`, `s7`, `s6` and `0x2C/0x46/0x4E($sp)` | high |
 | `0x80198D28` | `0x801989AC` | `s7` and `0x74..0x88($sp)` — the scene-0x02 loader | high |
 
 ## Promoting a name
 
-A rename is not free — check the blast radius first:
+Check these before renaming a symbol:
 
-1. **Size overrides are keyed by name** (`config/config.toml`: 18 entries;
-   `config/banks/config-bankC.toml`: 4). Renaming without updating them reintroduces the
-   session-41 mis-binding bug through `find_containing_size_override`.
-2. **`asm/` is committed.** A `splat split` after a rename rewrites every
-   reference, which is a large but mechanical diff.
-3. **Cross-bank seeds**: `python3 tools/cross_bank.py write-seeds` writes
-   `build/bank<U>/symbol_addrs.txt` using the unit's name format; renaming a
-   bank symbol changes those seeds too.
-4. **No runtime-name collisions** (see the convention above).
-5. Regenerate and re-verify: `tools/venv/bin/splat split config/config.yaml` → `make` →
-   `make recomp && make bank-recomp` → rebuild both app variants, then re-run
-   the battery in the newest handoff.
+1. Size overrides in `config/config.toml` and `config/banks/config-bank*.toml`
+   are keyed by name. A rename that misses one makes
+   `find_containing_size_override` bind calls into the wrong body again.
+2. `asm/` is committed. A `splat split` after a rename rewrites every
+   reference.
+3. `tools/cross_bank.py write-seeds` writes `build/bank<U>/symbol_addrs.txt`
+   from the unit's names, so a bank rename changes those seeds.
+4. The name must not collide with a runtime function (see the convention).
+5. Run `make regenerate` in WSL, copy the output to the Windows checkout, and
+   rebuild.
 
-The cheap middle path (and what this file is for): keep the machine names, use
-the proposed name in prose and new comments, and promote a symbol only when it
-is high-confidence *and* used in three or more places.
+Until then, keep the machine names in code and use the proposed name in prose and
+comments. Promote a symbol only when it is high-confidence and used in three or
+more places.

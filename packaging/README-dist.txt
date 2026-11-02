@@ -1,242 +1,178 @@
 Ogre Battle 64: Recomp
-=====================
+======================
 
-A native PC port of Ogre Battle 64: Person of Lordly Caliber (USA, Rev A),
+A native Windows port of Ogre Battle 64: Person of Lordly Caliber (USA, Rev A),
 built by statically recompiling the original N64 code.
 
 This package contains no game data. You must supply your own ROM dump of the
-USA Rev A cartridge — the executable is useless without it, and none of the
-game's copyrighted content is included here.
+USA Rev A cartridge.
 
 
 REQUIREMENTS
 ------------
 
-A 64-bit PC and a GPU the renderer supports:
+    OS     Windows 10 or 11, 64-bit.
+    GPU    Direct3D 12.0 (Shader Model 6.0) or Vulkan 1.2. The oldest GPUs
+           that covers are roughly GeForce GT 630, Radeon HD 7750 and Intel
+           HD 510.
+    CPU    x86-64 with SSE4.1.
+    RAM    2 GB.
+    Disk   about 150 MB, plus the ROM.
+    ROM    your own Ogre Battle 64 (USA, Rev A) dump, 40 MB, as .z64, .n64
+           or .v64.
 
-    GPU    Direct3D 12.0 (Shader Model 6.0) or Vulkan 1.2 on Windows, Vulkan 1.2
-           on Linux, Metal on macOS. The oldest GPUs those cover are roughly
-           GeForce GT 630, Radeon HD 7750 (2012) and Intel HD 510 (Skylake).
-    CPU    x86-64 with SSE4.1 (Intel Core 2 Penryn, AMD Bulldozer or newer).
-           The macOS build needs Apple Silicon.
-    OS     Windows 10 or 11 (64-bit); macOS 11 or newer on Apple Silicon; a
-           glibc Linux with a Vulkan 1.2 driver.
-    RAM    2 GB. The emulated N64 machine commits 512 MB.
-    Disk   about 150 MB for the app, plus your ROM.
-    ROM    your own Ogre Battle 64 (USA, Rev A) dump, 40 MB, `.z64`, `.n64` or
-           `.v64`. No game data is included.
+A keyboard is enough to play; an XInput gamepad is optional. Without an audio
+device the game runs silently. Nothing else has to be installed: the package
+carries the Microsoft C++ runtime its shader compiler needs.
 
-A keyboard is enough to play; a gamepad with XInput (Windows) or SDL controller
-support is optional. An audio device is optional too: with none, the game runs
-silently.
-
-On Windows nothing else has to be installed. The package carries the Microsoft
-C++ runtime that its shader compiler (`dxcompiler.dll`) needs.
-
-**If the game crashes as it starts, update your graphics driver first.** On an
-older GPU, set `OGRE_CONSOLE=1` before launching to open a console with the boot
-log, then try `OGRE_GRAPHICS_API=vulkan` or `OGRE_GRAPHICS_API=d3d12` to pin the
-renderer backend (`set OGRE_CONSOLE=1` in `cmd`, or the environment variables
-under System Properties).
+If the game crashes as it starts, update your graphics driver first.
 
 
 HOW TO PLAY
 -----------
 
-1. Run the app:
-
-   - **macOS:** open `Ogre Battle 64.app` (double-click it). The ROM, the save
-     and `error.log` live in this folder, next to the app bundle.
-   - **Windows:** `ogrebattle64.exe`.
-   - **Linux:** `ogrebattle64`.
-
-   On macOS, open the bundle and not the executable inside `Contents/MacOS`:
-   Finder opens a Terminal window for a bare executable, and the bundle is what
-   avoids that.
+1. Run ogrebattle64.exe.
 
 2. The start screen appears:
 
        OGRE BATTLE 64: RECOMP
        [ MAIN ] [ MODS ] [ CONTROLS ] [ SETTINGS ] [ CHEATS ] [ DEBUG ]
 
-   - On the **MAIN** tab, select the **ROM** row and press SPACE to pick your
-     ROM, or
-   - drag the ROM file onto the window, or
-   - just put the ROM in this folder and launch the app again (it finds
-     `ogre64.z64`, or any `.z64`/`.n64`/`.v64` next to the executable).
+   Give it the ROM in one of three ways:
+   - on the MAIN tab, select the ROM row and press SPACE to pick the file;
+   - drag the ROM onto the window;
+   - put the ROM in this folder and start the game again.
 
-   The ROM is validated by hash: it must be the **USA Rev A** cartridge
-   (internal name `OgreBattle64`). A 40 MB dump works in any of the three
-   common byte orders (`.z64` big-endian, `.n64` byteswapped, `.v64`
-   little-endian); the app converts them. A ROM of another region, another
-   revision, or a decompressed/hacked one will be rejected by name, and the
-   window says which case it is and keeps asking.
+   The ROM must be the USA Rev A cartridge. All three byte orders work. A ROM
+   of another region or revision, or a modified one, is rejected, and the
+   window says why.
 
-3. The **START GAME** row starts the game (ENTER does the same). The game stores
-   the validated ROM in this folder, so later launches go straight into the game
-   — unless a mod is installed, in which case the start screen appears first so
-   the mods can be turned on or off. Hold on to this folder: the game, its save
-   and its mods live in it.
+3. START GAME (or ENTER) starts the game. The game keeps a copy of the ROM in
+   this folder, so later launches go straight into the game. When a mod is
+   installed, the start screen appears first so mods can be turned on or off.
 
 
 SAVES
 -----
 
-Battery saves (the cartridge SRAM) are written to:
+The battery save is
 
     saves/ogrebattle64-us-rev1.bin
 
-in this folder, next to the executable. Back that file up to keep your
-progress; delete it to start fresh. Setting the environment variable
-`OGRE_PREF_DIR` to another directory moves both the save and the stored ROM
-there instead.
+in this folder. Back it up to keep your progress; delete it to start fresh.
+
+During play, F5 (quick save) copies your save, as of the last time you saved
+in the game, to a quick slot. F9 (quick load), pressed twice, puts the quick
+slot back as your save and restarts the game; choose Load Game at the title.
+The save it replaced is kept as saves/ogrebattle64-us-rev1.bin.bak.
+
+Saves from emulators (mupen64plus .srm, parallel-n64, DexDrive .N64) can be
+imported with tools/sramsave.py from the source repository.
 
 
 START SCREEN
 ------------
 
-The start screen appears when no ROM is loaded, and whenever at least one mod is
-installed (so a shipped mod can always be turned off). It has six tabs:
+The start screen appears when no ROM is loaded, and whenever a mod is
+installed. ESC opens the same panel over the running game and closes it again;
+the MODS tab is disabled there, because mods load before the game starts.
 
-    [ MAIN ]         START GAME starts the game; it cannot be selected until a
-                     ROM is loaded. ROM shows the loaded ROM's file name, and
-                     selecting it opens the file picker. EXIT GAME quits.
-    [ MODS ]         one row per installed mod, with its short description
-    [ CONTROLS ]     one row per N64 button, showing the keyboard key and the
-                     gamepad button bound to it, and what the button does
-    [ SETTINGS ]     GAME SPEED: 1, 2, 4 or 8. The game runs that many times
-                     faster than real time; 1 is normal speed. During play,
-                     = and - (or R3 on a gamepad) change it.
-                     WIDESCREEN: 16:9 on the mission field and in cutscene
-                     dialogues; other screens keep 4:3 with side bars.
-                     RESOLUTION: NATIVE (320x240), 2X, or AUTO (the largest
-                     whole multiple of 320x240 that fits the window).
-                     CRT FILTER draws the picture like a CRT television:
-                     HYLLIAN (sharp, lightest on the GPU), CRTS (balanced,
-                     slight curve) or LOTTES (shadow mask, bloom and curve;
-                     heaviest).
-                     WINDOW: windowed or fullscreen. SOUNDS and VOLUME.
-                     MOUSE ENABLED: the pointer drives the world map's and the
-                     mission field's cursors.
-    [ CHEATS ]       MAX GOTH holds your goth at 9,999,999 and MAX ITEM COUNTS
-                     holds every item you own at 99, for as long as the row is
-                     ON. QUICK LEVEL GAIN levels up every unit that reaches the
-                     level check after a battle. QUICK SOLDIER PROMOTION
-                     turns one soldier in the leader's unit into a Fighter or
-                     Amazon after each won battle in which a soldier is still
-                     standing. UNLOCK ALL
-                     CLASSES fills the class list. DAY ALWAYS 00 keeps the
-                     mission day at 00. TIME OF DAY holds the clock at one hour.
-                     Saving while a cheat is ON keeps the cheated values in
-                     your save.
-    [ DEBUG ]        the running game's Chaos Frame value.
+    [ MAIN ]      START GAME, the ROM row (opens the file picker), EXIT GAME.
+    [ MODS ]      one row per installed mod.
+    [ CONTROLS ]  the keyboard key and gamepad button bound to each N64
+                  button. Select a row and press the new key or button.
+    [ SETTINGS ]  GAME SPEED: 1x, 2x, 4x or 8x. During play, = and - (or R3
+                  on a gamepad) change it.
+                  WIDESCREEN: 16:9 on the mission field, in cutscene
+                  dialogues, on the world map and on the Organize Screen;
+                  other screens keep 4:3 with side bars.
+                  RESOLUTION: NATIVE (320x240), 2X, or AUTO (the largest
+                  whole multiple of 320x240 that fits the window).
+                  CRT FILTER: HYLLIAN (sharp, lightest on the GPU), CRTS
+                  (slight curve) or LOTTES (shadow mask, bloom and curve).
+                  WINDOW: windowed or fullscreen.
+                  SOUNDS and VOLUME.
+                  MOUSE ENABLED: the pointer drives the world map and
+                  mission field cursors.
+    [ CHEATS ]    MAX GOTH holds your goth at 9,999,999.
+                  MAX ITEM COUNTS holds every owned item at 99.
+                  QUICK LEVEL GAIN levels up every unit that reaches the
+                  level check after a battle.
+                  QUICK SOLDIER PROMOTION turns one soldier in the leader's
+                  unit into a Fighter or Amazon after each won battle in
+                  which a soldier is still standing.
+                  UNLOCK ALL CLASSES fills the class list.
+                  DAY ALWAYS 00 keeps the mission day at 00.
+                  TIME OF DAY holds the clock at one hour.
+                  Saving while a cheat is on keeps the cheated values.
+    [ DEBUG ]     the running game's Chaos Frame value.
 
     TAB / SHIFT+TAB  switch tab
     UP / DOWN        select a row
-    SPACE            activate the selected row: START GAME starts the game, the
-                     ROM row opens the file picker, a mod row turns the mod on
-                     or off, an option row steps its value, the GAME SPEED row
-                     steps the speed, a CONTROLS row starts a rebind (press the
-                     key or gamepad button you want)
-    LEFT / RIGHT     change the selected option's value
-    ENTER            start the game, or open the ROM picker when there is no ROM
-    mouse            click a tab to switch, a row to activate it, a GAME SPEED
-                     number to select that speed, elsewhere to start
+    LEFT / RIGHT     change the selected option
+    SPACE            activate the selected row
+    ENTER            start the game
+    mouse            click a tab or a row
+    gamepad          D-pad moves, A selects, LB/RB switch tab
 
-Bindings are saved in `controls.cfg` in this folder, and the game speed in
-`settings.cfg`. **ESC** opens the same panel over the running game, so bindings,
-settings and cheats can be changed mid-game; the MODS tab is disabled there,
-because mods load before the game starts. **ESC** closes it again.
-
-During play, **F5** (quick save) copies your save, as of the last time you
-saved in the game, to a quick slot. **F9** (quick load), pressed twice, puts the
-quick slot back as your save and restarts the game; choose Continue at the
-title. The save it replaced is kept as `saves/ogrebattle64-us-rev1.bin.bak`.
-
-A mod's own options live in `mod_config/<mod id>.json`; the start screen is the
-normal way to change them.
+Bindings are saved in controls.cfg and settings in settings.cfg, both in this
+folder.
 
 
 MODS
 ----
 
-The `mods/` folder holds the mods the client loads. A fresh copy of this
-package carries the example mods:
+Every .nrm file in mods/ is loaded at startup and listed on the MODS tab.
+Drop a .nrm into mods/ to install it; delete it to uninstall. The package
+carries three mods, all off:
 
-    mods/skip-boot-logos.nrm    Skip Boot Logos (boots straight to the title)
-    mods/exp-overflow.nrm       EXP Overflow (keeps a level-up's leftover EXP)
-    mods/item-randomizer.nrm    Item Randomizer (EXPERIMENTAL: an item won from
-                                an enemy unit or found on the map becomes a
-                                random item; back up your save before using it)
+    skip-boot-logos.nrm   Skip Boot Logos: boots straight to the title.
+    exp-overflow.nrm      EXP Overflow: keeps the EXP left over after a
+                          level-up.
+    item-randomizer.nrm   Item Randomizer (experimental): an item received
+                          after a battle or found on the map becomes a random
+                          item. Back up your save before using it.
 
-They ship **off**, so the game plays exactly as it did on the console until you
-turn one on: open the **MODS** tab, select its row and press SPACE. The setting
-is remembered.
-
-Every `.nrm` in `mods/` is opened at startup and listed on the start screen's
-**MODS** tab. Dropping another `.nrm` into `mods/` installs it, and deleting
-one uninstalls it.
-
-Mods are recompiled into the client at startup, so a mod built for a different
-build of the game may be refused; the start screen prints the reason.
+To turn a mod on, open the MODS tab, select its row and press SPACE. A mod
+built for a different version of the game may be refused; the start screen
+shows the reason.
 
 
-IF THE GAME DOES NOT START
---------------------------
+IF SOMETHING GOES WRONG
+-----------------------
 
-The reason is written to `error.log` in this folder and, when the failure
-happens before the game window exists, shown in a dialog. Check the
-REQUIREMENTS section above first: the most common cause on Windows is a GPU
-driver older than the renderer needs.
-
-
-IF THE GAME CRASHES
--------------------
-
-The app opens no console window, so a crash is not visible in one. If the
-process dies on a fault or an unhandled error it writes:
-
-    error.log
-
-into this folder, next to the save. The file holds the reason, the fault
-address, the N64 thread call chain and the last lines of the app's own log (the
-`[boot]`, `[bank]` and `[overlays]` lines). Attach the whole file to a bug report:
+If the game fails to start or crashes, it writes error.log in this folder. A
+failure before the game window opens also shows a dialog. The file holds the
+reason, the fault address and the last lines of the game's log. Attach the
+whole file to a bug report:
 
     https://github.com/frankjniu/ogre-battle-64-recomp-windows/issues
 
-`error.log` is overwritten by the next crash. Closing the window normally writes
-nothing. A developer can also make the app crash on demand to check the file:
-set `OGRE_CRASH_TEST=segv` in the environment before launching, or start the
-app with the argument `--crash-test=segv` (on Windows, from a shortcut).
+The next crash overwrites error.log. Closing the window normally writes
+nothing.
 
-If the game does not start at all, the `[boot]` lines name the resolved ROM,
-the renderer and the folder where saves are written. On macOS they are not
-printed anywhere; run the executable inside the bundle from a Terminal
-(`Ogre Battle 64.app/Contents/MacOS/ogrebattle64`) to see them. On Windows and
-Linux, run the app from a terminal.
+On an older GPU, set OGRE_GRAPHICS_API=vulkan or OGRE_GRAPHICS_API=d3d12
+before launching to choose the renderer backend, and OGRE_CONSOLE=1 to open a
+console with the boot log (in cmd: set OGRE_CONSOLE=1).
 
-Troubleshooting, build instructions from source, and the full list of
-environment options are in the repository:
+The source code, build instructions and every environment option are at:
 
     https://github.com/frankjniu/ogre-battle-64-recomp-windows
-
-See docs/guides/app-build.md there for the diagnostics toolkit.
 
 
 LEGAL
 -----
 
 Ogre Battle 64 (c) Quest / Nintendo. This is a fan preservation and
-interoperability project; it ships no ROM, no extracted assets and no game
-data. Supply your own legally obtained dump.
+interoperability project. It ships no ROM, no extracted assets and no game
+data.
 
 This program is free software under the GNU General Public License, version 3.
-LICENSE.txt in this folder holds the full text. The source code is at
-https://github.com/frankjniu/ogre-battle-64-recomp-windows. The license covers
-the port's own code. It does not cover Ogre Battle 64 or any of its data.
+LICENSE.txt in this folder holds the full text. The license covers the port's
+own code. It does not cover Ogre Battle 64 or any of its data.
 
 The executable includes SDL2 (https://libsdl.org), Copyright (C) 1997-2025
-Sam Lantinga, under the zlib license — see SDL2-LICENSE.txt in this folder.
+Sam Lantinga, under the zlib license.
 
 The CRT FILTER options are ports of Timothy Lottes' public domain CRT shaders
 (crt-lottes and crt-lottes-fast) and of Hyllian's CRT shader, which is under

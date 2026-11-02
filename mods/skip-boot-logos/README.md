@@ -1,7 +1,7 @@
 # Skip Boot Logos
 
-An example mod for Ogre Battle 64: Recomp. It is the reference for the mod API:
-one code mod, one hook, one toggle in the client.
+An example mod for Ogre Battle 64: Recomp: one code mod, one hook, one toggle in
+the client. It is the smallest reference for the mod API.
 
 ## What it does
 
@@ -26,11 +26,10 @@ The mod puts an entry hook on scene `0x09`'s update and writes the title's id:
 
 The boot then runs `0x09` for one frame and enters the title.
 
-**Do not write the word from scene `0x0A`'s update instead.** That was the first
-attempt and it broke the title: the stills scene was cut to one frame, the title
-produced no display lists, and the last presented frame stayed on screen. Scene
-`0x0A`'s enter and leave set up and tear down globals in overlay C that only its
-*completed* state machine leaves consistent. Never entering `0x0A` is correct.
+Do not write the word from scene `0x0A`'s update instead. Scene `0x0A`'s enter
+and leave set up and tear down globals in overlay C that only its completed state
+machine leaves consistent. Cut short, it leaves the title with no display lists,
+and the last presented frame stays on screen. Skipping `0x0A` entirely works.
 
 ## Building
 
@@ -48,10 +47,8 @@ container.
 
 ## Installing
 
-Copy `skip-boot-logos.nrm` into the client's `mods/` folder — the folder next to
-the executable, alongside `saves/`. The client opens every `.nrm` there on
-startup and lists it in the start screen's **MODS** panel, where it can be
-turned off.
+Copy `skip-boot-logos.nrm` into the `mods/` folder next to the executable. The
+start screen's MODS tab lists it, off by default.
 
 ## Reading the code
 

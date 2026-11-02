@@ -275,6 +275,10 @@ nothing.
 
 Re-verify if in doubt; otherwise start from here.
 
+- **ROM layout.** Big-endian `.z64`, SHA-1
+  `d26b14bee422a09581ce438d45ba9fec9783fbb8`. Entry `0x80070C00`; the main
+  segment is ROM `0x1060` ↔ `0x80070C60`; BSS `0x800AEDB0..0x800E9C20`; `main`
+  at `0x8007F880`. libultra is bridged by name (`config/symbols/symbol_addrs.txt`).
 - **Uninitialised guest state holds the game's own leftovers, not noise.** The one
   systemic difference from hardware is that the port zero-fills RDRAM at boot.
   When the port has `0` where retail clearly does not, check the address map
@@ -348,7 +352,8 @@ Re-verify if in doubt; otherwise start from here.
   RGBA5551, pitch 640); the world map adds three 640-wide targets
   (`0x1BA780`, `0x250800`, `0x2E6840`). A 16-bit framebuffer written back to RDRAM
   puts value `V` at `off ^ 2` (low byte) and `off ^ 2 + 1` (high byte).
-- **Threads.** N64 threads run as native threads. Thread 1 (`func_8007F8E4`)
+- **Threads.** N64 threads run as native threads. Thread 4 (`func_8008AFE0`) is
+  the frame pump. Thread 1 (`func_8007F8E4`)
   boots, starts thread 3 (`func_80071EB0`, the game flow), drops to priority 0 and
   loops forever on an idle callback at `0x800E7A18` that nothing writes; a
   `[[patches.hook]]` sleeps it about 1 ms per pass (`ogre_idle_wait`). Do not use

@@ -15,7 +15,7 @@ mod's reconstruction is the game's answer.
     tools/refscan.py <dump> --list     # every occupied record, scan vs game
     tools/refscan.py <dump> --item 117 # the records that credit one item
 
-Addresses and offsets are the ones in the mod and in `docs/notes-item-equipped.md`
+Addresses and offsets are the ones in the mod and in `docs/items.md`
 (the disassembly of `func_8016B774` at `0x8016B774`, size 0x29C, `.streamedB`):
 
     clear 0x80193AE2 + i*4   i = 39..0     the 40-slot list's `+0x02`

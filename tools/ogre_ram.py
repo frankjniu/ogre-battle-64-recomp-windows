@@ -36,7 +36,7 @@ the structure that chose the address.
 
 `cell` prints a sprite part slot as the game's own format when its size is
 known. A cache slot is `0x80` bytes and its image starts at `+0x08` (the list
-links are at `+0x70`/`+0x74`), so the default `--slot 0x80` prints one slot's
+links are at `+0x00`/`+0x04`), so the default `--slot 0x80` prints one slot's
 payload. Use `--slot 0x100` for a draw whose bound address is the slot base and
 whose image begins `0x10` later.
 
