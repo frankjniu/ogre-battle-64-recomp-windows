@@ -36,12 +36,11 @@ void init_capture_env();
 extern "C" const char* ogre_present_capture_path();
 }
 
-// Platform I/O for the app: SDL2 window, N64-style input, and SDL audio queue.
-// The game itself never touches SDL; ultramodern calls these callbacks.
+// Platform I/O for the app: SDL2 window and N64-style input. Audio output is
+// in audio_out.cpp. The game itself never touches SDL; ultramodern calls these
+// callbacks.
 struct Platform {
     SDL_Window* window = nullptr;
-    SDL_AudioDeviceID audio_device = 0;
-    uint32_t audio_frequency = 0;
 
     // macOS/Metal only: the SDL_MetalView backing the window's CAMetalLayer.
     // It is handed to RT64 as WindowHandle::view and must outlive the window,
@@ -101,9 +100,6 @@ void shutdown_sdl(Platform& platform);
 
 // Pump window/event loop; called from the main thread.
 void pump_sdl_events(Platform& platform, bool* quit);
-
-// Opens an SDL audio output device that the audio callbacks feed.
-void open_audio(Platform& platform, uint32_t frequency);
 
 // --- ultramodern callbacks ---------------------------------------------------
 ultramodern::input::callbacks_t make_input_callbacks();

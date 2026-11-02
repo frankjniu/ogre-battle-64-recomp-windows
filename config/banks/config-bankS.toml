@@ -13,3 +13,31 @@ bss_section_suffix = ".bss"
 functions_per_output_file = 100
 
 function_sizes = []
+
+# ---------------------------------------------------------------------------
+# WIDESCREEN on the Organize Screen (app/src/organize_widescreen.cpp). Every
+# hook is a no-op while `ogre::widescreen_2d_extension()` is 0, which it is
+# whenever the screen is drawn 4:3. `func_ovlS_801B7FC0` is the screen's draw;
+# the display-list head is `*(u32*)0x800E9BA0` and the state `*(u32*)0x80196B18`.
+
+# After the draw's "screen is up" checks and before its first display-list
+# write: widen (or restore) the 320x240 background quad at state[0] + 0x24E8,
+# and enable RT64's extended GBI.
+[[patches.hook]]
+func = "func_ovlS_801B7FC0"
+before_vram = 0x801B8014
+text = "{ void ogre_orgws_begin(uint8_t*); ogre_orgws_begin(rdram); }"
+
+# The window loop (0x801BA1B8..0x801BA594), for an active window in $s0, before
+# its frame: anchor the counters and WAR FUNDS left and the name plate right.
+[[patches.hook]]
+func = "func_ovlS_801B7FC0"
+before_vram = 0x801BA1D0
+text = "{ void ogre_orgws_window(uint8_t*, uint32_t); ogre_orgws_window(rdram, (uint32_t)ctx->r16); }"
+
+# The same loop after the window's content (and for inactive slots): default
+# anchoring again, and a scissor over the whole wide picture.
+[[patches.hook]]
+func = "func_ovlS_801B7FC0"
+before_vram = 0x801BA584
+text = "{ void ogre_orgws_window_end(uint8_t*); ogre_orgws_window_end(rdram); }"

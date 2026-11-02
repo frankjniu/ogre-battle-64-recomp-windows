@@ -120,3 +120,86 @@ renamed = ["main"]
 func = "func_8007F8E4"
 before_vram = 0x8007F998
 text = "{ void ogre_idle_wait(uint8_t* rdram); ogre_idle_wait(rdram); }"
+
+# The title screen's pack backdrop (scene 0x04; app/src/screen_backdrops.cpp,
+# docs/guides/hd-backgrounds.md -> "Screen backdrops"). Each hook returns at once
+# unless the title is running and mods/backgrounds/ has an image for it.
+# func_80198ECC(record, x, y) draws one image record as 2D strips; the title
+# draws its sky, cloud and hill layers through it. At the entry, a0 is the
+# record: the sky's call draws the pack image first. Before `jr ra`, the layer's
+# rectangles become no-ops (its texture loads stay: the fog groups inherit them).
+[[patches.hook]]
+func = "func_80198ECC"
+before_vram = 0x80198ECC
+text = "{ void ogre_title_layer_begin(uint8_t*, uint32_t); ogre_title_layer_begin(rdram, (uint32_t)ctx->r4); }"
+
+[[patches.hook]]
+func = "func_80198ECC"
+before_vram = 0x80198EF8
+text = "{ void ogre_title_layer_end(uint8_t*); ogre_title_layer_end(rdram); }"
+
+# The three fog groups, func_8019C5D4(0), (2) and (1), called from the title
+# draw at 0x8019D65C, 0x8019D6D0 and 0x8019D73C. The caller stores the list
+# head before each `jal`; the hook after the delay slot extends the group's
+# rows to the widescreen edges while Expand is on.
+[[patches.hook]]
+func = "func_8019D568"
+before_vram = 0x8019D65C
+text = "{ void ogre_title_fog_begin(uint8_t*); ogre_title_fog_begin(rdram); }"
+
+[[patches.hook]]
+func = "func_8019D568"
+before_vram = 0x8019D664
+text = "{ void ogre_title_fog_end(uint8_t*); ogre_title_fog_end(rdram); }"
+
+[[patches.hook]]
+func = "func_8019D568"
+before_vram = 0x8019D6D0
+text = "{ void ogre_title_fog_begin(uint8_t*); ogre_title_fog_begin(rdram); }"
+
+[[patches.hook]]
+func = "func_8019D568"
+before_vram = 0x8019D6D8
+text = "{ void ogre_title_fog_end(uint8_t*); ogre_title_fog_end(rdram); }"
+
+[[patches.hook]]
+func = "func_8019D568"
+before_vram = 0x8019D73C
+text = "{ void ogre_title_fog_begin(uint8_t*); ogre_title_fog_begin(rdram); }"
+
+[[patches.hook]]
+func = "func_8019D568"
+before_vram = 0x8019D744
+text = "{ void ogre_title_fog_end(uint8_t*); ogre_title_fog_end(rdram); }"
+
+# The Load Game book's pack backdrop (scene 0x12; app/src/screen_backdrops.cpp).
+# func_801A9C68 is the scene's per-frame hook. 0x801A9CF8 follows the
+# projection setup (func_801A8FB4) and precedes `G_DL 0x801B8CA0`: the backdrop
+# is drawn there. The object list func_801A6BE8 is called at 0x801A9D1C; after
+# it returns (0x801A9D24) the desk's G_DL call becomes a no-op.
+[[patches.hook]]
+func = "func_801A9C68"
+before_vram = 0x801A9CF8
+text = "{ void ogre_loadgame_backdrop(uint8_t*); ogre_loadgame_backdrop(rdram); }"
+
+[[patches.hook]]
+func = "func_801A9C68"
+before_vram = 0x801A9D1C
+text = "{ void ogre_loadgame_objects_begin(uint8_t*); ogre_loadgame_objects_begin(rdram); }"
+
+[[patches.hook]]
+func = "func_801A9C68"
+before_vram = 0x801A9D24
+text = "{ void ogre_loadgame_objects_end(uint8_t*); ogre_loadgame_objects_end(rdram); }"
+
+# The 2D sprite blitter func_80176C8C(x0, y0, x1, y1, s, t, tile) clips every
+# rectangle to the 320x240 picture (0x80176E20..0x80176EDC). At 0x80176E20 it
+# holds the unclipped rectangle: ulx $t3, uly $t4, lrx $t1, lry $t2 (10.2), s $a3,
+# t $t0 (10.5), dsdx $a2, dtdy $t5, tile $t7. While the mission field's cursor is
+# drawn in widescreen (app/src/mission_widescreen.cpp), a rectangle that crosses
+# the edge is written unclipped and $t3 = 1280 makes the blitter's own test at
+# 0x80176E38 drop its clipped copy. Every other caller keeps the game's clipping.
+[[patches.hook]]
+func = "func_80176C8C"
+before_vram = 0x80176E20
+text = "{ int32_t ogre_msws_blit(uint8_t*, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t); if (ogre_msws_blit(rdram, (int32_t)ctx->r11, (int32_t)ctx->r12, (int32_t)ctx->r9, (int32_t)ctx->r10, (int32_t)ctx->r7, (int32_t)ctx->r8, (int32_t)ctx->r6, (int32_t)ctx->r13, (int32_t)ctx->r15)) ctx->r11 = 1280; }"

@@ -120,7 +120,14 @@ installed (so a shipped mod can always be turned off). It has six tabs:
                      mission field's cursors.
     [ CHEATS ]       MAX GOTH holds your goth at 9,999,999 and MAX ITEM COUNTS
                      holds every item you own at 99, for as long as the row is
-                     ON. Saving while a cheat is ON keeps the cheated values in
+                     ON. QUICK LEVEL GAIN levels up every unit that reaches the
+                     level check after a battle. QUICK SOLDIER PROMOTION
+                     turns one soldier in the leader's unit into a Fighter or
+                     Amazon after each won battle in which a soldier is still
+                     standing. UNLOCK ALL
+                     CLASSES fills the class list. DAY ALWAYS 00 keeps the
+                     mission day at 00. TIME OF DAY holds the clock at one hour.
+                     Saving while a cheat is ON keeps the cheated values in
                      your save.
     [ DEBUG ]        the running game's Chaos Frame value.
 
@@ -222,6 +229,11 @@ LEGAL
 Ogre Battle 64 (c) Quest / Nintendo. This is a fan preservation and
 interoperability project; it ships no ROM, no extracted assets and no game
 data. Supply your own legally obtained dump.
+
+This program is free software under the GNU General Public License, version 3.
+LICENSE.txt in this folder holds the full text. The source code is at
+https://github.com/frankjniu/ogre-battle-64-recomp-windows. The license covers
+the port's own code. It does not cover Ogre Battle 64 or any of its data.
 
 The executable includes SDL2 (https://libsdl.org), Copyright (C) 1997-2025
 Sam Lantinga, under the zlib license — see SDL2-LICENSE.txt in this folder.

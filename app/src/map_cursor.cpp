@@ -5,9 +5,11 @@
 // Plain atomics carry it across.
 
 #include "map_cursor.hpp"
+#include "widescreen_gbi.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -103,13 +105,8 @@ constexpr uint16_t kPadLeft = 0x0200u;
 constexpr uint16_t kPadDown = 0x0400u;
 constexpr uint16_t kPadUp = 0x0800u;
 
-// The play area the map state machine clamps the cursor into
-// (`func_ovlM_8019AF0C` at 0x8019B8E0: x 0x28..0x110, y 0x28..0xC0). A pointer
-// within `kEdgeMargin` of a bound is pushing past it.
-constexpr int kPlayMinX = 0x28;
-constexpr int kPlayMaxX = 0x110;
-constexpr int kPlayMinY = 0x28;
-constexpr int kPlayMaxY = 0xC0;
+// A pointer within this distance of a play-area bound (`ogre::map_cursor_bounds`)
+// is pushing past it.
 constexpr int kEdgeMarginDefault = 24;
 
 bool enabled() {
@@ -179,7 +176,9 @@ uint16_t edge_forced() {
 // The presented picture is the 320x240 framebuffer, aspect-fit and centered in
 // the drawable. Mouse events are in window points; the drawable is in pixels.
 // Writes the framebuffer pixel, clamped into the framebuffer's range, and
-// returns false when the point is outside the framebuffer.
+// returns false when the point is outside the framebuffer. With the world map
+// in widescreen (map_widescreen.cpp) the picture is `extension` pixels wider on
+// each side, at the same scale, so x runs from -extension to 320 + extension.
 bool window_to_framebuffer(int window_x, int window_y, int win_w, int win_h, int draw_w,
                            int draw_h, int& fb_x, int& fb_y) {
     if (win_w <= 0 || win_h <= 0 || draw_w <= 0 || draw_h <= 0) {
@@ -187,6 +186,7 @@ bool window_to_framebuffer(int window_x, int window_y, int win_w, int win_h, int
     }
     constexpr float kFbW = 320.0f;
     constexpr float kFbH = 240.0f;
+    const float extension = static_cast<float>(ogre::widescreen_2d_extension());
     const float px = static_cast<float>(window_x) * static_cast<float>(draw_w) /
                      static_cast<float>(win_w);
     const float py = static_cast<float>(window_y) * static_cast<float>(draw_h) /
@@ -198,26 +198,28 @@ bool window_to_framebuffer(int window_x, int window_y, int win_w, int win_h, int
     const float origin_y = (static_cast<float>(draw_h) - kFbH * scale) * 0.5f;
     const float gx = (px - origin_x) / scale;
     const float gy = (py - origin_y) / scale;
-    fb_x = static_cast<int>(std::min(std::max(gx, 0.0f), kFbW - 1.0f));
+    fb_x = static_cast<int>(std::floor(std::min(std::max(gx, -extension), kFbW + extension - 1.0f)));
     fb_y = static_cast<int>(std::min(std::max(gy, 0.0f), kFbH - 1.0f));
-    return gx >= 0.0f && gy >= 0.0f && gx < kFbW && gy < kFbH;
+    return gx >= -extension && gy >= 0.0f && gx < kFbW + extension && gy < kFbH;
 }
 
 // The D-pad bits for a framebuffer pixel inside the map's view. A pixel left of
-// the play area pushes left, and the bounds are the state machine's own clamps.
+// the play area pushes left, and the bounds are the state machine's own clamps
+// (widened in widescreen, as the hooks in map_widescreen.cpp do).
 uint16_t edge_direction_for(int fb_x, int fb_y) {
     const int margin = edge_margin();
+    const ogre::MapCursorBounds bounds = ogre::map_cursor_bounds();
     uint16_t direction = 0;
-    if (fb_x <= kPlayMinX + margin) {
+    if (fb_x <= bounds.min_x + margin) {
         direction |= kPadLeft;
     }
-    else if (fb_x >= kPlayMaxX - margin) {
+    else if (fb_x >= bounds.max_x - margin) {
         direction |= kPadRight;
     }
-    if (fb_y <= kPlayMinY + margin) {
+    if (fb_y <= bounds.min_y + margin) {
         direction |= kPadUp;
     }
-    else if (fb_y >= kPlayMaxY - margin) {
+    else if (fb_y >= bounds.max_y - margin) {
         direction |= kPadDown;
     }
     return direction;
@@ -390,6 +392,12 @@ extern "C" void ogre_map_cursor(uint8_t* rdram, int32_t state) {
     if (!live) {
         return;
     }
-    write_s16(rdram, pointer + kCursorX, static_cast<int16_t>(mouse_x));
-    write_s16(rdram, pointer + kCursorY, static_cast<int16_t>(mouse_y));
+    // The draw reads this pair before the state machine clamps it again, so
+    // the pointer is clamped here into the same play area. Unclamped, the
+    // cursor followed the pointer under the frame and into the margins.
+    const ogre::MapCursorBounds bounds = ogre::map_cursor_bounds();
+    write_s16(rdram, pointer + kCursorX,
+              static_cast<int16_t>(std::clamp(mouse_x, bounds.min_x, bounds.max_x)));
+    write_s16(rdram, pointer + kCursorY,
+              static_cast<int16_t>(std::clamp(mouse_y, bounds.min_y, bounds.max_y)));
 }

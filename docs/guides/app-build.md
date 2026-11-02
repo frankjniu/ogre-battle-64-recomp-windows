@@ -590,12 +590,33 @@ WIDESCREEN puts RT64 into its Expand aspect ratio, which widens the field of
 view: `rt64_workload_queue.cpp` derives `aspectRatioScale` from the window and
 `ProjectionProcessor::processScene` counter-scales screen-covering projections.
 `ON` turns Expand on only while the dispatcher's scene (`D_800E810E`) is in the
-widescreen set: `0x03` (mission) and `0x0D` (dialogue/cutscene) by default
-(`OGRE_WS_SCENES`), plus every scene the HD-background pack covers. The 2D
-screens are authored for 4:3 and are pillarboxed. `app/src/widescreen.cpp` is
-the only writer of `ar_option`, once per frame from `update_gfx`, and writes only
-on a difference. Saved as `widescreen = off|on`; the retired `missions`,
-`always`, `1` and `2` read as `on`.
+widescreen set: `0x03` (mission), `0x0D` (dialogue/cutscene), `0x05` (world
+map) and `0x06` (Organize Screen) by default (`OGRE_WS_SCENES`), plus every
+scene the HD-background pack covers. Other 2D screens are authored for 4:3 and
+are pillarboxed. Expand keeps a 2D layout at its 4:3 size and position, so the
+world map and the Organize Screen are widened by patching their own draws
+(`app/src/map_widescreen.cpp` and `app/src/organize_widescreen.cpp`, hooks in
+`config/banks/config-bankM.toml` and `config-bankS.toml`). On the map, the stone
+frame sits on all four edges of the picture (its top bar at y 0, its bottom bar
+at y 239, its pillars stretched between), the map fills the larger window inside
+it, the location plate and the MONTH/DATE panel move with their corners of the
+frame, and the cursor and the scroll use the larger window. On the Organize Screen, the
+cobblestone fills the width, the counters and WAR FUNDS move to the left edge,
+the name plate to the right edge, and the grid stays centred. In a mission
+(`0x03`, 3D) the field cursor reaches the wide edges before the camera pans
+(`app/src/mission_widescreen.cpp`, hooks in `config-bankN.toml`). In cutscenes
+(`0x0D`) the vignette that darkens the picture's edges spans the wide picture
+(`app/src/cutscene_widescreen.cpp`, hook in `config-bankL.toml`). The title
+(`0x04`) and the Load Game book (`0x12`) fill the width with the pack's screen
+backdrops when `mods/backgrounds/` has `title.png` and `loadgame.png`
+(`app/src/screen_backdrops.cpp`, hooks in `config/config.toml`;
+`docs/guides/hd-backgrounds.md` → "Screen backdrops").
+`[ws2d] extension <n> px per side` logs each change of the extension (54 at
+16:9, 0 while Expand is off). `docs/guides/widescreen.md` is the guide
+for widening another screen. `app/src/widescreen.cpp` is the only writer of
+`ar_option`, once per frame from `update_gfx`, and writes only on a difference.
+Saved as `widescreen = off|on`; the retired `missions`, `always`, `1` and `2`
+read as `on`.
 
 The window's shape follows the toggle and never changes with the scene.
 `create_window` asks `widescreen_initial_window_size`, and
@@ -698,10 +719,10 @@ VOLUME   ----------| 100%
 ```
 
 VOLUME moves 5% per press and clamps; a click sets a slider cell (11 cells, 10%
-each). The gain is applied in `queue_audio_samples` (`sdl_platform.cpp`): 100
-queues the buffer unchanged, a lower gain scales a copy, 0 queues silence. The
-frame count is the same at every gain, because `ultramodern::audio_dma_busy()`
-paces the game's audio from the queued depth. Saved as `sounds = off|on` and
+each). The gain is applied in the output callback (`pull` in
+`app/src/audio_out.cpp`), as samples leave the FIFO; 0 plays silence. Every AI
+buffer is queued at every gain, because `ultramodern::audio_dma_busy()` paces
+the game's audio from the queued depth. Saved as `sounds = off|on` and
 `volume = <0..100>`; a file without the keys loads `ON` / `100`.
 
 ### MOUSE ENABLED
@@ -719,27 +740,43 @@ on every change. Saved as `mouse = off|on`.
 ### The CHEATS tab
 
 ```
-WHILE ON, A CHEAT IS RESTORED EVERY FRAME. SAVING KEEPS THE CHEATED VALUES.
-MAX GOTH          [x] OFF [ ] ON
-MAX ITEM COUNTS   [x] OFF [ ] ON
+WHILE ON, A CHEAT IS RESTORED EVERY FRAME; THE LEVEL AND PROMOTION CHEATS ACT
+ON EACH BATTLE RESULT. SAVING KEEPS THE CHEATED VALUES.
+MAX GOTH                  [x] OFF [ ] ON
+MAX ITEM COUNTS           [x] OFF [ ] ON
+QUICK LEVEL GAIN          [x] OFF [ ] ON
+QUICK SOLDIER PROMOTION   [x] OFF [ ] ON
+UNLOCK ALL CLASSES        [x] OFF [ ] ON
+DAY ALWAYS 00             [x] OFF [ ] ON
+TIME OF DAY               [x] OFF [ ] 00 [ ] 01 ... [ ] 23
 ```
 
-A tab between SETTINGS and DEBUG, in the launcher and the `ESC` overlay. While a
-row is `ON`, `cheats_tick()` (`app/src/cheats.cpp`, called once per frame from
-the frame callback in `main.cpp`) writes its value into RDRAM, like a GameShark
-constant write; `OFF` stops the writes and leaves the current values.
+A tab between SETTINGS and DEBUG, in the launcher and the `ESC` overlay. The
+rows are the GameShark list for this ROM (USA v1.1, Rev 1). The data rows are
+held by `cheats_tick()` (`app/src/cheats.cpp`, called once per frame from the
+frame callback in `main.cpp`), like a GameShark constant write. The two battle
+rows patch instructions in bank J; the code is compiled C, so each one is a
+`[[patches.hook]]` in `config/banks/config-bankJ.toml` that calls into
+`cheats.cpp` and gives the patched instruction's result while the row is `ON`.
+`OFF` stops a cheat and leaves the current values. `TIME OF DAY` is one row, so
+only one hour can be held.
 
-| row | what it holds | evidence |
-|---|---|---|
-| `MAX GOTH` | goth, the u32 at `0x80196A8C`, at 9,999,999 | the shop compares it with the price (`lw` at `0x8021564C`, bank AB); the battle reward adds to it and clamps at the game's cap `0x0098967F` (bank N, `0x801E53B0`) |
-| `MAX ITEM COUNTS` | the count byte (`+0x03`) of every non-empty slot (u16 id at `+0x00` not 0) of the owned-item lists `0x80196B20` (278 slots) and `0x80193AE0` (40 slots), at 99 | the game's own debug cheat `func_ovlS_801C214C` walks the same two lists with the same test and sets 98 (`0x801C25B0`); 99 is the cap the grant routine keeps (`docs/notes-item-re.md`) |
+| row | GameShark code | what the port does | evidence |
+|---|---|---|---|
+| `MAX GOTH` | Infinite Goth, `81196A8C 0098` / `81196A8E 967F` | holds goth, the u32 at `0x80196A8C`, at 9,999,999 | the shop compares it with the price (`lw` at `0x8021564C`, bank AB); the battle reward adds to it and clamps at the game's cap `0x0098967F` (bank N, `0x801E53B0`) |
+| `MAX ITEM COUNTS` | none | holds the count byte (`+0x03`) of every non-empty slot (u16 id at `+0x00` not 0) of the owned-item lists `0x80196B20` (278 slots) and `0x80193AE0` (40 slots) at 99 | the game's own debug cheat `func_ovlS_801C214C` walks the same two lists with the same test and sets 98 (`0x801C25B0`); 99 is the cap the grant routine keeps (`docs/notes-item-re.md`) |
+| `QUICK LEVEL GAIN` | `D11D639C 2C42` / `811D639E 0000` | hook before `0x801D63A0` sets `v0` to 0 | `func_ovlJ_801D61C0` state 2: `lbu v0,50(s0)` (experience), `sltiu v0,v0,100` at `0x801D639C`, then `bnezl` skips the level-up `func_ovlJ_801D8E90`; the code makes the compare `sltiu v0,v0,0` |
+| `QUICK SOLDIER PROMOTION` | `D11D639C 2C42` / `811D25AA 9100` (x8 points; two battles for a two-soldier squad) | hook before `0x801D25DC` raises the leader's counter to 100..255 after any battle that earned points, so one battle promotes (developer, 2026-11-01) | `func_ovlJ_801D204C`: `s2` sums the HP thirds (0..3) of the participants with `+0x4C == 1` (the generic soldiers), `sll s2,s2,1` at `0x801D25A8` (the code makes it `sll s2,s2,4`), then adds to byte `+0x37` of the leader (`addu` at `0x801D25D8`). At 100 `func_ovlJ_801D12B0` / `func_ovlJ_801D0B80` turn one soldier into a Fighter (class 2) or Amazon (class 4), if the roster has fewer than 94 named units and the inventory has a spare of each starting item. That check is state 8, after the points (state 9) and the experience (state 5) of the same battle |
+| `UNLOCK ALL CLASSES` | `81196A96 F4FF` ... `80196AA0 0001` | ORs the code's 11 bytes into `0x80196A96` | the class-list bitfield, byte `class/8`, mask `1 << (class%8)` (table `0x801EF3D0`); `func_ovlS_801D736C` sets the bits of the roster's classes and `func_ovlS_801CF36C` reads them. The code's bytes leave class ids 0, 1, 3, 42 and 44 clear; the OR keeps those when the game set them |
+| `DAY ALWAYS 00` | `811F108C 0000` | holds the u16 at `0x801F108C` at 0 while record 7 is resident | the mission day, a u8 in record 7's BSS: `func_ovlN_801B134C` adds 1 per date change (capped at 99, `0x801B141C`), the field HUD draws two digits (`0x801BD168`). Unit X's record 10c and unit S's record 06 use the same RAM, so the write needs record 7's ROM words at `0x801B141C` and `0x801F0A18` in RDRAM |
+| `TIME OF DAY` | `80196A4D 00XX` | holds the low byte of the hour (u16 `0x80196A4C`) | `func_8016C81C` advances the hour at minute 60 and wraps it at 24, then advances the date; New Game sets 6. The clock keeps running, so hour 23 rolls to 24 and advances the date once per in-game hour |
 
-Each starts logging one line when it first changes the game
-(`[cheats] max goth: 0 -> 9999999`). Saved as `cheat_max_goth` and
-`cheat_max_items` (`off|on`). The published GameShark codes for the USA release
-target another revision: their goth address `0x80196A6C` is never read in this
-ROM, and their roster and goth addresses sit 0x20 bytes below this ROM's
-(`docs/symbols.md`).
+Each cheat logs one line when it first changes the game
+(`[cheats] max goth: 0 -> 9999999`). Saved as `cheat_max_goth`,
+`cheat_max_items`, `cheat_quick_level`, `cheat_quick_promotion`,
+`cheat_all_classes`, `cheat_day_zero` (`off|on`) and `cheat_hour`
+(`off|0..23`). The GameShark codes for USA v1.0 sit 0x20 bytes lower in the army
+block (goth `0x80196A6C`, never read in this ROM; `docs/symbols.md`).
 
 ### Quick save (F5) and quick load (F9)
 
@@ -844,8 +881,11 @@ state object (`*(u32*)0x80197B18`): `func_ovlM_8019AF0C` keeps
 `state+0x52`/`+0x54` clamped to x `0x28..0x110`, y `0x28..0xC0`, and the cursor
 draw `func_ovlM_801A103C` reads the pair at `0x801A1C48`/`0x801A1C4C`.
 `app/src/map_cursor.cpp` aspect-fits the 320x240 framebuffer in the drawable and
-writes the pointer's pixel there; `tools/map_cursor.py` inserts the call into
-the bank unit and `make bank-recomp` re-applies it. A pointer within 24 px of a
+writes the pointer's pixel there, clamped into the same play area
+(`ogre::map_cursor_bounds`, widened in widescreen): the draw reads the pair
+before the state machine clamps it again, so an unclamped pointer put the cursor
+under the frame. `tools/map_cursor.py` inserts the call into the bank unit and
+`make bank-recomp` re-applies it. A pointer within 24 px of a
 bound holds the matching D-pad bit, which scrolls the view, also from the
 pillarbox or a fullscreen border. The map also reads the analog stick at
 `*(0x800C47F0)+2`/`+3`.
@@ -1082,7 +1122,7 @@ All knobs default to off. Settings overrides apply for one run and never write
 |---|---|
 | `OGRE_SPEED=<n>` | GAME SPEED, 1..64. `OGRE_SPEED=8` reaches the attract loop's second variant in ~42 s instead of ~360 s |
 | `OGRE_WIDESCREEN=off\|on` | WIDESCREEN; each transition prints `[widescreen]` |
-| `OGRE_WS_SCENES=<hex>[,<hex>…]` | Expand scenes (default `0x03`, `0x0D`; HD-background scenes added) |
+| `OGRE_WS_SCENES=<hex>[,<hex>…]` | Expand scenes (default `0x03`, `0x0D`, `0x05`, `0x06`; HD-background scenes added). A set without `0x05` or `0x06` keeps the world map or the Organize Screen 4:3 |
 | `OGRE_RESOLUTION=native\|2x\|auto` | RESOLUTION |
 | `OGRE_CRT=off\|hyllian\|crts\|lottes` | CRT FILTER |
 | `OGRE_UPSCALE_2D=original\|scaled\|all` | RT64's `upscale2D` for 2D rectangles; default `original` (see "Display") |
@@ -1091,7 +1131,7 @@ All knobs default to off. Settings overrides apply for one run and never write
 | `OGRE_WINDOW=windowed\|fullscreen` | WINDOW |
 | `OGRE_SOUNDS=off\|on`, `OGRE_VOLUME=<0..100>` | SOUNDS, VOLUME |
 | `OGRE_MOUSE=off\|on` | MOUSE ENABLED |
-| `OGRE_CHEAT_MAX_GOTH=off\|on`, `OGRE_CHEAT_MAX_ITEMS=off\|on` | the CHEATS rows |
+| `OGRE_CHEAT_MAX_GOTH`, `OGRE_CHEAT_MAX_ITEMS`, `OGRE_CHEAT_QUICK_LEVEL`, `OGRE_CHEAT_QUICK_PROMOTION`, `OGRE_CHEAT_ALL_CLASSES`, `OGRE_CHEAT_DAY_ZERO` (`off\|on`); `OGRE_CHEAT_HOUR=off\|0..23` | the CHEATS rows |
 | `OGRE_GRAPHICS_API=<auto\|d3d12\|vulkan>` | pin RT64's backend. RT64 switches D3D12 to Vulkan on an old driver (NVIDIA ≤ 475.14, AMD ≤ Jan 2019, Intel 6th-gen ≤ 31.0.101.2115); the boot log names the GPU and whether the fallback ran |
 
 ### Logs, traces and dumps
@@ -1114,6 +1154,11 @@ All knobs default to off. Settings overrides apply for one run and never write
 | `OGRE_PROBE55=1` / `OGRE_PROBE57=1` | New Game sequence state on change: scene, `D_8018F1C0`, `D_8018F1C2`, plus script-buffer words (55) or the `0x0D` exit vtable `0x801D0830` and engine words `0x8023A994`/`0x8023A960`/`0x801DFC90` (57) |
 | `OGRE_DUMP_RDRAM=<path>` | the 8 MiB host RDRAM image at exit and beside `error.log` on a crash. See "Reading a dump" |
 | `OGRE_RAM_KEY=<1..9>` | that key writes `ram-<n>.bin` and `.txt` to `OGRE_RAM_KEY_OUT`, else `OGRE_PREF_DIR`, else `/tmp`. `_ADDR` (default `0x802696C8`), `_LEN` (`0x1000`), `_STRIDE` (summary slot size, `0x80`; marks empty slots), `_AT_MS` (one timed dump), `_FULL=1` (whole image, ROM order, `ram-<n>-full.bin`). `tools/ogre_ram.py` reads it (`find-ptr`, `cell`, `empty-cells`) |
+| `OGRE_AUDIO_STATS=1` | one `[audio]` line per second from the output callback (`app/src/audio_out.cpp`): AI buffers pushed (frame sizes, longest gap between pushes), device pulls, `under` (pulls that found less than a chunk while playing; each is an audible break), the silence played, and the FIFO depth the pulls found; running totals at the end of the line |
+| `OGRE_AUDIO_REFILL_MS=<n>` | the refill threshold, default 40, at most 48 (below the runtime's 52 ms busy cushion). At open and after an underrun the output plays silence until the FIFO holds `n` ms, so a starved FIFO gives one gap instead of seconds of partial chunks while the game catches up at 3.5% above the DAC rate. `0` plays partial chunks padded with silence, as SDL's queue did |
+| `OGRE_AUDIO_SINK=<path>` | with `OGRE_NO_AUDIO=1`: no device; a thread drains the FIFO on a real-time clock in SDL's WASAPI pull pattern and writes raw S16LE stereo at the game's rate (32000 Hz) to `<path>`. The game's pacing then sees a device's queue, so a run without sound can measure underruns (pair with `OGRE_AUDIO_STATS=1`) |
+| `OGRE_AUDIO_MARK_KEY=<1..9>` | each press of that digit prints `[audio] mark <n> t=…s`, to stamp a click the listener heard into the stats log |
+| `OGRE_AUDIO_RESAMPLE=app` | open the device at the default output device's own rate and convert the game's 32000 Hz in the callback with SDL's resampler (`SDL_AudioStream`). Default: the device is opened at 32000 Hz and SDL's WASAPI backend has the Windows audio engine convert (`AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`). The open prints `[audio] device opened at …` with the mode |
 
 ### Renderer diagnostics
 
@@ -1145,7 +1190,7 @@ All knobs default to off. Settings overrides apply for one run and never write
 | Variable | Effect |
 |---|---|
 | `OGRE_RECT_LR_FIX=1` | restore RT64's "Fix LR with Scissor" (off here): it widened a rectangle one pixel inside the scissor, and the unit profile's last DEF/MDEF digit sampled the next font cell (session 101) |
-| `OGRE_OVERSCAN=<0..8>` | crop off the framebuffer's right/bottom edge (default 1 px). OB64's scissor covers 319x239 of 320x240, and the last row and column flicker with leftovers. Framebuffers are sized from the VI (`framebufferHeightForDisplay`) |
+| `OGRE_OVERSCAN=<0..8>` | crop off the framebuffer's right/bottom edge (default 1 px). OB64's scissor covers 319x239 of 320x240, and the last row and column flicker with leftovers. Framebuffers are sized from the VI (`framebufferHeightForDisplay`). The app can switch the crop off through `ogre_overscan_crop_override()`; the world map does while it is drawn wide, because its frame covers that row and column |
 | `OGRE_FB_GPU_COPY=0` | turn off RT64's `framebuffer.copyWithGPU`, so every texture load reads RDRAM |
 | `OGRE_NOP_RECT=<selectors>` | replace matching `G_TEXRECT`s with `G_SPNOOP` (`any`, `tex:<hex>`, `flip`, `x:<a>-<b>`, `y:<a>-<b>`, `n:<index>`) |
 | `OGRE_EMPTY_TILE=draw` | draw rectangles whose tile covers zero texels |
@@ -1175,7 +1220,7 @@ All knobs default to off. Settings overrides apply for one run and never write
 | `OGRE_NJPEG_TRACE=1` | `[njpeg]` the colour image the YUV draw landed in (RT64's never-cleared scratch word) |
 | `OGRE_NJREAD_LOG=1` | `[njread]` per stage-3 pass; see "`OGRE_NJREAD_LOG`" |
 | `OGRE_BG=0`, `OGRE_BG_DIR=<dir>` | run without the `mods/backgrounds/` pack / use only that folder (`docs/guides/hd-backgrounds.md`) |
-| `OGRE_BG_LOG=1`, `OGRE_BG_DEBUG=1` | `[hdbg]` per pass and chunk / paint the four passes in solid colours |
+| `OGRE_BG_LOG=1`, `OGRE_BG_DEBUG=1` | `[hdbg]` per pass and chunk, and the title's and Load Game's backdrop, fog edges and dropped desk / paint the four passes in solid colours |
 | `OGRE_BG_DUMP=<dir>` | write the game's 496x384 backdrop as `original-step<NNNN>.png` (`tools/backgrounds.py`, `make bg-extract`) |
 | `OGRE_BG_HD=0` | keep the pack's game-resolution backdrop and skip its HD strips (`mods/backgrounds/hd/`, `make bg-hd`) |
 
@@ -1385,7 +1430,11 @@ The usual cause is a work loop whose backward branch `is_yield_poll_loop`
 (`tools/N64Recomp/src/recompilation.cpp`) took for a poll: it terminates on a
 counter or on data already present. The fix is an entry in the unit's
 `yield_work_loop_branches` (`config/banks/config-bank<U>.toml`); current entries
-are `0x801B3008`, `0x801DA2C0`, `0x801D0C08`, `0x8020A910`, `0x80204C48`.
+are `0x801B3008`, `0x801DA2C0`, `0x801D0C08`, `0x8020A910`, `0x80204C48` (unit
+N) and `0x80227770` (unit C, the Hugo Report's list walk in
+`func_ovlC_80227718`: 7.5 display lists/s before, 30 after). A loop that walks a
+list and compares each node with `0($a1)`, a base the loop never writes, looks
+like a poll to the heuristic.
 
 ### `make elf-rom-check`
 

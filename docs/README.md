@@ -14,7 +14,9 @@ handoffs and the status log were removed on 2026-10-30 and are in git history.
 | [guides/app-architecture.md](guides/app-architecture.md) | The app's layout, runtime flow and callbacks. |
 | [guides/rsp-microcode.md](guides/rsp-microcode.md) | Which RSP microcodes are recompiled (njpeg, audio) and how. |
 | [guides/njpeg-backgrounds.md](guides/njpeg-backgrounds.md) | The njpeg background pipeline: assets, tile geometry, the readback, how to check one. |
-| [guides/hd-backgrounds.md](guides/hd-backgrounds.md) | The `mods/backgrounds/` PNG pack that replaces dialogue/cutscene backdrops. |
+| [guides/hd-workflow.md](guides/hd-workflow.md) | The procedure for replacing art with HD art: which mechanism, finding a screen's draw, making the art (outpaint and upscale), wiring a screen backdrop, building the HD strips, texture-pack entries without a hook, traps. |
+| [guides/hd-backgrounds.md](guides/hd-backgrounds.md) | The `mods/backgrounds/` PNG pack: dialogue/cutscene backdrops, the screen backdrops (title, Load Game, Hugo Report) and their HD strips. |
+| [guides/widescreen.md](guides/widescreen.md) | Widening a screen: what RT64's Expand does to 3D and 2D draws, the extended-GBI rules, patching a 2D screen's draw, the world map as the worked example. |
 | [guides/sprite-mechanisms.md](guides/sprite-mechanisms.md) | How sprites and text are drawn: the part cache, the cutscene draw list, the map's sprite rectangles, checking a draw. |
 | [scenes.md](scenes.md) | What each screen should show, from the developer (the AGENTS rule 1 oracle). |
 | [symbols.md](symbols.md) | Proposed symbol names: address → name → evidence → confidence. |

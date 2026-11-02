@@ -31,3 +31,18 @@ functions_per_output_file = 100
 # moved to config/banks/config-bankF.toml with it (session 45); the 0x8022EA08 switch
 # override moved to config/banks/config-bankL.toml with bankRec14a (this session).
 function_sizes = []
+
+# Work loops the recompiler's poll-loop heuristic would give a yield_self
+# (docs/guides/app-build.md -> "A slow screen").
+#
+# 0x80227770 (ROM 0x2836F0, `bne $a0, $zero, 0x80227750`, delay slot nop) is
+# the back edge of func_ovlC_80227718's list walk: it follows `node = node[+4]`
+# until the list ends or `node[+0xD0][+0x600]` equals `*(obj + 0)`. The compare
+# reads `0($a1)`, a base the loop never writes, so the heuristic took it for a
+# poll; the loop ends on the list's null tail. The Hugo Report (scene 0x08,
+# reached from the map's R menu) calls it every frame through
+# func_ovlC_802282D8. With the yield, every node waited for the next external
+# event: 7.5 display lists/s (133 ms apart) against the map's 30, and
+# OGRE_PROFILE put the frame-pump thread in this function in 73-77 % of
+# samples (developer report 2026-11-01: "it lags badly").
+yield_work_loop_branches = [0x80227770]

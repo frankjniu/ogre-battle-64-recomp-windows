@@ -22,7 +22,19 @@
 # the cathedral (Archbishop Odiron). The opening's steps 1..19 are decoded in
 # docs/HANDOFF-2026-09-15-session44.md.
 #
+# Scenes 0x04 (the title), 0x08 (the Hugo Report) and 0x12 (the Load Game
+# book) take screen backdrops: the port draws the whole image behind the game's
+# own logo, text, sprites, windows and book, 240 rows tall with its aspect kept
+# and centred, so an image wider than 4:3 fills the widescreen sides. They have
+# no step; the line carries `-`. title.png, loadgame.png, hugo.png and
+# hugo-wide.png are AI-upscaled and outpainted from the game's own art, so they
+# are not in the repository (see docs/guides/hd-backgrounds.md -> "Screen
+# backdrops").
+#
 # Lines that start with '#' and blank lines are ignored.
 #
 # id  name       scene step
 01    cathedral  0x0D  2
+02    title      0x04  -
+03    loadgame   0x12  -
+04    hugo       0x08  -

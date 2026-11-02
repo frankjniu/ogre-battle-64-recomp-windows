@@ -101,3 +101,34 @@ yield_work_loop_branches = [0x801B3008, 0x801DA2C0, 0x801D0C08, 0x8020A910, 0x80
 # Extend any piece it still caps in the middle of a call-and-continue emission
 # here (the failure is "use of undeclared label" at the `goto after_N`).
 function_sizes = []
+
+# ---------------------------------------------------------------------------
+# WIDESCREEN on the mission field (app/src/mission_widescreen.cpp). The mover
+# func_ovlN_801BE4E0 clamps the cursor's x to [40, 280] at 0x801BEB7C..0x801BEBB8,
+# and the camera pans only when that clamp moves the cursor (0x801BEC0C). The
+# first hook saves x before the clamp, the second re-clamps it to
+# [40 - e, 280 + e]. Both are no-ops while `ogre::widescreen_2d_extension()` is 0.
+[[patches.hook]]
+func = "func_ovlN_801BE4E0"
+before_vram = 0x801BEB74
+text = "{ void ogre_msws_cursor_pre(uint8_t*); ogre_msws_cursor_pre(rdram); }"
+
+[[patches.hook]]
+func = "func_ovlN_801BE4E0"
+before_vram = 0x801BEBC4
+text = "{ void ogre_msws_cursor_post(uint8_t*); ogre_msws_cursor_post(rdram); }"
+
+# The cursor draw, func_ovlN_801BBA40(x, y): a flag for its duration, set at its
+# entry and cleared at its epilogue (0x801BCD00, which every path reaches).
+# While it is set and the picture is wide, the 2D blitter func_80176C8C draws a
+# rectangle that crosses the 320x240 edge unclipped (hook in config/config.toml),
+# so the cursor stays visible past the 4:3 edge.
+[[patches.hook]]
+func = "func_ovlN_801BBA40"
+before_vram = 0x801BBA40
+text = "{ void ogre_msws_cursor_draw_begin(void); ogre_msws_cursor_draw_begin(); }"
+
+[[patches.hook]]
+func = "func_ovlN_801BBA40"
+before_vram = 0x801BCD00
+text = "{ void ogre_msws_cursor_draw_end(void); ogre_msws_cursor_draw_end(); }"

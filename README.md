@@ -26,7 +26,8 @@ Changes since upstream's v0.8.3 release:
   portraits) is sampled at the console's pixel positions, so it shows no seams at
   high resolution.
 - **CRT filters:** HYLLIAN, CRTS and LOTTES.
-- **Cheats:** MAX GOTH and MAX ITEM COUNTS.
+- **Cheats:** MAX GOTH, MAX ITEM COUNTS and the USA v1.1 GameShark list (quick
+  level gain, quick soldier promotion, all classes, day 00, time of day).
 - **Quick save and quick load** with F5 and F9.
 - **Replacement dialogue backdrops,** including higher-resolution images through
   an RT64 texture pack. The repository ships one test image;
@@ -52,7 +53,7 @@ saved in `settings.cfg` or `controls.cfg` beside the executable.
 | SOUNDS, VOLUME | Sound on or off, and the output volume. |
 | CONTROLS | Rebind every N64 button on the keyboard and on an XInput gamepad. |
 | MOUSE | The pointer drives the world-map and mission-field cursors. Off by default. |
-| CHEATS | MAX GOTH holds goth at 9,999,999; MAX ITEM COUNTS holds every owned item at 99. |
+| CHEATS | MAX GOTH holds goth at 9,999,999; MAX ITEM COUNTS holds every owned item at 99; QUICK LEVEL GAIN and QUICK SOLDIER PROMOTION act on each battle result; UNLOCK ALL CLASSES fills the class list; DAY ALWAYS 00 holds the mission day; TIME OF DAY holds one hour. |
 | Quick save | `F5` copies the battery save to a quick slot; `F9` twice restores it and restarts the game. |
 | Mods | `.nrm` code mods in `mods/`, turned on one by one on the MODS tab. The package ships three, all off: Skip Boot Logos, EXP Overflow and Item Randomizer (experimental). |
 | Saves | The battery save is `saves/ogrebattle64-us-rev1.bin`. `tools/sramsave.py` imports emulator saves (mupen64plus `.srm`, parallel-n64, DexDrive `.N64`). |
@@ -143,4 +144,21 @@ the results are quite impressive!
 Ogre Battle 64 © Quest / Nintendo. This project is for preservation and
 interoperability research. Never distribute the ROM or its extracted assets.
 
+## License
+
+The code in this repository is licensed under the GNU General Public License,
+version 3. `LICENSE` holds the full text. The app links [N64ModernRuntime]
+(GPL-3.0) statically, so the executable as a whole is GPL-3.0.
+
+The license covers the port's own work: the app sources, the configs, the
+scripts in `tools/`, the patches and the example mods. It does not cover Ogre
+Battle 64 or anything taken from its ROM: the disassembly in `asm/`, the C that
+the recompilers generate, and the game's graphics in the screenshots and
+captures under `docs/` and `debug/`.
+
+Third-party components keep their own licenses: [N64Recomp] and [RT64] are MIT,
+and SDL2 is zlib.
+
 [N64Recomp]: https://github.com/N64Recomp/N64Recomp
+[N64ModernRuntime]: https://github.com/N64Recomp/N64ModernRuntime
+[RT64]: https://github.com/rt64/rt64

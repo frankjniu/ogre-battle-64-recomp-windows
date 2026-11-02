@@ -306,10 +306,12 @@ bg-extract:
 # the game draws. Needs a built app, the ROM and Pillow; gitignored output.
 #
 #   make bg-hd                   # id 01 (the cathedral)
-#   make bg-hd BG_ID=02 BG_ROM=<rom>
+#   make bg-hd BG_ID=02 BG_ROM=<rom>                    # the title
+#   make bg-hd BG_ID=03 BG_ROM=<rom> BG_SAVE=<battery>  # the Load Game book
+#   make bg-hd BG_ID=04 BG_ROM=<rom> BG_SAVE=<battery>  # the Hugo Report (a save on the map)
 .PHONY: bg-hd
 bg-hd:
-	python3 tools/backgrounds.py hd $(or $(BG_ID),01) $(if $(BG_ROM),--rom "$(BG_ROM)")
+	python3 tools/backgrounds.py hd $(or $(BG_ID),01) $(if $(BG_ROM),--rom "$(BG_ROM)") $(if $(BG_SAVE),--save "$(BG_SAVE)")
 
 # ---------------------------------------------------------------------------
 # Streamed-overlay bank units (Phase 4). Independent splat + link + N64Recomp
@@ -773,6 +775,8 @@ dist: dist-mods-check app
 	  ldd "$(DIST_BIN_DIR)/$(EXE_NAME)" 2>/dev/null | grep -vE "linux-vdso|libc\.so|libm\.so|libstdc\+\+|libgcc|ld-linux|libpthread|libdl|librt" || echo "    (none beyond libc)"; \
 	fi
 	cp "$(CURDIR)/packaging/README-dist.txt" "$(DIST_DIR)/README.txt"
+	# GPL-3.0 section 4 requires a copy of the license with every copy of the program.
+	cp "$(CURDIR)/LICENSE" "$(DIST_DIR)/LICENSE.txt"
 	# Example mods are part of the package: the README lists them and the
 	# client's MODS tab reads them. `dist-mods-check` (a prerequisite of this
 	# target) has already failed if build/mods holds none, so the copy cannot

@@ -34,7 +34,7 @@ ending and the attract loop.
 - **Player features:** launcher and in-game `ESC` overlay (MAIN, MODS, CONTROLS,
   SETTINGS, DEBUG), rebindable keyboard and pad, GAME SPEED 1/2/4/8, WIDESCREEN
   for the mission field, CRT FILTER (HYLLIAN, CRTS, LOTTES), CHEATS (MAX GOTH,
-  MAX ITEM COUNTS), quick save and quick load of the battery save (F5/F9),
+  MAX ITEM COUNTS, the USA v1.1 GameShark list), quick save and quick load of the battery save (F5/F9),
   mouse support on
   the world map and the mission field (off by default), mods (`exp-overflow`,
   `skip-boot-logos`, `item-randomizer`),
@@ -78,10 +78,39 @@ known and what the next step is.
     does not show it, with the filter on or off. Next step: the developer turns
     CRT FILTER off on the screen that shows the line; if the line stays, capture
     the fullscreen frame with `OGRE_CAPTURE_PRESENT`.
+3. **Widescreen on more 2D screens.** The world map (`0x05`) is wide, and so is
+    the Organize Screen (`0x06`); the method is `docs/guides/widescreen.md`.
+    The map's frame now sits on all four edges of the picture with the map
+    filling the inside, and the mouse cursor is clamped to the play area
+    (developer report 2026-11-01: black edges on the top, left and right, the
+    cursor going under them, and scrolling to the bottom "a little weird
+    sometimes"). Checked at 16:9 windowed: all four edges covered, both scroll
+    ends at (E + 14, 15) and (238 − E, 124), the D-pad cursor at both corners,
+    WIDESCREEN off unchanged. Not run: the mouse pointer on the map (the clamp is
+    code-read only), the location plate and the fade with the new offsets, 21:9
+    and fullscreen. The bottom-scroll report has no identified cause; the
+    unclamped mouse cursor (it went under the bottom bar and the panel) is the
+    candidate. The map draw's other branch (`state+0x1C4` ≥ 101, `0x801A1088`;
+    the patched branch is `0x801A13C4`) stays 4:3, and the Organize name plate
+    (`0x801B2000`) at the right edge needs a unit selected. The mission field cursor now reaches the wide edges
+    before the camera pans (developer report: it stopped at the 4:3 edge);
+    built, not yet run in a mission. Next step: the developer checks the map
+    (frame, plate, mouse cursor, scrolling to the bottom), the name plate and
+    the mission cursor at both edges (D-pad and mouse), and names the next
+    screens to widen and what their extra width should show.
+4. **`OGRE_CAPTURE_TARGET` segfaults at its first capture.** A run with it set
+    exits 139 with an empty `error.log` when the first capture fires; the
+    installed 2026-11-01 build does the same, and runs without it are clean
+    (2026-11-01, 15 runs). `OGRE_CAPTURE_PRESENT` works. Suspect: the
+    render-target readback in `rt64_present_queue.cpp` copies a
+    `R16G16B16A16_UNORM` target into a footprint declared `R8G8B8A8_UNORM`.
+    Next step: match the footprint to `ogreCapture.targetFormat` and the buffer
+    size to it, then capture once on the map.
 
 ### Features and mods
 
-2. **HD backgrounds beyond the cathedral.** `mods/backgrounds/` writes a
+2. **HD backgrounds beyond the cathedral.** The procedure for any new
+    replacement is `docs/guides/hd-workflow.md`. `mods/backgrounds/` writes a
     backdrop at the game's resolution, and `tools/backgrounds.py hd` (`make
     bg-hd`) cuts RT64 replacement strips from the same PNG, one per `G_LOADTILE`
     strip hash (`docs/guides/hd-backgrounds.md`). Only the cathedral (scene
@@ -92,6 +121,59 @@ known and what the next step is.
     the next backdrop (scene and step) and supplies art; map it in
     `backgrounds.txt`, run `make bg-extract` and `make bg-hd`, and generalise
     `chunk_rect` if the check fails.
+3. **The title, Load Game and Hugo Report screen backdrops.** The title
+    (`0x04`), the Load Game book (`0x12`) and the Hugo Report (`0x08`) draw a
+    16:9 pack image behind the game's own logo, menu, windows, sprites and book
+    (`app/src/screen_backdrops.cpp`; hd-backgrounds.md → "Screen backdrops"),
+    with HD strips from `make bg-hd BG_ID=02` / `03` / `04` (`--save` for `03`
+    and `04`). The art is AI-outpainted and upscaled from the game's own
+    backdrops on the developer's Higgsfield account, so `title.png`,
+    `loadgame.png`, `hugo.png` and `hugo-wide.png` are gitignored and only in
+    this checkout. Checked at 16:9 windowed: all three fill the width, the
+    title's soldiers and hill line up with the image, the title menu and New
+    Game from it; the title and the book at 4:3. The Hugo Report was approved
+    by the developer at 16:9 (2026-11-01). Not run: 21:9, fullscreen, picking a
+    slot from the book, the Hugo Report at 4:3 (`hugo.png`) and its Events,
+    Miscellany and Tips pages (a page that draws another image through
+    `func_ovlK_802349AC` keeps the game's). The play install has the title and
+    Load Game art, not the Hugo Report's. Next step: the developer decides
+    whether the art ships (it is derived from the ROM) and how: `make dist`
+    leaves `mods/backgrounds/` out.
+4. **HD art, in order of return.** `tools/hdtex.py` replaces any texture whose
+    texels are the same each time it loads, with no game patch: `scan` reads an
+    `OGRE_DUMP_TEX` dump and rebuilds each source image from its loads, `prep`
+    makes the upscaler input, the Higgsfield 4k upscale makes the art (2
+    credits; a failed job is refunded), `pack` writes one replacement per hash
+    and keeps the HD master in `mods/backgrounds/hd-src/`, and `repack` cuts
+    the masters again after a draw change (`hd-workflow.md` section 7). HD
+    detail shows above RESOLUTION 1x with CRT FILTER off (Display item 1).
+    The order:
+    1. **Shared UI art** (2026-11-01, not yet seen by the developer): the
+       Organize Screen's cobblestone, parchment and grid blocks, the map's
+       stone frame and MONTH/DATE panel, the title logo. Checked in captures:
+       the Organize Screen at 16:9 and the map frame at 4:3. Next step: the
+       developer looks at them in game.
+    2. **Mission field and battles**, where most play time goes. No dump
+       exists: the battery save has no suspend slot, and a route there needs
+       play. Next step: the developer plays one mission with a battle and a
+       dialogue with `OGRE_DUMP_TEX` set (command in `hd-workflow.md` section
+       7); the scan then lists terrain, battle backgrounds, portraits, unit
+       sprites and windows to rank.
+    3. **World map painting**: a 512x320 CI8 image (`state+0x00`, TLUT first;
+       `state = *(u32*)0x80197B18`). Each terrain strip loads 256 texels from
+       the scroll position, so every scroll offset has new hashes and the pack
+       cannot reach it. Next step: draw the terrain in fixed 64x32 tiles from
+       the hook in `func_ovlM_801A103C` so each tile keeps one hash, after the
+       map's widescreen rework (Display item 3) is settled.
+    4. **Dialogue backdrops** (`njpeg`, 75 assets, 42 of them 320x240): the
+       pack keys a backdrop by scripted step and knows only the cathedral's
+       four-chunk layout (item 2). Next step: key it by asset, accept the
+       single-image layout, then upscale the set.
+    5. **Unit sprites**: many small pixel-art frames per class and palette;
+       the AI upscale changes the pixel-art look. Next step: one class's frames
+       as a trial for the developer to judge before a batch.
+    6. **Text** is composited into buffers at run time (`func_801A8124`), so
+       a hash cannot name a glyph. Parked.
 
 ### Parked
 

@@ -35,8 +35,10 @@ Arena layout that the addresses below depend on (all chunk-DMA'd into `0x801AD5C
   `0x801D618C trunc.w.s`.
 - Caller state 1 of `func_ovlJ_801D61C0` (`0x801D629C-0x801D6344`): `s0 = func_ovlJ_801D5DFC(p)`,
   then `func_ovlJ_801E34F8(a0=p, a1=17, a2=s0)` (`0x801D631C`) and `lbu v0,50(p); v0 += s0; sb v0,50(p)`
-  (`0x801D6324-0x801D6330`) — `p+0x32` is a 0..99 counter: state 2 (`0x801D6398 sltiu v0,v0,100`,
-  `0x801D63b0 sb zero,50(s0)`) consumes it as experience and levels the unit up.
+  (`0x801D6324-0x801D6330`) — `p+0x32` is a 0..99 counter: state 2 (`0x801D6398 lbu v0,50(s0)`,
+  `0x801D639C sltiu v0,v0,100`, `0x801D63b0 sb zero,50(s0)`) consumes it as experience and levels
+  the unit up. (Corrected 2026-11-01: the `sltiu` is at `0x801D639C`, the address the v1.1
+  GameShark "Quick Level Gain" code tests.)
 - No item-id table is read anywhere in `0x801D5DFC`. `func_ovlJ_801E34F8` (`0x801E34F8`) only enqueues
   `{type=+0x08, participant=+0x0C, payload=+0x10}` into the 0x84-byte record queue at `0x801D083C`.
 

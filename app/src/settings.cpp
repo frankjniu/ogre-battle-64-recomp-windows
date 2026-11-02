@@ -40,8 +40,27 @@ DisplayMode g_display = DisplayMode::Windowed;
 SoundMode g_sound = SoundMode::On;
 int g_volume = kVolumeDefaultPercent;
 MouseMode g_mouse = MouseMode::Off;
-bool g_cheat_max_goth = false;
-bool g_cheat_max_items = false;
+
+// The CHEATS rows. The main thread writes them; the bank J hooks read the two
+// battle cheats from the game's threads, hence the atomics.
+struct CheatInfo {
+    const char* key;       // settings.cfg key
+    const char* env;       // one-run override
+    const char* log_name;  // `[settings] cheat <log_name> on|off`
+};
+
+constexpr CheatInfo kCheatInfo[kCheatCount] = {
+    {"cheat_max_goth", "OGRE_CHEAT_MAX_GOTH", "max goth"},
+    {"cheat_max_items", "OGRE_CHEAT_MAX_ITEMS", "max item counts"},
+    {"cheat_quick_level", "OGRE_CHEAT_QUICK_LEVEL", "quick level gain"},
+    {"cheat_quick_promotion", "OGRE_CHEAT_QUICK_PROMOTION", "quick soldier promotion"},
+    {"cheat_all_classes", "OGRE_CHEAT_ALL_CLASSES", "unlock all classes"},
+    {"cheat_day_zero", "OGRE_CHEAT_DAY_ZERO", "day always 00"},
+};
+
+std::atomic<bool> g_cheats[kCheatCount] = {};
+// -1 = OFF, else the held hour 0..23.
+std::atomic<int> g_cheat_hour{-1};
 
 // Defined below, after the gate that decides whether the two experimental values
 // are applied at all.
@@ -359,6 +378,22 @@ bool parse_cheat(const std::string& text, const char* key) {
     return value == "on" || value == "1" || value == "true" || value == "yes";
 }
 
+// `cheat_hour = off` or an hour `0..23` (decimal). A missing, unparsable or
+// out-of-range value is the default, off (-1).
+int parse_cheat_hour(const std::string& text) {
+    const std::string value = setting_value(text, "cheat_hour");
+    char* value_end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &value_end, 10);
+    if (value_end == value.c_str() || *value_end != '\0' || parsed < 0 || parsed > 23) {
+        return -1;
+    }
+    return static_cast<int>(parsed);
+}
+
+std::string cheat_hour_key(int hour) {
+    return hour < 0 ? std::string("off") : std::to_string(hour);
+}
+
 // `volume = <n>` in percent, clamped to 0..100. A missing or unparsable value
 // is the default, 100.
 int parse_volume(const std::string& text) {
@@ -398,7 +433,7 @@ void write_settings() {
         std::fprintf(stderr, "[settings] could not write %s\n", path.string().c_str());
         return;
     }
-    const std::string text =
+    std::string text =
         "# Ogre Battle 64: Recomp settings.\n"
         "# Edited from the launcher's SETTINGS tab, or the in-game Esc overlay.\n"
         "# game_speed: the emulated clock's multiplier (1, 2, 4 or 8).\n"
@@ -420,10 +455,17 @@ void write_settings() {
         "# mouse: off or on. on lets the pointer drive the world map's and the\n"
         "# mission field's cursors, including the click and the edge scroll.\n"
         "mouse = " + lowercase(mouse_mode_label(static_cast<int>(g_mouse))) + "\n"
-        "# cheat_max_goth, cheat_max_items: off or on. While on, the value is held\n"
-        "# every frame (goth at 9,999,999; every owned item at 99).\n"
-        "cheat_max_goth = " + std::string(g_cheat_max_goth ? "on" : "off") + "\n"
-        "cheat_max_items = " + std::string(g_cheat_max_items ? "on" : "off") + "\n";
+        "# The CHEATS tab, each off or on: max goth (9,999,999), max item counts\n"
+        "# (99), quick level gain and quick soldier promotion (battle results),\n"
+        "# unlock all classes (the class list), day always 00 (the mission day).\n";
+    std::string cheats;
+    for (int i = 0; i < kCheatCount; i++) {
+        cheats += std::string(kCheatInfo[i].key) + " = " +
+                  (g_cheats[i].load(std::memory_order_relaxed) ? "on" : "off") + "\n";
+    }
+    cheats += "# cheat_hour: off, or the hour 0..23 the game clock is held at.\n"
+              "cheat_hour = " + cheat_hour_key(g_cheat_hour.load(std::memory_order_relaxed)) + "\n";
+    text += cheats;
     std::fwrite(text.data(), 1, text.size(), file);
     std::fclose(file);
 }
@@ -803,46 +845,65 @@ std::string mouse_mode_text() {
     return text;
 }
 
-bool cheat_max_goth() {
-    return g_cheat_max_goth;
+bool cheat_enabled(Cheat cheat) {
+    const int i = static_cast<int>(cheat);
+    return i >= 0 && i < kCheatCount && g_cheats[i].load(std::memory_order_relaxed);
 }
 
-int cheat_max_goth_index() {
-    return g_cheat_max_goth ? 1 : 0;
+int cheat_index(Cheat cheat) {
+    return cheat_enabled(cheat) ? 1 : 0;
 }
 
-void set_cheat_max_goth(bool on) {
-    if (on == g_cheat_max_goth) {
+void set_cheat(Cheat cheat, bool on) {
+    const int i = static_cast<int>(cheat);
+    if (i < 0 || i >= kCheatCount || on == cheat_enabled(cheat)) {
         return;
     }
-    g_cheat_max_goth = on;
+    g_cheats[i].store(on, std::memory_order_relaxed);
     write_settings();
-    std::fprintf(stderr, "[settings] cheat max goth %s\n", on ? "on" : "off");
+    std::fprintf(stderr, "[settings] cheat %s %s\n", kCheatInfo[i].log_name, on ? "on" : "off");
 }
 
-std::string cheat_max_goth_text() {
-    return radio_text(mouse_mode_label, kMouseModeCount, cheat_max_goth_index());
+std::string cheat_text(Cheat cheat) {
+    return radio_text(mouse_mode_label, kMouseModeCount, cheat_index(cheat));
 }
 
-bool cheat_max_items() {
-    return g_cheat_max_items;
+int cheat_hour() {
+    return g_cheat_hour.load(std::memory_order_relaxed);
 }
 
-int cheat_max_items_index() {
-    return g_cheat_max_items ? 1 : 0;
+int cheat_hour_index() {
+    return cheat_hour() + 1;
 }
 
-void set_cheat_max_items(bool on) {
-    if (on == g_cheat_max_items) {
+void set_cheat_hour_index(int index) {
+    if (index < 0 || index >= kCheatHourOptionCount || index == cheat_hour_index()) {
         return;
     }
-    g_cheat_max_items = on;
+    g_cheat_hour.store(index - 1, std::memory_order_relaxed);
     write_settings();
-    std::fprintf(stderr, "[settings] cheat max item counts %s\n", on ? "on" : "off");
+    std::fprintf(stderr, "[settings] cheat time of day %s\n",
+                 cheat_hour_label(index).c_str());
 }
 
-std::string cheat_max_items_text() {
-    return radio_text(mouse_mode_label, kMouseModeCount, cheat_max_items_index());
+std::string cheat_hour_label(int index) {
+    if (index <= 0 || index >= kCheatHourOptionCount) {
+        return "OFF";
+    }
+    char buffer[8];
+    std::snprintf(buffer, sizeof(buffer), "%02d", index - 1);
+    return buffer;
+}
+
+std::string cheat_hour_text() {
+    std::string text;
+    for (int i = 0; i < kCheatHourOptionCount; i++) {
+        if (!text.empty()) {
+            text += "  ";
+        }
+        text += std::string(i == cheat_hour_index() ? "[x] " : "[ ] ") + cheat_hour_label(i);
+    }
+    return text;
 }
 
 int volume_percent() {
@@ -901,8 +962,8 @@ void load_settings(const std::filesystem::path& pref_dir) {
     SoundMode sound = SoundMode::On;
     int volume = kVolumeDefaultPercent;
     MouseMode mouse = MouseMode::Off;
-    bool max_goth = false;
-    bool max_items = false;
+    bool cheats[kCheatCount] = {};
+    int hour = -1;
     bool have_file = false;
     const std::string text = read_file(settings_path(pref_dir), have_file);
     if (have_file) {
@@ -917,8 +978,10 @@ void load_settings(const std::filesystem::path& pref_dir) {
         sound = parse_sound(text);
         volume = parse_volume(text);
         mouse = parse_mouse(text);
-        max_goth = parse_cheat(text, "cheat_max_goth");
-        max_items = parse_cheat(text, "cheat_max_items");
+        for (int i = 0; i < kCheatCount; i++) {
+            cheats[i] = parse_cheat(text, kCheatInfo[i].key);
+        }
+        hour = parse_cheat_hour(text);
     }
     if (const int env = env_game_speed(); env != 0) {
         // A developer run names its speed on the command line; the value is
@@ -972,19 +1035,35 @@ void load_settings(const std::filesystem::path& pref_dir) {
         mouse = parse_mouse(std::string("mouse = ") + env);
         std::fprintf(stderr, "[settings] OGRE_MOUSE=%s overrides the saved mouse mode\n", env);
     }
-    // OGRE_CHEAT_MAX_GOTH and OGRE_CHEAT_MAX_ITEMS=off|on: the same one-run
+    // OGRE_CHEAT_<NAME>=off|on and OGRE_CHEAT_HOUR=off|0..23: the same one-run
     // rule, for the CHEATS tab.
-    if (const char* env = std::getenv("OGRE_CHEAT_MAX_GOTH"); env != nullptr && env[0] != '\0') {
-        max_goth = parse_cheat(std::string("cheat_max_goth = ") + env, "cheat_max_goth");
-        std::fprintf(stderr, "[settings] OGRE_CHEAT_MAX_GOTH=%s overrides the saved cheat\n", env);
+    for (int i = 0; i < kCheatCount; i++) {
+        const CheatInfo& info = kCheatInfo[i];
+        if (const char* env = std::getenv(info.env); env != nullptr && env[0] != '\0') {
+            cheats[i] = parse_cheat(std::string(info.key) + " = " + env, info.key);
+            std::fprintf(stderr, "[settings] %s=%s overrides the saved cheat\n", info.env, env);
+        }
     }
-    if (const char* env = std::getenv("OGRE_CHEAT_MAX_ITEMS"); env != nullptr && env[0] != '\0') {
-        max_items = parse_cheat(std::string("cheat_max_items = ") + env, "cheat_max_items");
-        std::fprintf(stderr, "[settings] OGRE_CHEAT_MAX_ITEMS=%s overrides the saved cheat\n", env);
+    if (const char* env = std::getenv("OGRE_CHEAT_HOUR"); env != nullptr && env[0] != '\0') {
+        hour = parse_cheat_hour(std::string("cheat_hour = ") + env);
+        std::fprintf(stderr, "[settings] OGRE_CHEAT_HOUR=%s overrides the saved cheat\n", env);
     }
     g_game_speed = speed;
-    g_cheat_max_goth = max_goth;
-    g_cheat_max_items = max_items;
+    std::string cheat_summary;
+    for (int i = 0; i < kCheatCount; i++) {
+        g_cheats[i].store(cheats[i], std::memory_order_relaxed);
+        if (cheats[i]) {
+            cheat_summary += std::string(cheat_summary.empty() ? "" : ", ") + kCheatInfo[i].log_name;
+        }
+    }
+    g_cheat_hour.store(hour, std::memory_order_relaxed);
+    if (hour >= 0) {
+        cheat_summary += std::string(cheat_summary.empty() ? "" : ", ") + "hour " +
+                         cheat_hour_label(hour + 1);
+    }
+    if (cheat_summary.empty()) {
+        cheat_summary = "none";
+    }
     g_widescreen = widescreen;
     g_resolution = resolution;
     g_antialias = antialias;
@@ -1009,7 +1088,7 @@ void load_settings(const std::filesystem::path& pref_dir) {
     }
     std::fprintf(stderr,
                  "[settings] game speed x%d, widescreen %s, resolution %s, crt filter %s, "
-                 "msaa %s, window %s, sounds %s, volume %d%%, mouse %s, cheats goth %s items %s%s\n",
+                 "msaa %s, window %s, sounds %s, volume %d%%, mouse %s, cheats %s%s\n",
                  speed, lowercase(widescreen_mode_label(static_cast<int>(widescreen))).c_str(),
                  lowercase(resolution_mode_label(static_cast<int>(resolution_mode()))).c_str(),
                  crt_filter_key(crt),
@@ -1017,8 +1096,7 @@ void load_settings(const std::filesystem::path& pref_dir) {
                  lowercase(display_mode_label(static_cast<int>(display))).c_str(),
                  lowercase(sound_mode_label(static_cast<int>(sound))).c_str(), volume,
                  lowercase(mouse_mode_label(static_cast<int>(mouse))).c_str(),
-                 max_goth ? "on" : "off", max_items ? "on" : "off",
-                 experiments ? " (display experiments on)" : "");
+                 cheat_summary.c_str(), experiments ? " (display experiments on)" : "");
 }
 
 }  // namespace ogre
