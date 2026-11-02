@@ -227,18 +227,44 @@ RadioLayout layout_mouse(const Font& font, int scale, int max_width, int current
     return layout_radio(font, scale, max_width, mouse_labels(), current);
 }
 
-// The CHEATS rows are OFF/ON toggles with MOUSE ENABLED's labels.
+// The CHEATS OFF/ON rows use MOUSE ENABLED's labels.
 RadioLayout layout_toggle(const Font& font, int scale, int max_width, int current) {
     return layout_radio(font, scale, max_width, mouse_labels(), current);
 }
 
+std::vector<std::string> cheat_hour_labels() {
+    std::vector<std::string> labels;
+    for (int i = 0; i < kCheatHourOptionCount; i++) {
+        labels.push_back(cheat_hour_label(i));
+    }
+    return labels;
+}
+
+// The cheat an OFF/ON row of the CHEATS tab sets. False for every other row,
+// including TIME OF DAY.
+bool toggle_cheat(Panel::RowKind kind, Cheat& cheat) {
+    switch (kind) {
+        case Panel::RowKind::CheatMaxGoth:        cheat = Cheat::MaxGoth; return true;
+        case Panel::RowKind::CheatMaxItems:       cheat = Cheat::MaxItems; return true;
+        case Panel::RowKind::CheatQuickLevel:     cheat = Cheat::QuickLevelGain; return true;
+        case Panel::RowKind::CheatQuickPromotion: cheat = Cheat::QuickPromotion; return true;
+        case Panel::RowKind::CheatAllClasses:     cheat = Cheat::AllClasses; return true;
+        case Panel::RowKind::CheatDayZero:        cheat = Cheat::DayZero; return true;
+        default:                                  return false;
+    }
+}
+
 // --- radio rows ---------------------------------------------------------------
-// Ten row kinds draw as a radio group (GAME SPEED, WIDESCREEN, RESOLUTION,
-// CRT FILTER, MSAA, WINDOW, SOUNDS, MOUSE ENABLED, and the two CHEATS rows). The measure, draw, step, click and pad
-// paths each need the layout and the live option, so both are looked up in one
-// place: a kind added to the table is handled by all of them.
+// GAME SPEED, WIDESCREEN, RESOLUTION, CRT FILTER, MSAA, WINDOW, SOUNDS, MOUSE
+// ENABLED and every CHEATS row draw as a radio group. The measure, draw, step,
+// click and pad paths each need the layout and the live option, so both are
+// looked up in one place: a kind added to the table is handled by all of them.
 
 bool is_radio_row(Panel::RowKind kind) {
+    Cheat cheat;
+    if (toggle_cheat(kind, cheat) || kind == Panel::RowKind::CheatHour) {
+        return true;
+    }
     switch (kind) {
         case Panel::RowKind::GameSpeed:
         case Panel::RowKind::Widescreen:
@@ -248,8 +274,6 @@ bool is_radio_row(Panel::RowKind kind) {
         case Panel::RowKind::Display:
         case Panel::RowKind::Sound:
         case Panel::RowKind::Mouse:
-        case Panel::RowKind::CheatMaxGoth:
-        case Panel::RowKind::CheatMaxItems:
             return true;
         default:
             return false;
@@ -259,6 +283,9 @@ bool is_radio_row(Panel::RowKind kind) {
 // The index of the row's live option, or -1 when the live value is not one the
 // row offers.
 int radio_row_current(Panel::RowKind kind) {
+    if (Cheat cheat; toggle_cheat(kind, cheat)) {
+        return cheat_index(cheat);
+    }
     switch (kind) {
         case Panel::RowKind::GameSpeed:
             return game_speed_index(game_speed());
@@ -276,16 +303,17 @@ int radio_row_current(Panel::RowKind kind) {
             return sound_mode_index();
         case Panel::RowKind::Mouse:
             return mouse_mode_index();
-        case Panel::RowKind::CheatMaxGoth:
-            return cheat_max_goth_index();
-        case Panel::RowKind::CheatMaxItems:
-            return cheat_max_items_index();
+        case Panel::RowKind::CheatHour:
+            return cheat_hour_index();
         default:
             return -1;
     }
 }
 
 int radio_row_count(Panel::RowKind kind) {
+    if (Cheat cheat; toggle_cheat(kind, cheat)) {
+        return kMouseModeCount;
+    }
     switch (kind) {
         case Panel::RowKind::GameSpeed:   return kGameSpeedCount;
         case Panel::RowKind::Widescreen:  return kWidescreenModeCount;
@@ -295,14 +323,16 @@ int radio_row_count(Panel::RowKind kind) {
         case Panel::RowKind::Display:     return kDisplayModeCount;
         case Panel::RowKind::Sound:       return kSoundModeCount;
         case Panel::RowKind::Mouse:       return kMouseModeCount;
-        case Panel::RowKind::CheatMaxGoth:
-        case Panel::RowKind::CheatMaxItems: return kMouseModeCount;
+        case Panel::RowKind::CheatHour:   return kCheatHourOptionCount;
         default:                          return 0;
     }
 }
 
 RadioLayout radio_row_layout(Panel::RowKind kind, const Font& font, int scale, int max_width,
                              int current) {
+    if (Cheat cheat; toggle_cheat(kind, cheat)) {
+        return layout_toggle(font, scale, max_width, current);
+    }
     switch (kind) {
         case Panel::RowKind::GameSpeed:
             return layout_game_speed(font, scale, max_width, game_speed());
@@ -318,9 +348,8 @@ RadioLayout radio_row_layout(Panel::RowKind kind, const Font& font, int scale, i
             return layout_display(font, scale, max_width, current);
         case Panel::RowKind::Mouse:
             return layout_mouse(font, scale, max_width, current);
-        case Panel::RowKind::CheatMaxGoth:
-        case Panel::RowKind::CheatMaxItems:
-            return layout_toggle(font, scale, max_width, current);
+        case Panel::RowKind::CheatHour:
+            return layout_radio(font, scale, max_width, cheat_hour_labels(), current);
         default:
             return layout_sound(font, scale, max_width, sound_mode_index());
     }
@@ -332,6 +361,10 @@ RadioLayout radio_row_layout(Panel::RowKind kind, const Font& font, int scale, i
 RowAction store_radio_row(Panel::RowKind kind, int option) {
     if (option < 0 || option >= radio_row_count(kind) || option == radio_row_current(kind)) {
         return RowAction::None;
+    }
+    if (Cheat cheat; toggle_cheat(kind, cheat)) {
+        set_cheat(cheat, option == 1);
+        return RowAction::SettingChanged;
     }
     switch (kind) {
         case Panel::RowKind::GameSpeed:
@@ -358,11 +391,8 @@ RowAction store_radio_row(Panel::RowKind kind, int option) {
         case Panel::RowKind::Mouse:
             set_mouse_mode(static_cast<MouseMode>(option));
             break;
-        case Panel::RowKind::CheatMaxGoth:
-            set_cheat_max_goth(option == 1);
-            break;
-        case Panel::RowKind::CheatMaxItems:
-            set_cheat_max_items(option == 1);
+        case Panel::RowKind::CheatHour:
+            set_cheat_hour_index(option);
             break;
         default:
             return RowAction::None;
@@ -900,14 +930,21 @@ std::vector<Panel::Row> Panel::build_rows(Tab tab) const {
             break;
 
         case Tab::Cheats:
-            // Each cheat is held every frame while ON (cheats.hpp). The note is a
-            // section row, so it wraps across the panel and is not selectable.
+            // The data cheats are held every frame while ON; the two battle
+            // cheats act on the battle result (cheats.hpp). The note is a section
+            // row, so it wraps across the panel and is not selectable.
             rows.push_back(Row{RowKind::Section,
-                               "WHILE ON, A CHEAT IS RESTORED EVERY FRAME. SAVING KEEPS THE "
+                               "WHILE ON, A CHEAT IS RESTORED EVERY FRAME; THE LEVEL AND "
+                               "PROMOTION CHEATS ACT ON EACH BATTLE RESULT. SAVING KEEPS THE "
                                "CHEATED VALUES.",
                                0, 0, -1});
             rows.push_back(Row{RowKind::CheatMaxGoth, {}, 0, 0, -1});
             rows.push_back(Row{RowKind::CheatMaxItems, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::CheatQuickLevel, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::CheatQuickPromotion, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::CheatAllClasses, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::CheatDayZero, {}, 0, 0, -1});
+            rows.push_back(Row{RowKind::CheatHour, {}, 0, 0, -1});
             break;
 
         case Tab::Debug:
@@ -1114,6 +1151,16 @@ std::string Panel::left_text(size_t index) const {
             return "MAX GOTH";
         case RowKind::CheatMaxItems:
             return "MAX ITEM COUNTS";
+        case RowKind::CheatQuickLevel:
+            return "QUICK LEVEL GAIN";
+        case RowKind::CheatQuickPromotion:
+            return "QUICK SOLDIER PROMOTION";
+        case RowKind::CheatAllClasses:
+            return "UNLOCK ALL CLASSES";
+        case RowKind::CheatDayZero:
+            return "DAY ALWAYS 00";
+        case RowKind::CheatHour:
+            return "TIME OF DAY";
         case RowKind::ChaosFrame:
             return "Chaos Frame";
     }
@@ -1169,9 +1216,17 @@ std::string Panel::right_text_for(const Row& row) const {
         case RowKind::Volume:
             return volume_text(volume_percent());
         case RowKind::CheatMaxGoth:
-            return cheat_max_goth_text();
         case RowKind::CheatMaxItems:
-            return cheat_max_items_text();
+        case RowKind::CheatQuickLevel:
+        case RowKind::CheatQuickPromotion:
+        case RowKind::CheatAllClasses:
+        case RowKind::CheatDayZero: {
+            Cheat cheat = Cheat::MaxGoth;
+            toggle_cheat(row.kind, cheat);
+            return cheat_text(cheat);
+        }
+        case RowKind::CheatHour:
+            return cheat_hour_text();
         case RowKind::ChaosFrame: {
             if (!chaos_frame_known_) {
                 return "GAME NOT RUNNING";
@@ -1290,6 +1345,11 @@ RowAction Panel::activate(size_t index, int direction) {
         case RowKind::Mouse:
         case RowKind::CheatMaxGoth:
         case RowKind::CheatMaxItems:
+        case RowKind::CheatQuickLevel:
+        case RowKind::CheatQuickPromotion:
+        case RowKind::CheatAllClasses:
+        case RowKind::CheatDayZero:
+        case RowKind::CheatHour:
             // Left/Right and Space step the radio group, wrapping at the ends
             // like a mod option row. Each setting applies itself (the runtime for
             // GAME SPEED, `widescreen.cpp` or the renderer for the DISPLAY rows),

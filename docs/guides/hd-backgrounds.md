@@ -1,5 +1,8 @@
 # HD backgrounds (`mods/backgrounds/`)
 
+The step-by-step procedure for a new replacement is `hd-workflow.md`; this
+guide is the reference for the mechanisms.
+
 A pack of PNGs that replaces the game's dialogue and cutscene backdrops. The
 game draws those backdrops from full-screen `njpeg` images
 (`docs/guides/njpeg-backgrounds.md`); this feature writes the pack's image over
@@ -211,8 +214,9 @@ does this **with or without the pack**: the game's own backdrop already has
 content that the 4:3 view crops. The dialogue box, the portrait and the text keep
 their own size and position in the wider view.
 
-The scene list is `expand_scenes()` in `app/src/widescreen.cpp`: `0x03` and
-`0x0D` by default, plus every scene in `backgrounds.txt`. `OGRE_WS_SCENES`
+The scene list is `expand_scenes()` in `app/src/widescreen.cpp`: `0x03`,
+`0x0D`, the world map `0x05` and the Organize Screen `0x06` by default, plus every scene in
+`backgrounds.txt`. `OGRE_WS_SCENES`
 replaces the default set for a developer run:
 
 ```sh
@@ -303,6 +307,149 @@ to move the `.nrm` files aside for the run.
 The composed backdrop is drawn a few seconds after scene `0x0D` starts; a live
 RDRAM snapshot taken at the scene's first frame holds the raw `njpeg` chunks and
 not the composed screen.
+
+## Screen backdrops: the title, the Load Game book and the Hugo Report
+
+The title (scene `0x04`), the Load Game book (scene `0x12`) and the Hugo Report
+(scene `0x08`) do not use `njpeg`; the port patches their own draws to show a
+pack image behind the game's logo, menu, windows, text and sprites
+(`app/src/screen_backdrops.cpp`, hooks in `config/config.toml` and
+`config/banks/config-bankK.toml`). A mapping line for one of these scenes has no
+step:
+
+```
+02    title      0x04  -
+03    loadgame   0x12  -
+04    hugo       0x08  -
+```
+
+The image (`<id>.png` or `<name>.png`) is box-filtered to 240 rows with its
+aspect kept, its width rounded to a multiple of 4, and centred on the 320-wide
+screen. A 16:9 image fills the widescreen sides; its centre 4:3 is what a 4:3
+window shows. The port stages it as RGBA16 at `0x80600000` (free RDRAM above the
+game's 4 MiB) and draws it in strips of as many rows as fit in TMEM's 4 KB, with
+RT64 extended-GBI rectangles at signed coordinates. A `-wide` image is optional:
+without one the same image serves both modes. Each listed scene is added to the
+Expand set, as for the `njpeg` backdrops.
+
+`tools/backgrounds.py hd <id>` builds the HD strips for a screen backdrop the same
+way as for the cathedral: it runs the app to the scene (`OGRE_SCENE=title`),
+reads every strip loaded from `0x80600000` in RT64's dump, checks its texels
+against the staged image (the title matches 100 %, 60 of 60 strips with their
+own hash), and cuts each strip from the PNG at `round(height / 240)` times.
+
+A strip whose texels are all equal, such as the black margin above the Hugo
+Report's tablet, gets the lowest blue bit of its mark row's last texel flipped
+before the duplicate check (`make_screen_strips_unique` in
+`hd_backgrounds.cpp` and the tool). Unmarked, it shares its hash with any flat
+game texture of its size: RT64's dump filed the Hugo Report's top strip under a
+320-wide black image at `0x80298140`, and its HD replacement would draw there
+too. The title and Load Game images have no flat strip, so their packs are
+unchanged.
+
+On Windows the tool picks `dist/ogre-battle-64-recomp/ogrebattle64.exe` before
+`build-dist/`; pass `--app build-dist/ogrebattle64.exe` when `dist/` is older
+than the build, or the run uses the old code.
+
+### The title (`0x04`)
+
+The title module (streamedC, ROM `0x1CE040` → `0x80197B90`, compiled in
+`RecompiledFuncs`) draws its backdrop in `func_8019D568`, layer by layer through
+`func_80198ECC(record, x, y)`; `state = *(u32*)0x801B80E0`:
+
+| layer | record | image | at |
+|---|---|---|---|
+| sky | `state+0x00` | RGBA16 320x90 | (0, 0) |
+| clouds | `state+0x24` | RGBA32 320x106 | (0, 24) |
+| clouds | `state+0x48` | RGBA32 320x160 | (0, 80) |
+| soldiers | `state+0x90 + 0x24*D_801BA558` | CI8 72x48, 3 frames | (22, 127) |
+| hill | `state+0x6C` | RGBA32 200x112 | (0, 126) |
+
+Between them it draws three fog overlays, `func_8019C5D4(0/2/1)`: white
+rectangles over a wrapped 64x64 I8 image. With a pack image:
+
+- At the sky's `func_80198ECC` entry the pack image is drawn first.
+- The sky's and both cloud layers' rectangles become `G_SPNOOP`s after each
+  call. Their texture loads stay, because each fog group inherits the tile the
+  layer before it left (the renderer's `OGRE_FOG` repair depends on that).
+- The hill stays the game's. The soldier sprite is black below their feet, and
+  the hill, drawn after it, hides that block. The hill's 23 strips get HD
+  replacements cut from the same PNG with the hill's own alpha
+  (`SCREEN_OVERLAYS` in `tools/backgrounds.py`).
+- Under Expand, each fog row is continued past its ends with rectangles of the
+  same chunk width and `s` (`extend_fog`). Rows the hill covers at the left edge
+  (screen y 139 and below) are not extended on the left: the game's hill hides
+  its own fog there.
+
+The image must keep the game's geometry: the soldiers are drawn at their
+native place, and the hill's HD strips are cut from the PNG. The art in use is
+the game's backdrop without the soldiers (sky, clouds and hill composited from
+RDRAM), outpainted to 16:9 and upscaled to 4096x2294 with the Higgsfield
+connector. Of four outpaints, two moved the hill's ridge near the left edge
+20 rows down, which showed as a step at x = 0 against the game's hill; the one
+in use keeps the ridge within 2 rows (mean difference 4.7 levels over the 4:3
+region). Check a new image the same way before using it. `title.png` is derived
+from the game's art and is not in the repository (`.gitignore`).
+
+RT64 stretches a NONE-origin rectangle that spans the whole scissor width to
+the wide picture (`coversScissorWidth` in `rt64_framebuffer_renderer.cpp`)
+unless its rect aspect is `G_EX_ASPECT_ADJUST`. The backdrop strips span it, so
+the draw sets `gEXSetRectAspect(ADJUST)` around them; without it the image
+showed 4/3 too wide.
+
+### The Load Game book (`0x12`)
+
+The book screen is 3D. `func_801A9C68` sets the viewport `0x801B8D10`, the
+projection (`func_801A8FB4`), the setup list `0x801B8CA0`, and draws the object
+list `func_801A6BE8`: object 0 is the desk (a 15-vertex wood frame around the
+book, a CI8 32x64 tile that wraps along `s`), objects 1 and 2 are the book's
+soft shadows (an RGBA32 16x32 image), and the book follows, whose leather cover
+spans the 4:3 width. Expand alone shows more desk, black slivers at both edges
+(the frame ends at screen x -47 and 369), and the cover's edges at x 0 and 320.
+
+With a pack image the backdrop is drawn before the setup list, with 1-cycle,
+opaque, no-Z state, and the desk object's `G_DL` becomes a `G_SPNOOP`. The
+shadows, the book and the text stay the game's, so the shadows fall on the new
+desk. The art was made from the desk rendered alone at 4:3 (the probe that
+dropped the other objects is gone), outpainted and upscaled like the title's.
+The hole under the book was filled first by interpolating each column between
+the rows above and below it. A first fill copied the rows above the hole
+downwards; its bottom edge was a horizontal step, and the outpaint continued
+that step across both side extensions at screen y 213.
+
+### The Hugo Report (`0x08`)
+
+The map's R menu opens the Hugo Report (descriptor `0x8018FC64`, records 14 and
+30). Its backdrop is a stone tablet with a griffin relief on black, a CI8
+320x240 image record (`+3` texel size code 1, `+4`/`+6` width and height, texels
+at `+8`, the RGBA16 TLUT after them; at `0x80197E00` in the captured run).
+`func_ovlK_802349AC(record)` (unit K, bankRec14d) writes `G_DL 0x8023DF68`
+(1-cycle, TLUT RGBA16, point filter, combiner `TEXEL0 * PRIMITIVE +
+ENVIRONMENT`), SETPRIMCOLOR white, the TLUT load and TEXTURE on (0x50 bytes),
+then `func_ovlK_8022B9A0(record, 0, 0)` draws 40 strips of 6 rows.
+
+With a pack image, the hook after the strip call (`0x80234B4C`) keeps the first
+0x50 bytes and writes the pack backdrop over the strips, with the TLUT off
+around them. It acts only when the record is CI8 320x240 and its TLUT hashes to
+`0x1E1F0BCE` (FNV-1a over the 512 bytes in guest order), so another image drawn
+through the same function stays the game's. `[hdbg] hugo report: image … left
+alone` logs a mismatch.
+
+The art: the tablet's interior (columns 40..279 of the game's image, read from
+an RDRAM dump with `tools/rdram.py image 0x80197E08 --fmt ci8 --palette
+0x801AAA08`) was enlarged 4x, outpainted to 16:9 and upscaled to 4096x2294 with
+the Higgsfield connector (`hugo-wide.png`). The outpaint continued the tablet
+sideways with its own rough edges and black margins, and kept the griffin at
+the game's place and size (channel means within 6 levels of the original over
+the 4:3 interior). `hugo.png`, the 4:3 image for WIDESCREEN off, is the centre
+4:3 of the wide image with the wide image's outer 44 columns (in 240-row units)
+cross-faded in over 14 columns at each side, so the 4:3 view keeps the
+original's black margins. Both are derived from the game's art and gitignored.
+
+`tools/backgrounds.py hd 04 --save <battery>` reaches the screen from the title:
+Load Game, A on the first slot (a save on the world map), then R, right and A on
+the map, at `OGRE_SPEED=1`. The run matched 40 of 40 plain strips and 60 of 60
+wide strips, cut at 10x.
 
 ## Limits
 

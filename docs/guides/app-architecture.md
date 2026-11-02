@@ -11,7 +11,9 @@ app/
   src/
     main.cpp              entry point: window, game registration, boot
     game.hpp              game identity constants (ROM hash, entrypoint, ids)
-    sdl_platform.{hpp,cpp} SDL2 window/input/audio/error callbacks, live console
+    sdl_platform.{hpp,cpp} SDL2 window/input/error callbacks, live console
+    audio_out.{hpp,cpp}   audio output: the AI-buffer FIFO, the SDL callback,
+                          OGRE_AUDIO_STATS / _SINK / _RESAMPLE
     renderer.{hpp,cpp}    ultramodern::renderer::RendererContext implementation
     rsp.{hpp,cpp}         recomp::rsp::callbacks_t (microcode provider)
     overlays.{hpp,cpp}    base-section table registration
@@ -58,7 +60,7 @@ app/
 |---|---|---|
 | `renderer_callbacks.create_render_context` | `renderer.cpp` | RT64 renderer (D3D12 or Vulkan on Windows) wrapping `RT64::Application`; parses the game's display lists via RT64's GBI interpreters. `OGRE_GRAPHICS_API` pins the backend |
 | `rsp_callbacks.get_rsp_microcode` | `rsp.cpp` | dispatches the recompiled njpeg (type 4) and audio (type 2) microcodes; `OGRE_NJPEG=0` / `OGRE_AUDIO_UCODE=0` force the stub, which completes a task without executing microcode |
-| `audio_callbacks` | `sdl_platform.cpp` | SDL audio queue (`queue_samples` / `get_frames_remaining` / `set_frequency`) |
+| `audio_callbacks` | `sdl_platform.cpp` → `audio_out.cpp` | an app-owned FIFO drained by the SDL output callback (`queue_samples` / `get_frames_remaining` / `set_frequency`) |
 | `input_callbacks` | `sdl_platform.cpp` | keyboard (N64 mapping from `input_map.cpp`) + SDL GameController |
 | `gfx_callbacks.update_gfx` | `main.cpp` | pumps SDL events on the main thread, and draws the overlay |
 | `error_handling_callbacks` | `sdl_platform.cpp` | `SDL_ShowSimpleMessageBox` |

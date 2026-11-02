@@ -138,6 +138,14 @@ void set_application_user_config(RT64::Application* app, const ultramodern::rend
     }
 
     app->userConfig.aspectRatio = to_rt64(config.ar_option);
+    // Extended-GBI origins (G_EX_ORIGIN_LEFT/RIGHT) reach the edges of the wide
+    // picture only with `extAspectRatio = Expand`; with RT64's default
+    // `Original` they collapse to the 4:3 picture's centre. The world map's
+    // widescreen draw (map_widescreen.cpp) is the only user of them.
+    app->userConfig.extAspectRatio =
+        (config.ar_option == ultramodern::renderer::AspectRatio::Expand)
+            ? RT64::UserConfiguration::AspectRatio::Expand
+            : RT64::UserConfiguration::AspectRatio::Original;
     app->userConfig.antialiasing = to_rt64(config.msaa_option);
     app->userConfig.refreshRate = to_rt64(config.rr_option);
     app->userConfig.refreshRateTarget = config.rr_manual_value;
@@ -1898,6 +1906,12 @@ class RT64Renderer final : public ultramodern::renderer::RendererContext {
         }
         ++present_count_;
         apply_crt_filter();
+        // The world map's widescreen extension follows RT64's own swap chain
+        // size (widescreen.cpp).
+        if (app_->presentQueue != nullptr && app_->presentQueue->ext.sharedResources != nullptr) {
+            ogre::widescreen_note_swapchain(app_->presentQueue->ext.sharedResources->swapChainWidth,
+                                            app_->presentQueue->ext.sharedResources->swapChainHeight);
+        }
         // OGRE_VI_TRACE=1: report the VI state RT64 is about to present. The
         // presenter only draws when the decoded VI is visible and has a nonzero
         // size (rt64_present_queue.cpp: viVisible/fbSize), so a black canvas is

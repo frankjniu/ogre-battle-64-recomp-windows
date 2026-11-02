@@ -16,3 +16,167 @@ functions_per_output_file = 100
 # piece it still caps in the middle of a call-and-continue emission here (the
 # failure is "use of undeclared label" at the `goto after_N`).
 function_sizes = []
+
+# ---------------------------------------------------------------------------
+# WIDESCREEN on the world map (app/src/map_widescreen.cpp). Every hook is a
+# no-op while `ogre::widescreen_2d_extension()` is 0, which it is whenever the
+# map is drawn 4:3. `func_ovlM_801A103C` is the map's draw; the display-list
+# head is `*(u32*)0x800E9BA0` and the map state `*(u32*)0x80197B18`.
+
+# The scroll. The game clamps state+0x40/+0x44 to [0, 256] x [0, 124]; the wide
+# window (the frame moved to the picture's edges) needs [e + 14, 238 - e] x
+# [15, 124] so it never runs past the 512x320 map. Each hook runs after one of
+# the game's own clamps, and the draw re-clamps before it reads the scroll.
+[[patches.hook]]
+func = "func_ovlM_8019AF0C"
+before_vram = 0x8019B688
+text = "{ void ogre_mapws_clamp_scroll(uint8_t*); ogre_mapws_clamp_scroll(rdram); }"
+
+[[patches.hook]]
+func = "func_ovlM_8019AF0C"
+before_vram = 0x8019C8B4
+text = "{ void ogre_mapws_clamp_scroll(uint8_t*); ogre_mapws_clamp_scroll(rdram); }"
+
+[[patches.hook]]
+func = "func_ovlM_8019AF0C"
+before_vram = 0x8019D4A4
+text = "{ void ogre_mapws_clamp_scroll(uint8_t*); ogre_mapws_clamp_scroll(rdram); }"
+
+[[patches.hook]]
+func = "func_ovlM_801A103C"
+before_vram = 0x801A13C4
+text = "{ void ogre_mapws_clamp_scroll(uint8_t*); ogre_mapws_clamp_scroll(rdram); }"
+
+# The cursor's bounds, [40, 272] x [40, 192] in the game, widen to
+# [26 - e, 290 + e] x [25, 192] (ogre::map_cursor_bounds).
+# D-pad left: `slti v0, x, 41` at 0x8019B374 (x is $s0), tested at 0x8019B378.
+[[patches.hook]]
+func = "func_ovlM_8019AF0C"
+before_vram = 0x8019B378
+text = "{ uint64_t ogre_mapws_cursor_at_left(uint64_t, int32_t); ctx->r2 = ogre_mapws_cursor_at_left(ctx->r2, (int32_t)ctx->r16); }"
+
+# D-pad right: `slti v0, x, 272` at 0x8019B39C, tested at 0x8019B3A0.
+[[patches.hook]]
+func = "func_ovlM_8019AF0C"
+before_vram = 0x8019B3A0
+text = "{ uint64_t ogre_mapws_cursor_below_right(uint64_t, int32_t); ctx->r2 = ogre_mapws_cursor_below_right(ctx->r2, (int32_t)ctx->r16); }"
+
+# D-pad up: `slti v0, y, 41` at 0x8019B3D4 (y is $v1), tested at 0x8019B3D8.
+[[patches.hook]]
+func = "func_ovlM_8019AF0C"
+before_vram = 0x8019B3D8
+text = "{ uint64_t ogre_mapws_cursor_at_top(uint64_t, int32_t); ctx->r2 = ogre_mapws_cursor_at_top(ctx->r2, (int32_t)ctx->r3); }"
+
+# Stick: 0x8019B49C..0x8019B4B4 clamps x ($v1) into $a2, stored at 0x8019B4F0.
+[[patches.hook]]
+func = "func_ovlM_8019AF0C"
+before_vram = 0x8019B4B8
+text = "{ uint64_t ogre_mapws_cursor_clamp(uint64_t, int32_t); ctx->r6 = ogre_mapws_cursor_clamp(ctx->r6, (int32_t)ctx->r3); }"
+
+# Stick: 0x8019B4C0..0x8019B4D8 clamps y ($v1) into $a1, stored at 0x8019B4F8.
+# Every path into 0x8019B4DC leaves y in $v1.
+[[patches.hook]]
+func = "func_ovlM_8019AF0C"
+before_vram = 0x8019B4DC
+text = "{ uint64_t ogre_mapws_cursor_clamp_y(uint64_t, int32_t); ctx->r5 = ogre_mapws_cursor_clamp_y(ctx->r5, (int32_t)ctx->r3); }"
+
+# 0x8019B8D0..0x8019B8EC reads x into $a0 and stores 40 or 272 when it is out of
+# range; the hook stores the wide clamp of the same x.
+[[patches.hook]]
+func = "func_ovlM_8019AF0C"
+before_vram = 0x8019B8F8
+text = "{ void ogre_mapws_cursor_store(uint8_t*, int32_t); ogre_mapws_cursor_store(rdram, (int32_t)ctx->r4); }"
+
+# Its y half: `slti v0, y, 40` at 0x8019B8FC ($a0 is y), tested at 0x8019B900.
+# True takes 0x8019B904..0x8019B90C, which stores $v0 (the delay slot's 40);
+# the second hook, before the `j` at 0x8019B908, makes that the wide top bound.
+# y above 192 still takes the game's own path at 0x8019B910.
+[[patches.hook]]
+func = "func_ovlM_8019AF0C"
+before_vram = 0x8019B900
+text = "{ uint64_t ogre_mapws_cursor_above_top(uint64_t, int32_t); ctx->r2 = ogre_mapws_cursor_above_top(ctx->r2, (int32_t)ctx->r4); }"
+
+[[patches.hook]]
+func = "func_ovlM_8019AF0C"
+before_vram = 0x8019B908
+text = "{ uint64_t ogre_mapws_cursor_top_bound(uint64_t); ctx->r2 = ogre_mapws_cursor_top_bound(ctx->r2); }"
+
+# The draw. After the terrain's setup block (D_800E9BA0 is past it): clear the
+# wide picture, anchor later scissors to the edges, replace the terrain scissor
+# with the wide window's (18,17)-(306,218).
+[[patches.hook]]
+func = "func_ovlM_801A103C"
+before_vram = 0x801A1694
+text = "{ void ogre_mapws_begin(uint8_t*); ogre_mapws_begin(rdram); }"
+
+# After the terrain's strip loop: the map columns either side of the game's
+# 256-wide window and the 15 rows above it. The code after the loop stores
+# relative to $t3.
+[[patches.hook]]
+func = "func_ovlM_801A103C"
+before_vram = 0x801A1860
+text = "{ uint32_t ogre_mapws_terrain(uint8_t*); ctx->r11 += ogre_mapws_terrain(rdram); }"
+
+# After the shading layer's loop: each strip split into left / stretched middle
+# / right. The code after the loop stores relative to $t0.
+[[patches.hook]]
+func = "func_ovlM_801A103C"
+before_vram = 0x801A1B1C
+text = "{ uint32_t ogre_mapws_vignette(uint8_t*); ctx->r8 += ogre_mapws_vignette(rdram); }"
+
+# After the frame's loop: each strip split at texture column 120 into a part
+# anchored at x = 0 and a part ending at the right edge, over a repeated filler;
+# the top bar moves to y = 0, the bottom bar to y = 239 and the pillars stretch
+# between. The code after stores relative to $t3.
+[[patches.hook]]
+func = "func_ovlM_801A103C"
+before_vram = 0x801A1EE4
+text = "{ uint32_t ogre_mapws_frame(uint8_t*); ctx->r11 += ogre_mapws_frame(rdram); }"
+
+# The location plate (func_ovlM_801A26C0, at 24,22) is anchored left and moved
+# with the frame's top-left corner (-14,-15), the MONTH/DATE panel
+# (func_ovlM_801A2410, at 150,203) anchored right and moved with the bottom-right
+# corner (+18,+1), and the fade rectangle (0x801A1FC8) spans the whole picture.
+[[patches.hook]]
+func = "func_ovlM_801A103C"
+before_vram = 0x801A1F64
+text = "{ void ogre_mapws_align(uint8_t*, int32_t); ogre_mapws_align(rdram, 1); }"
+
+[[patches.hook]]
+func = "func_ovlM_801A103C"
+before_vram = 0x801A1F74
+text = "{ void ogre_mapws_align(uint8_t*, int32_t); ogre_mapws_align(rdram, 2); }"
+
+[[patches.hook]]
+func = "func_ovlM_801A103C"
+before_vram = 0x801A1F80
+text = "{ void ogre_mapws_align(uint8_t*, int32_t); ogre_mapws_align(rdram, 0); }"
+
+[[patches.hook]]
+func = "func_ovlM_801A103C"
+before_vram = 0x801A1FC8
+text = "{ void ogre_mapws_align(uint8_t*, int32_t); ogre_mapws_align(rdram, 3); }"
+
+# The end of the draw (both the fade and the no-fade path): default anchoring
+# for the menus drawn after it.
+[[patches.hook]]
+func = "func_ovlM_801A103C"
+before_vram = 0x801A2120
+text = "{ void ogre_mapws_end(uint8_t*); ogre_mapws_end(rdram); }"
+
+# Sprites: func_ovlM_8019F83C(x, y, kind) clips at x = 0 the way
+# gSPScisTextureRectangle does. Before its `jr ra` the rectangle it wrote at
+# $t1 + 8..31 is rewritten with signed coordinates: $t3 is x * 4 (sign-extended
+# 16 bits), $t4 is y and $a2 the kind's (w, h, s, t) entry.
+[[patches.hook]]
+func = "func_ovlM_8019F83C"
+before_vram = 0x8019F9D4
+text = "{ void ogre_mapws_sprite(uint8_t*, uint32_t, int32_t, int32_t, uint32_t); ogre_mapws_sprite(rdram, (uint32_t)ctx->r9, (int32_t)ctx->r11, (int32_t)ctx->r12, (uint32_t)ctx->r6); }"
+
+# Location icons: func_ovlM_801A2D84 writes its own rectangle at $a1 + 8, x in
+# $s3, y in $s1, variant in $s8 (2: height in $s0, else 16). Rewritten with
+# signed coordinates after the F1 word is written.
+[[patches.hook]]
+func = "func_ovlM_801A2D84"
+before_vram = 0x801A3298
+text = "{ void ogre_mapws_icon(uint8_t*, uint32_t, int32_t, int32_t, uint32_t, int32_t); ogre_mapws_icon(rdram, (uint32_t)ctx->r5, (int32_t)ctx->r19, (int32_t)ctx->r17, (uint32_t)ctx->r30, (int32_t)ctx->r16); }"

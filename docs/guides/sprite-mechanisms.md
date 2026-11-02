@@ -263,13 +263,18 @@ producer. `func_ovlM_8019F83C` (`bankRec05`, unit M, `0x8019F83C`) is the
 builder:
 
 - `a0 = x`, `a1 = y`, `a2 = sprite-table index`;
-- an entry of `g_sprite_table` is 8 bytes at `0x801A6FE0 + (a2 & 0xFFFF)*8`:
-  `u16 W`, `u16 H`, `s16 u`, `s16 v` (`0x8019F87C`);
+- an entry of `g_sprite_table` is 8 bytes at `0x801A6FD8 + (a2 & 0xFFFF)*8`:
+  `u16 W`, `u16 H`, `s16 u`, `s16 v` (`lui`/`addiu` at `0x8019F870`/`0x8019F874`,
+  ROM words `3C02801A 24426FD8`; this guide said `0x801A6FE0` until 2026-11-01);
 - it emits `G_RDPPIPESYNC`, the `G_TEXRECT` (word 0 is the lower-right corner
   `(x+W, y+H)`, word 1 the upper-left `(x, y)`, both in quarter pixels),
   `G_RDPHALF_1` carrying `s,t` (`u<<21 | v<<5`), `G_RDPHALF_2` with
   `dsdx = dtdy = 1.0`, and `G_RDPPIPESYNC`.
 - it emits **no** `G_SETTILESIZE`. The caller supplies the window.
+- it clips at x = 0 and y = 0 the way `gSPScisTextureRectangle` does (a
+  negative corner is moved to 0 and `s`/`t` advanced). With WIDESCREEN on, the
+  rectangle is rewritten with signed coordinates before the `jr ra`
+  (`docs/guides/widescreen.md`).
 
 `func_ovlM_801A2A7C` (`0x801A2A7C`, `map_party_draw`) is the caller: two
 `sprite_rect_emit` calls, each preceded by its own `SETTIMG`/`SETTILE`/

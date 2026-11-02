@@ -57,6 +57,22 @@ constexpr uint32_t kRamEnd = 0x80800000u;
 constexpr int kCanvasW = 496;
 constexpr int kCanvasH = 384;
 
+// Screen backdrops (hd_backgrounds.hpp, `ScreenBackdrop`) are drawn by a patch
+// of the screen's own draw, 240 rows tall: the title (scene 0x04), the Hugo
+// Report (scene 0x08) and the Load Game book (scene 0x12). See
+// screen_backdrops.cpp.
+constexpr int kScreenH = 240;
+constexpr uint16_t kScreenScenes[] = {0x0004, 0x0008, 0x0012};
+
+bool is_screen_scene(uint16_t scene) {
+    for (uint16_t s : kScreenScenes) {
+        if (s == scene) {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline uint32_t offset_of(uint32_t guest) { return guest & 0x1FFFFFFFu; }
 
 inline uint8_t load_u8(const uint8_t* rdram, uint32_t guest) {
@@ -81,13 +97,25 @@ inline void store_u16(uint8_t* rdram, uint32_t guest, uint16_t v) {
 
 // --- The pack --------------------------------------------------------------
 
+// A screen backdrop's image (hd_backgrounds.hpp, `ScreenBackdrop`).
+struct ScreenImage {
+    int width = 0;
+    std::vector<uint16_t> pixels;  // width x kScreenH
+    ogre::ScreenBackdrop view;
+};
+
 struct Entry {
     std::string id;
     std::string name;
     uint16_t scene = 0;
     uint16_t step = 0;
+    // A screen backdrop (`ogre::hd_backgrounds_is_screen_scene`) fills `screen`
+    // and `screen_wide`; an njpeg backdrop fills `pixels` and `pixels_wide`.
+    bool is_screen = false;
     std::vector<uint16_t> pixels;       // kCanvasW x kCanvasH, guest-order RGBA5551
     std::vector<uint16_t> pixels_wide;  // the `-wide` sibling, if the pack has one
+    ScreenImage screen;
+    ScreenImage screen_wide;
 };
 
 struct Pack {
@@ -254,15 +282,104 @@ bool load_canvas(const std::filesystem::path& png, const char* what, bool fit,
     return true;
 }
 
+// A screen backdrop's strips are `strip_rows` rows of the image each, with no
+// overlap. As for the canvas (make_strips_unique), a strip that repeats an
+// earlier one gets the lowest blue bit of one texel flipped, in its third row,
+// at the first column that makes it unique. A strip whose texels are all equal
+// first gets that bit flipped in the same row's last column: a flat strip, such
+// as the black margin above the Hugo Report's tablet, otherwise has the hash of
+// any flat game texture of its size (RT64 filed it under a 320-wide black
+// image at 0x80298140), and its HD replacement would draw there too.
+// tools/backgrounds.py repeats this.
+void make_screen_strips_unique(std::vector<uint16_t>& image, int width, int strip_rows) {
+    std::unordered_set<std::string> seen;
+    for (int top = 0; top < kScreenH; top += strip_rows) {
+        const int rows = std::min(strip_rows, kScreenH - top);
+        const int mark_row = top + std::min(2, rows - 1);
+        const uint16_t* first = &image[size_t(top) * width];
+        if (std::all_of(first, first + size_t(rows) * width,
+                        [v = first[0]](uint16_t t) { return t == v; })) {
+            image[size_t(mark_row) * width + size_t(width - 1)] ^= 0x0002;
+        }
+        auto key = [&]() {
+            return std::string(reinterpret_cast<const char*>(&image[size_t(top) * width]),
+                               size_t(rows) * width * sizeof(uint16_t));
+        };
+        std::string k = key();
+        int col = -1;
+        while (!seen.insert(k).second) {
+            uint16_t* row = &image[size_t(mark_row) * width];
+            if (col >= 0) {
+                row[col] ^= 0x0002;  // undo the previous try
+            }
+            if (++col >= width) {
+                break;
+            }
+            row[col] ^= 0x0002;
+            k = key();
+        }
+    }
+}
+
+// Load a screen backdrop: 240 rows, the source's aspect kept, the width rounded
+// to a multiple of 4 texels (so a row is a whole number of 64-bit TMEM words),
+// centred on the 320-wide screen.
+bool load_screen(const std::filesystem::path& png, const char* what, ScreenImage& out) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(png, ec)) {
+        return false;
+    }
+    int w = 0, h = 0, comp = 0;
+    uint8_t* data = stbi_load(png.string().c_str(), &w, &h, &comp, 4);
+    if (data == nullptr) {
+        std::fprintf(stderr, "[hdbg] %s: stb_image failed: %s\n", png.string().c_str(),
+                     stbi_failure_reason());
+        return false;
+    }
+    const double exact = double(w) * kScreenH / double(h);
+    const int width = std::max(4, int(std::lround(exact / 4.0)) * 4);
+    out.width = width;
+    out.pixels = resample(data, w, h, width, kScreenH);
+    stbi_image_free(data);
+    const int rows = ogre::hd_backgrounds_screen_strip_rows(width);
+    make_screen_strips_unique(out.pixels, width, rows);
+    std::fprintf(stderr, "[hdbg]   %-13s <- %s (%dx%d -> %dx%d at x %d, %d-row strips)\n", what,
+                 png.filename().string().c_str(), w, h, width, kScreenH, 160 - width / 2, rows);
+    return true;
+}
+
 // An entry's image is `<id>.png` (or `<name>.png`), stretched to the canvas. A
 // `<id>-wide.png` (or `<name>-wide.png`) beside it is the widescreen variant,
 // used when the WIDESCREEN toggle is on. The wide image keeps its own aspect
 // ratio (a 16:9 source fills the canvas width and is anchored to the bottom), so
 // a widescreen-aspect source is not squeezed to the canvas's 496x384 shape. See
-// `mods/backgrounds/make-example.py` for the placeholder pair.
+// `mods/backgrounds/make-example.py` for the placeholder pair. A screen scene's
+// entry loads the same files as screen backdrops (`load_screen`).
 bool load_entry_image(Entry& e) {
     const std::vector<std::string> stems{e.id, e.name};
     bool any = false;
+    if (e.is_screen) {
+        for (const std::string& stem : stems) {
+            if (e.screen.pixels.empty() &&
+                load_screen(g_pack.dir / (stem + ".png"), stem.c_str(), e.screen)) {
+                any = true;
+            }
+            if (e.screen_wide.pixels.empty() &&
+                load_screen(g_pack.dir / (stem + "-wide.png"), (stem + "-wide").c_str(),
+                            e.screen_wide)) {
+                any = true;
+            }
+        }
+        if (!any) {
+            std::fprintf(stderr, "[hdbg] %s: no %s.png or %s.png\n", e.id.c_str(),
+                         e.id.c_str(), e.name.c_str());
+            return false;
+        }
+        std::fprintf(stderr, "[hdbg] %-10s %-12s scene=0x%02X screen backdrop%s\n",
+                     e.id.c_str(), e.name.c_str(), e.scene,
+                     e.screen_wide.pixels.empty() ? "" : " (+ -wide)");
+        return true;
+    }
     for (const std::string& stem : stems) {
         if (e.pixels.empty() &&
             load_canvas(g_pack.dir / (stem + ".png"), stem.c_str(), false, e.pixels)) {
@@ -308,7 +425,9 @@ bool load_pack(const std::filesystem::path& dir) {
         e.id = id;
         e.name = name;
         e.scene = uint16_t(std::strtoul(scene, nullptr, 0) & 0x7FFFu);
+        // A screen scene has no scripted step; its line carries `-` there.
         e.step = uint16_t(std::strtoul(step, nullptr, 0) & 0x7FFFu);
+        e.is_screen = is_screen_scene(e.scene);
         if (load_entry_image(e)) {
             g_pack.entries.push_back(std::move(e));
         }
@@ -328,7 +447,7 @@ const Entry* find_entry(uint16_t scene, uint16_t next_scene, uint16_t step) {
     // the step alone.
     const Entry* by_step = nullptr;
     for (const Entry& e : g_pack.entries) {
-        if (e.step != step) {
+        if (e.is_screen || e.step != step) {
             continue;
         }
         if (e.scene == scene || e.scene == next_scene) {
@@ -556,6 +675,40 @@ bool ogre::hd_backgrounds_covers_scene(uint16_t scene) {
         }
     }
     return false;
+}
+
+bool ogre::hd_backgrounds_is_screen_scene(uint16_t scene) {
+    return is_screen_scene(scene);
+}
+
+int ogre::hd_backgrounds_screen_strip_rows(int width) {
+    return std::max(1, 4096 / std::max(1, width * 2));
+}
+
+const ogre::ScreenBackdrop* ogre::hd_backgrounds_screen(uint16_t scene, bool wide) {
+    if (!g_pack.loaded) {
+        return nullptr;
+    }
+    for (Entry& e : g_pack.entries) {
+        if (!e.is_screen || e.scene != scene) {
+            continue;
+        }
+        ScreenImage& img =
+            (wide && !e.screen_wide.pixels.empty()) || e.screen.pixels.empty() ? e.screen_wide
+                                                                                : e.screen;
+        // The view points into the entry, which no longer moves once the pack
+        // is loaded, so it is filled here rather than at load time.
+        ScreenBackdrop& v = img.view;
+        v.name = e.name.c_str();
+        v.id = e.id.c_str();
+        v.width = img.width;
+        v.height = kScreenH;
+        v.x = 160 - img.width / 2;
+        v.strip_rows = hd_backgrounds_screen_strip_rows(img.width);
+        v.pixels = img.pixels.data();
+        return &v;
+    }
+    return nullptr;
 }
 
 // Called by the generated njpeg readback (tools/hd_backgrounds.py) at the end of

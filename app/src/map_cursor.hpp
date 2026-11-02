@@ -7,9 +7,11 @@
 // `OGRE_MAP_CURSOR=1`/`=0` overrides it for one run).
 //
 // Milestone A (landed, developer-confirmed 2026-10-10): the cursor sprite
-// follows the pointer smoothly. The game clamps the result to its play area
-// (x >= 0x28, the state machine's own clamp), so a pointer outside the map
-// holds the cursor on the frame.
+// follows the pointer smoothly. The pointer's pixel is clamped into the play
+// area (`ogre::map_cursor_bounds`) before it is written: the draw reads the
+// written pair before the state machine's own clamp runs again, so an
+// unclamped pointer put the cursor under the frame (developer report,
+// 2026-11-01).
 //
 // The map module records the cursor's position as screen pixels in its state
 // object, `state = *(u32*)0x80197B18`:
@@ -29,6 +31,23 @@
 // other place to hook this (see `app/src/hd_backgrounds.cpp` for the same
 // pattern).
 extern "C" void ogre_map_cursor(uint8_t* rdram, int32_t state);
+
+namespace ogre {
+
+// The cursor's play area in framebuffer pixels (x may be negative or past 320
+// in widescreen). In 4:3 it is the state machine's own clamp, x 40..272 and
+// y 40..192, inside the terrain window (32,32)-(288,217). With the map drawn
+// wide the window reaches the moved frame (map_widescreen.cpp) and the bounds
+// keep the same margins inside it. Safe to call from any thread.
+struct MapCursorBounds {
+    int min_x;
+    int max_x;
+    int min_y;
+    int max_y;
+};
+MapCursorBounds map_cursor_bounds();
+
+}  // namespace ogre
 
 // The pointer moved over the game window. `window_x`/`window_y` are window
 // points and the two size pairs are the window and its drawable; the hook

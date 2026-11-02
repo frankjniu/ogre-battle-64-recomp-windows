@@ -52,4 +52,33 @@ bool hd_backgrounds_covers_scene(uint16_t scene);
 // it with `TextureCache::loadReplacementDirectory`.
 std::filesystem::path hd_backgrounds_texture_pack();
 
+// A screen backdrop: the pack image for a screen whose own draw the port
+// patches to show it (the title, scene 0x04, the Hugo Report, scene 0x08, and
+// the Load Game book, scene 0x12; screen_backdrops.cpp). The image is
+// box-filtered to 240 rows with its aspect kept, its width rounded to a
+// multiple of 4 texels, and centred on the 320-wide screen, so an image wider
+// than 4:3 fills the widescreen sides. The draw loads it in strips of
+// `strip_rows` rows (one 4 KB TMEM load each) from a staging buffer in RDRAM;
+// every strip's pixels are unique, so RT64 can key an HD replacement to each.
+struct ScreenBackdrop {
+    const char* name = "";
+    const char* id = "";
+    int width = 0;       // texels, a multiple of 4
+    int height = 0;      // 240
+    int x = 0;           // screen x of column 0 (160 - width / 2)
+    int strip_rows = 0;  // rows per TMEM load
+    const uint16_t* pixels = nullptr;  // RGBA5551 values, row-major, opaque
+};
+
+// The scenes whose backdrop is a screen backdrop rather than an njpeg canvas.
+bool hd_backgrounds_is_screen_scene(uint16_t scene);
+
+// The pack's backdrop for a screen scene, or null. `wide` picks the `-wide`
+// image when the pack has one (the WIDESCREEN setting is on).
+const ScreenBackdrop* hd_backgrounds_screen(uint16_t scene, bool wide);
+
+// Rows per strip for a backdrop `width` texels wide: as many 16-bit rows as fit
+// in TMEM's 4 KB.
+int hd_backgrounds_screen_strip_rows(int width);
+
 }  // namespace ogre

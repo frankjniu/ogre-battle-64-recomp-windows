@@ -13,3 +13,29 @@ bss_section_suffix = ".bss"
 functions_per_output_file = 100
 
 function_sizes = []
+
+# The CHEATS tab's two battle cheats (app/src/cheats.hpp). The GameShark codes
+# for them rewrite instructions in this bank, and the code here is compiled C, so
+# each one is a hook that gives the patched instruction's result while the cheat
+# is ON and leaves the register unchanged while it is OFF.
+#
+# QUICK LEVEL GAIN (`811D639E 0000`): `sltiu v0,v0,100` at 0x801D639C becomes
+# `sltiu v0,v0,0`. The hook runs after it, before the `bnezl` that skips the
+# level-up while the unit's experience is below 100.
+[[patches.hook]]
+func = "func_ovlJ_801D61C0"
+before_vram = 0x801D63A0
+text = "{ uint64_t ogre_cheat_level_check(uint64_t); ctx->r2 = ogre_cheat_level_check(ctx->r2); }"
+
+# QUICK SOLDIER PROMOTION. The GameShark code (`811D25AA 9100`) turns
+# `sll s2,s2,1` at 0x801D25A8 into `sll s2,s2,4`, which still needs two battles
+# for a squad with two soldiers (96 points a battle, the check wants 100). At the
+# developer's request (2026-11-01) the cheat instead fills the counter: the hook
+# runs after `addu v0,v0,s2` at 0x801D25D8 (v0 = the leader's byte +0x37 plus
+# the battle's points s2) and, when the battle earned points, raises v0 to at
+# least 100 and at most 255 before the `sb` stores it. The promotion check
+# (state 8, `func_ovlJ_801D12B0`) runs later in the same battle result.
+[[patches.hook]]
+func = "func_ovlJ_801D204C"
+before_vram = 0x801D25DC
+text = "{ uint64_t ogre_cheat_promotion_counter(uint64_t, uint64_t); ctx->r2 = ogre_cheat_promotion_counter(ctx->r2, ctx->r18); }"

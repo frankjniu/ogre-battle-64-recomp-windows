@@ -333,6 +333,12 @@ Re-verify if in doubt; otherwise start from here.
   a `malloc(0x18000)` RGBA32 sheet at `state[+0x34]` (24 frames, `0x1000` each);
   `state` is `*(0x80197B18)`. Do not "fix" entry indices or texture offsets in
   generated C.
+- **Widescreen.** RT64's Expand widens 3D projections; 2D rectangles keep their
+  4:3 size and position, centred. A 2D screen is widened by hooking its own draw
+  to emit RT64 extended GBI (edge-anchored rectangles and scissors, signed
+  coordinates). The world map and the Organize Screen do this;
+  `docs/guides/widescreen.md` is the
+  method.
 - **RSPRecomp's `text_address` is a label base**: the IMEM DMA address masked
   `0x1FFF` (`0x1080` for a ucode loaded at IMEM `0x080`), not the text's RDRAM
   address. A wrong value rotates every `j` target.

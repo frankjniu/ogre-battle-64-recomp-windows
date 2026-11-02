@@ -2500,7 +2500,7 @@ index 641f3ec..598f872 100644
          ShaderLibrary(bool usesHDR, bool usesHardwareResolve);
          ~ShaderLibrary();
 diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
-index b4ff4e9..95b13d3 100644
+index b4ff4e9..90082d6 100644
 --- a/src/render/rt64_vi_renderer.cpp
 +++ b/src/render/rt64_vi_renderer.cpp
 @@ -4,6 +4,9 @@
@@ -2513,7 +2513,7 @@ index b4ff4e9..95b13d3 100644
  #include "shared/rt64_hlsl.h"
  #include "shared/rt64_video_interface.h"
  
-@@ -14,6 +17,33 @@ namespace RT64 {
+@@ -14,6 +17,39 @@ namespace RT64 {
  
      VIRenderer::~VIRenderer() { }
  
@@ -2537,9 +2537,15 @@ index b4ff4e9..95b13d3 100644
 +        return hlslpp::uint2(crop, crop);
 +    }
 +
++    // OGRE: a screen that draws its own last row and column every frame turns
++    // the crop off while it is up: the app returns 0 then, and -1 otherwise
++    // (the world map in widescreen, app/src/map_widescreen.cpp).
++    extern "C" int ogre_overscan_crop_override();
++
 +    static hlslpp::uint2 visibleFramebufferSize(const VI &vi) {
 +        const hlslpp::uint2 fbSize = vi.fbSize();
-+        const hlslpp::uint2 crop = overscanCrop();
++        const int forced = ogre_overscan_crop_override();
++        const hlslpp::uint2 crop = (forced >= 0) ? hlslpp::uint2(uint32_t(forced), uint32_t(forced)) : overscanCrop();
 +        return hlslpp::uint2((fbSize.x > crop.x) ? (fbSize.x - crop.x) : fbSize.x,
 +                             (fbSize.y > crop.y) ? (fbSize.y - crop.y) : fbSize.y);
 +    }
@@ -2547,7 +2553,7 @@ index b4ff4e9..95b13d3 100644
      inline hlslpp::float2 computeHDSize(hlslpp::float2 sdSize, hlslpp::float2 resolutionScale, uint32_t downsamplingScale) {
          return (sdSize * resolutionScale) / float(downsamplingScale);
      }
-@@ -41,7 +71,124 @@ namespace RT64 {
+@@ -41,7 +77,124 @@ namespace RT64 {
          return windowCenter + relativeCoordinate * relativeScale;
      }
  
@@ -2672,7 +2678,7 @@ index b4ff4e9..95b13d3 100644
          const ShaderRecord *shader = nullptr;
          const RenderSampler *sampler = nullptr;
          switch (p.filtering) {
-@@ -74,7 +221,7 @@ namespace RT64 {
+@@ -74,7 +227,7 @@ namespace RT64 {
          p.commandList->setScissors(scissor);
  
          interop::VideoInterfaceCB pushConstants;
@@ -2681,7 +2687,7 @@ index b4ff4e9..95b13d3 100644
          pushConstants.textureResolution = { float(p.textureWidth), float(p.textureHeight) };
          pushConstants.gamma = p.vi->gamma();
  
-@@ -105,7 +252,12 @@ namespace RT64 {
+@@ -105,7 +258,12 @@ namespace RT64 {
          const hlslpp::float2 windowSize = { float(swapChain->getWidth()), float(swapChain->getHeight()) };
  
          // Query the VI for the current rendering area.

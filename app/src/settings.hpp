@@ -335,20 +335,44 @@ void set_mouse_mode(MouseMode mode);
 // The MOUSE ENABLED row's options as one string (radio markers and labels).
 std::string mouse_mode_text();
 
-// The CHEATS tab: MAX GOTH and MAX ITEM COUNTS, two OFF/ON rows. While ON,
-// cheats.cpp writes the value every frame (cheats.hpp has the addresses and
-// the evidence). Both are OFF by default and saved as `cheat_max_goth` and
-// `cheat_max_items`; `OGRE_CHEAT_MAX_GOTH` and `OGRE_CHEAT_MAX_ITEMS` override
-// them for one run. The rows use the OFF/ON labels of `mouse_mode_label`.
-bool cheat_max_goth();
-int cheat_max_goth_index();
-void set_cheat_max_goth(bool on);
-std::string cheat_max_goth_text();
+// The CHEATS tab: six OFF/ON rows and TIME OF DAY (cheats.hpp has the addresses
+// and the evidence). While a cheat is ON, cheats.cpp writes its value every
+// frame, or a hook in bank J's battle-result code reads it (QUICK LEVEL GAIN,
+// QUICK SOLDIER PROMOTION). Every cheat is OFF by default. Each one is saved as
+// its `key` (`off|on`; `cheat_hour` is `off|0..23`), and its `env` variable
+// overrides it for one run. The OFF/ON rows use the labels of
+// `mouse_mode_label`.
+enum class Cheat {
+    MaxGoth = 0,
+    MaxItems,
+    QuickLevelGain,
+    QuickPromotion,
+    AllClasses,
+    DayZero,
+};
 
-bool cheat_max_items();
-int cheat_max_items_index();
-void set_cheat_max_items(bool on);
-std::string cheat_max_items_text();
+constexpr int kCheatCount = 6;
+
+// The live value. Any thread may call it: the bank J hooks run on the game's
+// threads.
+bool cheat_enabled(Cheat cheat);
+int cheat_index(Cheat cheat);
+void set_cheat(Cheat cheat, bool on);
+std::string cheat_text(Cheat cheat);
+
+// TIME OF DAY: OFF, or an hour 0..23 that cheats.cpp holds in the game clock.
+// Option 0 is OFF and option `1 + h` holds hour `h`, so the presets of the
+// GameShark list (00, 06, 12, 18, 23) are options of one row and cannot be ON
+// together.
+constexpr int kCheatHourOptionCount = 25;
+
+// The held hour, or -1 while the row is OFF. Any thread may call it.
+int cheat_hour();
+int cheat_hour_index();
+void set_cheat_hour_index(int index);
+// "OFF", then "00".."23".
+std::string cheat_hour_label(int index);
+std::string cheat_hour_text();
 
 // The VOLUME row: a slider over 0..100 percent, drawn as `kVolumeCells`
 // characters with the handle on one of them.

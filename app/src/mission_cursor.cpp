@@ -7,9 +7,11 @@
 // counter, because "which screen is up" is what gates the click's `A`.
 
 #include "mission_cursor.hpp"
+#include "widescreen_gbi.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -286,13 +288,16 @@ uint16_t edge_forced() {
 // The D-pad bits for a framebuffer pixel inside the field's view. A pixel within
 // `kEdgeMargin` of a play-area bound pushes that way, and the bounds are the
 // mover's own clamps, so the push starts where the cursor would stop moving.
+// With WIDESCREEN the x bounds are widened by the extension, as the mover's are
+// (app/src/mission_widescreen.cpp).
 uint16_t edge_direction_for(int fb_x, int fb_y) {
     const int margin = edge_margin();
+    const int extension = ogre::widescreen_2d_extension();
     uint16_t direction = 0;
-    if (fb_x <= static_cast<int>(kPlayMinX) + margin) {
+    if (fb_x <= static_cast<int>(kPlayMinX) - extension + margin) {
         direction |= kPadLeft;
     }
-    else if (fb_x >= static_cast<int>(kPlayMaxX) - margin) {
+    else if (fb_x >= static_cast<int>(kPlayMaxX) + extension - margin) {
         direction |= kPadRight;
     }
     if (fb_y <= static_cast<int>(kPlayMinY) + margin) {
@@ -341,7 +346,10 @@ bool forced_point(int& x, int& y) {
 // The presented picture is the 320x240 framebuffer, aspect-fit and centered in
 // the drawable. Mouse events are in window points; the drawable is in pixels.
 // Writes the framebuffer pixel, clamped into the framebuffer's range, and
-// returns false when the point is outside the framebuffer.
+// returns false when the point is outside the framebuffer. With WIDESCREEN the
+// field's picture is `extension` pixels wider on each side at the same scale
+// (Expand keeps every world point at its 320-wide x), so x runs from -extension
+// to 320 + extension.
 bool window_to_framebuffer(int window_x, int window_y, int win_w, int win_h, int draw_w,
                            int draw_h, int& fb_x, int& fb_y) {
     if (win_w <= 0 || win_h <= 0 || draw_w <= 0 || draw_h <= 0) {
@@ -349,6 +357,7 @@ bool window_to_framebuffer(int window_x, int window_y, int win_w, int win_h, int
     }
     constexpr float kFbW = 320.0f;
     constexpr float kFbH = 240.0f;
+    const float extension = static_cast<float>(ogre::widescreen_2d_extension());
     const float px = static_cast<float>(window_x) * static_cast<float>(draw_w) /
                      static_cast<float>(win_w);
     const float py = static_cast<float>(window_y) * static_cast<float>(draw_h) /
@@ -360,9 +369,9 @@ bool window_to_framebuffer(int window_x, int window_y, int win_w, int win_h, int
     const float origin_y = (static_cast<float>(draw_h) - kFbH * scale) * 0.5f;
     const float gx = (px - origin_x) / scale;
     const float gy = (py - origin_y) / scale;
-    fb_x = static_cast<int>(std::min(std::max(gx, 0.0f), kFbW - 1.0f));
+    fb_x = static_cast<int>(std::floor(std::min(std::max(gx, -extension), kFbW + extension - 1.0f)));
     fb_y = static_cast<int>(std::min(std::max(gy, 0.0f), kFbH - 1.0f));
-    return gx >= 0.0f && gy >= 0.0f && gx < kFbW && gy < kFbH;
+    return gx >= -extension && gy >= 0.0f && gx < kFbW + extension && gy < kFbH;
 }
 
 // One u16 mask out of the input profile the mover masks the held word against.
@@ -628,7 +637,8 @@ extern "C" void ogre_mission_cursor(uint8_t* rdram) {
         mouse_y = game_y;
     }
 
-    const float x = std::min(std::max(mouse_x, kPlayMinX), kPlayMaxX);
+    const float extension = static_cast<float>(ogre::widescreen_2d_extension());
+    const float x = std::min(std::max(mouse_x, kPlayMinX - extension), kPlayMaxX + extension);
     const float y = std::min(std::max(mouse_y, kPlayMinY), kPlayMaxY);
 
     // The camera's eye and look-at x/z, so a log shows whether the field's view

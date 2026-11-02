@@ -58,6 +58,7 @@ case "$kind" in
 esac
 [ -f "$app" ] || fail "the app binary is missing ($app)"
 [ -f "$dist/README.txt" ] || fail "README.txt is missing from the package"
+[ -f "$dist/LICENSE.txt" ] || fail "LICENSE.txt (GPL-3.0) is missing from the package"
 
 # The package must carry the example mods the README lists. `make dist` requires
 # them, and this is the check that fails on a package built before that rule:

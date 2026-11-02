@@ -7,9 +7,12 @@
 // counter-scales the game's projection matrices by `1/scale` for the
 // projections that cover the screen and are wider than tall
 // (`ProjectionProcessor::processScene`). The portable result is hor+: the same
-// vertical framing with more world at the sides. The 2D draws that are not
-// counter-scaled are stretched horizontally, which is why the default is Off
-// and Expand is limited to the mission scene the setting exists for.
+// vertical framing with more world at the sides. 2D rectangles keep their 4:3
+// size and position, centred, so a 2D screen gains black sides; Expand is
+// limited to the scenes in `expand_scenes`. The world map (`0x05`) and the
+// Organize Screen (`0x06`) are 2D and are widened by patching their own draws
+// (map_widescreen.cpp, organize_widescreen.cpp), which this file turns on
+// through `widescreen_2d_set_extension`.
 //
 // The value lives in `GraphicsConfig` and reaches RT64 through the runtime:
 // `ultramodern::renderer::set_graphics_config` flags an `UpdateConfigAction`,
@@ -24,8 +27,10 @@
 
 #include "widescreen.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -36,6 +41,7 @@
 
 #include "bank_overlays.hpp"
 #include "hd_backgrounds.hpp"
+#include "widescreen_gbi.hpp"
 #include "settings.hpp"
 
 namespace ogre {
@@ -50,15 +56,27 @@ constexpr uint16_t kMissionScene = 0x0003;
 // 496x384 canvas and the 4:3 view crops it, so Expand reveals the sides of the
 // game's own art (verified with the HD-background pack off: the wide capture
 // shows statues and columns the 4:3 capture does not). It expands whether or not
-// the pack is installed.
+// the pack is installed. The cutscene vignette over it is 2D and is widened by
+// app/src/cutscene_widescreen.cpp.
 constexpr uint16_t kDialogueScene = 0x000D;
+
+// Scene `0x05` is the world map. Its draw is all 2D rectangles, which Expand
+// keeps at their 4:3 positions; app/src/map_widescreen.cpp patches the map
+// module to fill the wide picture (extended GBI, anchored to the edges).
+constexpr uint16_t kMapScene = 0x0005;
+
+// Scene `0x06` is the Organize Screen. It draws with an orthographic projection
+// laid out for 320x240 (`guOrtho(-160, 160, -120, 120)` at 0x801B80BC), so
+// Expand keeps it 4:3; app/src/organize_widescreen.cpp widens its background
+// and anchors its panels to the edges.
+constexpr uint16_t kOrganizeScene = 0x0006;
 
 // The scenes Expand is used for by default. `OGRE_WS_SCENES=<hex>[,<hex>...]`
 // replaces the set for a developer run. The set is parsed once. A scene the
 // HD-background pack covers is added by `scene_expands` on top of this.
 const std::vector<uint16_t>& expand_scenes() {
     static const std::vector<uint16_t> scenes = [] {
-        std::vector<uint16_t> out{kMissionScene, kDialogueScene};
+        std::vector<uint16_t> out{kMissionScene, kDialogueScene, kMapScene, kOrganizeScene};
         const char* spec = std::getenv("OGRE_WS_SCENES");
         if (spec == nullptr || spec[0] == '\0') {
             return out;
@@ -123,6 +141,28 @@ bool g_have_last_mode = false;
 // Set by the renderer when it has left fullscreen, consumed by the next
 // `widescreen_update`. Written from the renderer thread.
 std::atomic<bool> g_refit_requested{false};
+
+// RT64's swap chain size, from the renderer's present. RT64 derives Expand's
+// target aspect from it (`WorkloadQueue::threadConfigurationUpdate`), so the
+// world map's extension uses the same numbers. SDL's idea of the window size is
+// stale in fullscreen, where RT64 resizes the window itself.
+std::atomic<uint32_t> g_swap_width{0};
+std::atomic<uint32_t> g_swap_height{0};
+
+// The patched 2D screens' extension per side, in 320-wide pixels: Expand widens the
+// picture from 4:3 to the swap chain's aspect, so each side gains
+// 160 * (aspect / (4/3) - 1). Rounded up so the scroll clamp keeps the whole
+// view on the map.
+int extension_for_swapchain() {
+    const uint32_t width = g_swap_width.load(std::memory_order_relaxed);
+    const uint32_t height = g_swap_height.load(std::memory_order_relaxed);
+    if (width == 0 || height == 0) {
+        return 0;
+    }
+    const double aspect = std::max(static_cast<double>(width) / height, 4.0 / 3.0);
+    const double extension = 160.0 * (aspect / (4.0 / 3.0) - 1.0);
+    return static_cast<int>(std::ceil(extension - 0.01));
+}
 
 int width_for_height(int height, float aspect) {
     return static_cast<int>(std::lround(static_cast<double>(height) * aspect));
@@ -194,6 +234,13 @@ bool widescreen_update() {
         wants_expand() ? ultramodern::renderer::AspectRatio::Expand
                        : ultramodern::renderer::AspectRatio::Original;
 
+    // The width the picture gains on each side, for the patched draws (the map,
+    // the Organize Screen) and the cursor bounds (the map, the mission field).
+    // Their hooks run only inside their own scenes' code.
+    widescreen_2d_set_extension(wanted == ultramodern::renderer::AspectRatio::Expand
+                                    ? extension_for_swapchain()
+                                    : 0);
+
     const ultramodern::renderer::GraphicsConfig config =
         ultramodern::renderer::get_graphics_config();
     if (config.ar_option == wanted) {
@@ -248,6 +295,11 @@ void widescreen_fit_window(SDL_Window* window) {
 
 void widescreen_request_refit() {
     g_refit_requested.store(true);
+}
+
+void widescreen_note_swapchain(unsigned int width, unsigned int height) {
+    g_swap_width.store(width, std::memory_order_relaxed);
+    g_swap_height.store(height, std::memory_order_relaxed);
 }
 
 void widescreen_initial_window_size(int& width, int& height) {

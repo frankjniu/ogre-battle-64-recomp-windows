@@ -15,7 +15,8 @@ this file.
   shared with the browser build still guards native-only includes with `#ifndef __EMSCRIPTEN__`
   (sessions 109, 138, 145).
 - **The app is GPL-3.0.** N64ModernRuntime is GPL-3.0 and statically linked; N64Recomp and RT64 are
-  MIT (Phase 3, 2026-08-24).
+  MIT (Phase 3, 2026-08-24). `LICENSE` holds the GPL-3.0 text, and `make dist` copies it into the
+  package as `LICENSE.txt`; `tools/smoke-dist.sh` fails a package without it (2026-11-01).
 
 ## Build and code generation
 
@@ -194,11 +195,15 @@ this file.
   because the game's call stacks are native, and an in-game jump to the title from scene `0x0D`
   crashed in the frame pump on the cutscene engine's stale code (developer chose save slots,
   2026-10-31).
-- **Cheats are built-in toggles at addresses read from this ROM's code, held every frame while ON.**
-  The CHEATS tab offers MAX GOTH (`0x80196A8C`) and MAX ITEM COUNTS (the lists `0x80196B20` and
-  `0x80193AE0`); `cheats_tick()` writes them once per frame from the main thread. The published
-  GameShark codes target another revision and sit 0x20 bytes off in this block, and there is no
-  custom-code file (developer, 2026-10-31).
+- **Cheats are built-in toggles at addresses checked against this ROM's code.** The CHEATS tab
+  offers MAX GOTH and MAX ITEM COUNTS (developer, 2026-10-31) and the USA v1.1 GameShark list
+  (developer, 2026-11-01); there is no custom-code file. A data cheat is held once per frame by
+  `cheats_tick()` on the main thread. A code that rewrites an instruction is a `[[patches.hook]]`
+  in the bank's config that reproduces the instruction's result while the row is ON, because
+  RDRAM writes to code have no effect on compiled C. A write into a swappable bank's RAM is gated
+  on that bank's ROM words being resident. The v1.0 codes sit 0x20 bytes lower in the army block.
+  QUICK SOLDIER PROMOTION does not copy its code: one battle must always promote, so the hook fills
+  the leader's counter to 100 (developer, 2026-11-01).
 - **UI text is drawn through `ui::TextCache`, and the start screen's renderer has vsync.** A cached
   run keeps its texture across frames and at least to the end of the frame that drew it; one
   `TextLayer` rebuilt for several runs in a frame lost the overlay's LOTTES label. The launcher and
@@ -206,8 +211,8 @@ this file.
   SETTINGS used 170% of one core, 122% with the cache, 7% with vsync (2026-10-31).
 - **Player settings live in `<config>/settings.cfg`, and an `OGRE_*` variable overrides a key for
   one run without writing it back.** The keys are `game_speed`, `widescreen`, `sounds`, `volume`,
-  `render_resolution`, `crt_filter`, `msaa`, `window`, `mouse`, `cheat_max_goth` and
-  `cheat_max_items` (sessions 93, 102, 121; 2026-10-31).
+  `render_resolution`, `crt_filter`, `msaa`, `window`, `mouse` and the `cheat_*` keys
+  (sessions 93, 102, 121; 2026-10-31).
 - **RESOLUTION defaults to `auto` (RT64 `WindowIntegerScale`) under the key `render_resolution`.**
   Files written while the row was hidden carry a `resolution = native` no player chose, so that key
   is ignored. Integer scales keep 2D pixels even (session 145).
@@ -224,9 +229,18 @@ this file.
 - **A fullscreen window's geometry belongs to RT64.** RT64 uses a raw `SetWindowPos` that SDL does
   not see, so `widescreen_fit_window` does nothing in fullscreen and leaving it calls
   `widescreen_request_refit()` (session 121).
-- **WIDESCREEN `on` opens a 16:9 window and expands only the mission scene `0x03` and scenes an HD
-  background pack covers.** The window shape never changes with the scene, and other scenes are
-  pillarboxed; `app/src/widescreen.cpp` owns RT64's `ar_option` (sessions 105, 114).
+- **WIDESCREEN `on` opens a 16:9 window and expands the mission `0x03`, the dialogue scene `0x0D`,
+  the world map `0x05`, the Organize Screen `0x06` and scenes an HD background pack covers.** The
+  window shape never changes with the scene, and other scenes are pillarboxed;
+  `app/src/widescreen.cpp` owns RT64's `ar_option` (sessions 105, 114).
+- **A 2D screen is widened by patching its own draw with RT64 extended GBI, not by stretching.**
+  Expand keeps a 2D layout at 4:3; the world map's and the Organize Screen's draws are hooked
+  (`config/banks/config-bankM.toml`, `config-bankS.toml`; `app/src/map_widescreen.cpp`,
+  `organize_widescreen.cpp`), with RT64's `extAspectRatio` set to `Expand`. The developer chose
+  (2026-11-01): on the map, more map with the frame at the edges over a 4:3 map with extended frame
+  art; on the Organize Screen, the background across the full width, the counters and WAR FUNDS at
+  the left edge, the name plate at the right edge, and the grid centred.
+  `docs/guides/widescreen.md` is the method.
 - **GAME SPEED offers 1, 2, 4 and 8.** `=`/`-` step it, the pad's R3 cycles it, both are ignored
   while the ESC panel is open, and a badge window shows the multiplier for 2 s. Speed 6 stays out
   because the cursors are too fast to aim (sessions 93, 137).

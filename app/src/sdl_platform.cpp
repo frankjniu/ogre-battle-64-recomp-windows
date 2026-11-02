@@ -1,5 +1,6 @@
 #include "ram_key.hpp"
 #include "sdl_platform.hpp"
+#include "audio_out.hpp"
 #include "synth_frame.hpp"
 #include "bank_overlays.hpp"
 #include "crash_log.hpp"
@@ -548,10 +549,7 @@ void shutdown_sdl(Platform& platform) {
             controller = nullptr;
         }
     }
-    if (platform.audio_device != 0) {
-        SDL_CloseAudioDevice(platform.audio_device);
-        platform.audio_device = 0;
-    }
+    audio_out::close();
 #if defined(__APPLE__)
     // The Metal view must be released before the window it belongs to.
     if (platform.metal_view != nullptr) {
@@ -607,37 +605,6 @@ void PadList::close_all() {
         }
     }
 }
-
-void open_audio(Platform& platform, uint32_t frequency) {
-    if (platform.audio_device != 0) {
-        SDL_CloseAudioDevice(platform.audio_device);
-        platform.audio_device = 0;
-    }
-    // OGRE_NO_AUDIO=1: skip opening an output device entirely. SDL's
-    // SDL_OpenAudioDevice() blocks indefinitely on some hosts (observed on
-    // macOS when no output device is usable), and because the runtime calls it
-    // from the game start thread's preinit(), that stalls the whole boot before
-    // a single recompiled function runs. Audio is not needed for rendering
-    // diagnostics, so allow a run to proceed silently without it.
-    if (getenv("OGRE_NO_AUDIO") != nullptr) {
-        platform.audio_frequency = frequency;
-        fprintf(stderr, "[SDL] OGRE_NO_AUDIO: no output device opened\n");
-        return;
-    }
-    SDL_AudioSpec want{};
-    want.freq = static_cast<int>(frequency);
-    want.format = AUDIO_S16SYS;
-    want.channels = 2;
-    want.samples = 512;
-    platform.audio_device = SDL_OpenAudioDevice(nullptr, 0, &want, nullptr, 0);
-    platform.audio_frequency = frequency;
-    if (platform.audio_device == 0) {
-        fprintf(stderr, "[SDL] Failed to open audio device: %s\n", SDL_GetError());
-        return;
-    }
-    SDL_PauseAudioDevice(platform.audio_device, 0);
-}
-
 
 // Hides the operating system pointer while it is over the game window, and
 // restores it the moment the pointer leaves or the Esc overlay opens. The
@@ -781,6 +748,10 @@ void pump_sdl_events(Platform& platform, bool* quit) {
     // OGRE_RAM_KEY_ADDR to a file, so a bug can be investigated offline with no
     // copying out of a terminal (see app/src/ram_key.hpp).
     ram_key_tick(ultramodern_get_rdram_base());
+
+    // OGRE_AUDIO_MARK_KEY=<1..9>: stamp a click the listener heard into the
+    // log (audio_out.cpp).
+    audio_out::tick();
 
     // OGRE_WINDOW_CLOSE_AT_MS=<n>: push one SDL_WINDOWEVENT_CLOSE for the game
     // window `n` ms after the platform was configured. Development aid for the
@@ -2219,45 +2190,22 @@ ultramodern::input::callbacks_t make_input_callbacks() {
 }
 
 
+// The SOUNDS and VOLUME settings scale the samples in the output callback
+// (audio_out.cpp). Every AI buffer is queued at every gain, including 0: the
+// runtime paces the game's audio generation from the queued depth
+// (`ultramodern::audio_dma_busy()` reads `get_frames_remaining`), so a mute
+// that queued nothing would leave the AI idle and make the game overproduce.
 static void queue_audio_samples(int16_t* samples, size_t count) {
-    extern Platform g_platform;
-    if (g_platform.audio_device == 0 || samples == nullptr || count == 0) {
-        return;
-    }
-    // The SOUNDS and VOLUME settings scale the samples on their way to the
-    // device. The frame count is the same at every gain, including 0: the
-    // runtime paces the game's audio generation from the queued depth
-    // (`ultramodern::audio_dma_busy()` reads `get_frames_remaining`), so a mute
-    // that queued nothing would leave the AI idle and make the game overproduce.
-    const int gain = audio_gain_percent();
-    if (gain >= 100) {
-        SDL_QueueAudio(g_platform.audio_device, samples,
-                       static_cast<Uint32>(count * sizeof(int16_t)));
-        return;
-    }
-    // Scale into a scratch buffer rather than in place: `samples` points into
-    // the game's RDRAM, and the next AI buffer may already be live there.
-    static std::vector<int16_t> scaled;
-    scaled.resize(count);
-    for (size_t i = 0; i < count; i++) {
-        scaled[i] = static_cast<int16_t>(static_cast<int32_t>(samples[i]) * gain / 100);
-    }
-    SDL_QueueAudio(g_platform.audio_device, scaled.data(),
-                   static_cast<Uint32>(count * sizeof(int16_t)));
+    audio_out::queue_samples(samples, count);
 }
 
 static size_t get_audio_frames_remaining() {
-    extern Platform g_platform;
-    if (g_platform.audio_device == 0) {
-        return 0;
-    }
-    return SDL_GetQueuedAudioSize(g_platform.audio_device) / sizeof(int16_t);
+    return audio_out::queued_samples();
 }
 
 static void set_audio_frequency(uint32_t frequency) {
-    extern Platform g_platform;
-    if (frequency != g_platform.audio_frequency) {
-        open_audio(g_platform, frequency);
+    if (frequency != audio_out::frequency()) {
+        audio_out::open(frequency);
     }
 }
 

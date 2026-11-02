@@ -18,3 +18,23 @@ functions_per_output_file = 100
 # ends in the middle of a call-and-continue emission has to be extended here
 # (the failure is "use of undeclared label" at the `goto after_N`).
 function_sizes = []
+
+# ---------------------------------------------------------------------------
+# The Hugo Report's backdrop (scene 0x08, app/src/screen_backdrops.cpp).
+# func_ovlK_802349AC(record) draws a full-screen CI8 image record: the setup
+# list 0x8023DF68, the TLUT load, then the strips through
+# func_ovlK_8022B9A0(record, 0, 0) (`jal` at 0x80234B44). With a pack image for
+# scene 0x08, the strips of the griffin image are replaced by the pack
+# backdrop's. Both hooks return at once without a pack image.
+
+# The second instruction (`move $t2, $a0`): $a0 is the record.
+[[patches.hook]]
+func = "func_ovlK_802349AC"
+before_vram = 0x802349B0
+text = "{ void ogre_hugo_image_begin(uint8_t*, uint32_t); ogre_hugo_image_begin(rdram, (uint32_t)ctx->r4); }"
+
+# After the strip call returns (`lw $ra, 0x10($sp)`, before `jr ra`).
+[[patches.hook]]
+func = "func_ovlK_802349AC"
+before_vram = 0x80234B4C
+text = "{ void ogre_hugo_image_end(uint8_t*); ogre_hugo_image_end(rdram); }"

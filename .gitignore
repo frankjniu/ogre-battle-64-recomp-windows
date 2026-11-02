@@ -5,6 +5,18 @@ assets/
 mods/backgrounds/reference/
 # HD strips generated from the pack's PNGs (tools/backgrounds.py hd, make bg-hd).
 mods/backgrounds/hd/
+# HD masters of the game's textures (tools/hdtex.py pack): AI-upscaled from the
+# ROM's art, so derived from the ROM.
+mods/backgrounds/hd-src/
+# The title, Load Game and Hugo Report backdrops are AI-upscaled and
+# outpainted from the game's own art, so they are derived from the ROM and stay
+# out of the repository like other assets.
+mods/backgrounds/title.png
+mods/backgrounds/title-wide.png
+mods/backgrounds/loadgame.png
+mods/backgrounds/loadgame-wide.png
+mods/backgrounds/hugo.png
+mods/backgrounds/hugo-wide.png
 
 # Generated artifacts
 build/

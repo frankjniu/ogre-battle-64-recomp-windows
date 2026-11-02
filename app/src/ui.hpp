@@ -163,6 +163,11 @@ public:
         Volume,
         CheatMaxGoth,
         CheatMaxItems,
+        CheatQuickLevel,
+        CheatQuickPromotion,
+        CheatAllClasses,
+        CheatDayZero,
+        CheatHour,
         ChaosFrame,
     };
 

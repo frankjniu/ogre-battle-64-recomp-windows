@@ -188,7 +188,7 @@ While on the map, pressing **R** opens a horizontal menu:
 | # | entry | what it opens |
 |---|---|---|
 | 1 | **Organize** (the default selection) | the screen where the player manages the army |
-| 2 | **Hugo Report** (press → once) | information about the game |
+| 2 | **Hugo Report** (press → once) | information about the game. Scene `0x08` (descriptor `0x8018FC64`, records 14 and 30): Hugo the Tactician's portrait and text, a `MENU` window (`Events`, `Miscellany`, `Tips`) and a `TIME` window over a stone tablet with a griffin relief (2026-11-01 capture) |
 | 3 | **Settings** | a window with game/text speed and misc settings |
 | 4 | **Save** | a window with **two slots stacked vertically**; selecting one shows the confirmation *"Any existing data will be overwritten. Proceed?"* with **Yes/No** (Yes is the default). Choosing Yes saves the game |
 

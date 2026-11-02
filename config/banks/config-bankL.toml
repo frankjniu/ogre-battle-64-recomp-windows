@@ -18,3 +18,12 @@ functions_per_output_file = 100
 function_sizes = [
     { name = "func_ovlL_8022EA08", size = 0x4CC },
 ]
+
+# The cutscene vignette (`func_ovlL_8022BE50`): after the ring's ten vertices
+# are copied to the frame's vertex buffer, widen their x for WIDESCREEN so the
+# ring spans the wide picture (app/src/cutscene_widescreen.cpp; a no-op while
+# the widescreen extension is 0).
+[[patches.hook]]
+func = "func_ovlL_8022BE50"
+before_vram = 0x8022BE80
+text = "{ void ogre_cutws_vignette(uint8_t*); ogre_cutws_vignette(rdram); }"

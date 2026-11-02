@@ -88,9 +88,26 @@ def default_app() -> Path:
     return APP_CANDIDATES[0]
 
 # Scene 0x0D is the dialogue/cutscene scene the New Game opening drives with
-# OGRE_SCENE=new-game and OGRE_STEP=<step>. Any other scene has no such route, so
-# the tool forces it and warns.
+# OGRE_SCENE=new-game and OGRE_STEP=<step>. The screen scenes below start from
+# the title: the title is forced, and the Load Game book (0x12) is the title's
+# Load Game entry, which needs a battery save with data (`--save`); Start then
+# picks it, as the cursor starts there. The Hugo Report (0x08) goes on from the
+# book: A loads the first slot, which must be a save on the world map (0x05),
+# and the map's R menu opens on Organize, so right and A open the report. Its
+# taps run at normal speed: at OGRE_SPEED=8 a 150 ms press lasts 1.2 s of game
+# time and the menu cursor can move twice. Any other scene has no route, so the
+# tool forces it and warns.
 DIALOGUE_SCENE = 0x0D
+SCREEN_ROUTES = {
+    0x04: {"OGRE_SCENE": "title"},
+    0x08: {"OGRE_SCENE": "title", "OGRE_SPEED": "1", "OGRE_EXIT_AFTER_MS": "30000",
+           "OGRE_TAP_MS": "1500",
+           "OGRE_TAP_SCENE_BUTTON": "title:start:5,0x12:a:3,0x05:none:3,0x05:r:1,"
+                                    "0x05:right:1,0x05:a:1"},
+    0x12: {"OGRE_SCENE": "title", "OGRE_TAP_MS": "1500",
+           "OGRE_TAP_SCENE_BUTTON": "title:start:5"},
+}
+SCREEN_NEEDS_SAVE = {0x08, 0x12}
 
 # At OGRE_SPEED=8 the boot plus the preload reaches the first dialogue in a few
 # wall-clock seconds; 20 s leaves room for a slow machine.
@@ -105,7 +122,9 @@ def read_mapping(path: Path) -> list[tuple[str, str, int, int]]:
         if len(fields) != 4:
             continue
         eid, name, scene, step = fields
-        entries.append((eid, name, int(scene, 0) & 0x7FFF, int(step, 0) & 0x7FFF))
+        # A screen backdrop has no scripted step; its line carries `-`.
+        step_value = 0 if step == "-" else int(step, 0) & 0x7FFF
+        entries.append((eid, name, int(scene, 0) & 0x7FFF, step_value))
     return entries
 
 
@@ -142,6 +161,19 @@ def run_route(app: Path, rom: Path, scene: int, step: int, extra: dict[str, str]
     if scene == DIALOGUE_SCENE:
         env["OGRE_SCENE"] = "new-game"
         env["OGRE_STEP"] = str(step)
+    elif scene in SCREEN_ROUTES:
+        env.update(SCREEN_ROUTES[scene])
+        env.pop("OGRE_STEP", None)
+        if scene in SCREEN_NEEDS_SAVE:
+            if not env.get("OGRE_SAVE"):
+                raise SystemExit(f"backgrounds.py: scene 0x{scene:02X} needs a battery save with "
+                                 f"data; pass --save <path>")
+            env["OGRE_SAVE_RESET"] = "1"
+        # A scratch config folder, so the run never writes the player's saves.
+        if not env.get("OGRE_PREF_DIR"):
+            import tempfile
+
+            env["OGRE_PREF_DIR"] = tempfile.mkdtemp(prefix="ogre-bg-pref-")
     else:
         env["OGRE_SCENE"] = hex(scene)
         env.pop("OGRE_STEP", None)
@@ -487,6 +519,222 @@ def build_variant(variant: str, source: Path, dump: Path, scale: int | None
     return out, version
 
 
+# --- Screen backdrops (the title) -------------------------------------------
+#
+# A screen backdrop is drawn by a patch of the screen's own 2D draw
+# (app/src/screen_backdrops.cpp): the image, box-filtered to 240 rows with its
+# aspect kept and its width rounded to a multiple of 4, is staged at
+# 0x80600000 as RGBA16 and drawn in strips of as many rows as fit in TMEM's
+# 4 KB, centred on the 320-wide screen (`load_screen` in hd_backgrounds.cpp).
+# The game layers that stay on top of it get HD strips cut from the same image,
+# with the game's own alpha: for the title, the hill (RGBA32 200x112 at screen
+# (0, 126)), which hides the black block of the soldier sprite drawn before it.
+
+SCREEN_H = 240
+STAGE_ADDRESS = 0x600000
+# Game layers drawn over the backdrop, per scene: (fmt, siz, width, height,
+# screen x, screen y). RT64 dumps the physical address of a load; these images
+# are heap allocations, so they are named by format and size.
+SCREEN_OVERLAYS = {0x04: [(0, 3, 200, 112, 0, 126)]}
+
+
+def screen_width(sw: int, sh: int) -> int:
+    """The staged width, as `load_screen` computes it."""
+    return max(4, cpp_lround(sw * SCREEN_H / sh / 4.0) * 4)
+
+
+def screen_strip_rows(width: int) -> int:
+    return max(1, 4096 // max(1, width * 2))
+
+
+def lowres_screen(img, width: int) -> list[list[tuple[int, int, int]]]:
+    """The staged image as 5-bit RGB: `resample` in hd_backgrounds.cpp."""
+    sw, sh = img.size
+    px = img.convert("RGBA").tobytes()
+    out: list[list[tuple[int, int, int]]] = []
+    for dy in range(SCREEN_H):
+        ya = dy * sh // SCREEN_H
+        yb = max(ya + 1, (dy + 1) * sh // SCREEN_H)
+        row_out = []
+        for dx in range(width):
+            xa = dx * sw // width
+            xb = max(xa + 1, (dx + 1) * sw // width)
+            r = g = b = n = 0
+            for sy in range(ya, yb):
+                o = (sy * sw + xa) * 4
+                for _ in range(xa, xb):
+                    r += px[o]
+                    g += px[o + 1]
+                    b += px[o + 2]
+                    n += 1
+                    o += 4
+            row_out.append(((r // n * 31 + 127) // 255, (g // n * 31 + 127) // 255,
+                            (b // n * 31 + 127) // 255))
+        out.append(row_out)
+    return out
+
+
+def make_screen_strips_unique(image: list[list[tuple[int, int, int]]], width: int,
+                              rows_per_strip: int) -> int:
+    """`make_screen_strips_unique` in hd_backgrounds.cpp, in the same order."""
+    seen: set[tuple] = set()
+    changed = 0
+    for top in range(0, SCREEN_H, rows_per_strip):
+        rows = min(rows_per_strip, SCREEN_H - top)
+        mark = top + min(2, rows - 1)
+        # A flat strip would share its hash with any flat game texture of its
+        # size; mark it in the last column first.
+        if len({px for r in range(rows) for px in image[top + r]}) == 1:
+            r, g, b = image[mark][width - 1]
+            image[mark][width - 1] = (r, g, b ^ 1)
+
+        def key():
+            return tuple(tuple(image[top + r]) for r in range(rows))
+
+        k = key()
+        col = -1
+        while k in seen:
+            if col >= 0:
+                r, g, b = image[mark][col]
+                image[mark][col] = (r, g, b ^ 1)
+            col += 1
+            if col >= width:
+                break
+            r, g, b = image[mark][col]
+            image[mark][col] = (r, g, b ^ 1)
+            k = key()
+        if col >= 0:
+            changed += 1
+        seen.add(k)
+    return changed
+
+
+def read_dump_strips(dump: Path) -> tuple[list[dict], int]:
+    """Every 'Tile' load in an RT64 dump: hash, address, format, size, first
+    row and size of the strip."""
+    strips: list[dict] = []
+    version = 0
+    for rice in dump.glob("*.rice.json"):
+        base = rice.name[: -len(".rice.json")]
+        tile_json = dump / f"{base}.tile.json"
+        if not tile_json.is_file():
+            continue
+        r = json.loads(rice.read_text())
+        t = json.loads(tile_json.read_text())
+        if r.get("type") != "Tile":
+            continue
+        tex, lt = r["texture"], r["tile"]
+        hash_hex, _, ver = base.partition(".v")
+        version = max(version, int(ver or 0))
+        strips.append({
+            "hash": hash_hex,
+            "address": tex["address"],
+            "fmt": tex["fmt"],
+            "siz": tex["siz"],
+            "image_width": tex["width"],
+            "uls": lt["uls"] >> 2,
+            "ult": lt["ult"] >> 2,
+            "width": t["width"],
+            "height": t["height"],
+            "rdram": dump / f"{base}.rice.rdram",
+        })
+    return strips, version
+
+
+def strip_alpha32(strip: dict, rows: int) -> list[int] | None:
+    """An RGBA32 strip's alpha bytes, row-major, from RT64's RDRAM dump (host
+    order: the guest byte at offset `j` is at `j ^ 3`)."""
+    if not strip["rdram"].is_file():
+        return None
+    data = strip["rdram"].read_bytes()
+    w = strip["width"]
+    if len(data) < rows * w * 4:
+        return None
+    return [data[(i * 4 + 3) ^ 3] for i in range(rows * w)]
+
+
+def build_screen_variant(variant: str, scene: int, source: Path, dump: Path,
+                         scale: int | None) -> tuple[list[tuple[str, object]], int]:
+    """Cut the HD strips of a screen backdrop and of the game layers drawn over
+    it. Returns [(hash, image)] and the dump's hash version."""
+    Image = pillow()
+    img = Image.open(source).convert("RGB")
+    sw, sh = img.size
+    width = screen_width(sw, sh)
+    rows_per_strip = screen_strip_rows(width)
+    x0 = 160 - width // 2
+    k = scale or max(1, cpp_lround(sh / SCREEN_H))
+    image = lowres_screen(img, width)
+    changed = make_screen_strips_unique(image, width, rows_per_strip)
+    hd = img.resize((width * k, SCREEN_H * k), Image.LANCZOS)
+    strips, version = read_dump_strips(dump)
+
+    out: list[tuple[str, object]] = []
+    staged = [s for s in strips if s["address"] == STAGE_ADDRESS and s["fmt"] == 0
+              and s["siz"] == 2 and s["image_width"] == width]
+    if not staged:
+        raise SystemExit(f"backgrounds.py: {variant}: the dump in {dump} has no strips of the "
+                         f"{width}x{SCREEN_H} staged image at 0x{STAGE_ADDRESS:08X}; the run did "
+                         f"not draw the backdrop (see {dump / 'run.log'})")
+    # Every screen backdrop is staged at the same address, so a run that passes
+    # through another screen (the Load Game route starts at the title) dumps
+    # that screen's strips too; a strip belongs to this image when its texels
+    # match it.
+    equal = total = 0
+    mine = []
+    for s in staged:
+        rows = min(s["height"], SCREEN_H - s["ult"])
+        pixels = strip_pixels(s, rows)
+        if pixels is None:
+            continue
+        same = sum(sum(1 for a, b in zip(pixels[row], image[s["ult"] + row]) if a == b)
+                   for row in range(rows))
+        if same < MATCH_SHARE * rows * width:
+            continue
+        equal += same
+        total += rows * width
+        mine.append(s)
+        out.append((s["hash"], hd.crop((0, s["ult"] * k, width * k, (s["ult"] + rows) * k))))
+    share = equal / total if total else 0.0
+    expected = set(range(0, SCREEN_H, rows_per_strip))
+    shared = sorted(expected - {s["ult"] for s in mine})
+    print(f"backgrounds.py: {variant}: {width}x{SCREEN_H} backdrop at x {x0}: "
+          f"{len(mine)} of {len(staged)} staged strips are this image ({share:.1%} of their "
+          f"texels match), {len(expected) - len(shared)} of {len(expected)} positions with "
+          f"their own hash ({changed} made unique by one texel)")
+    if shared:
+        raise SystemExit(f"backgrounds.py: {variant}: no strip of {source.name} at rows "
+                         f"{', '.join(str(r) for r in shared)}; the run did not apply this "
+                         f"image, or two strips share a hash")
+
+    for fmt, siz, ow, oh, ox, oy in SCREEN_OVERLAYS.get(scene, []):
+        layer = [s for s in strips if s["fmt"] == fmt and s["siz"] == siz
+                 and s["image_width"] == ow and s["width"] == ow]
+        for s in layer:
+            rows = min(s["height"], oh - s["ult"])
+            alpha = strip_alpha32(s, rows)
+            if alpha is None or rows <= 0:
+                continue
+            a = Image.frombytes("L", (ow, rows), bytes(alpha))
+            a = a.resize((ow * k, rows * k), Image.BILINEAR)
+            left = (ox - x0) * k
+            top = (oy + s["ult"]) * k
+            rgba = hd.crop((left, top, left + ow * k, top + rows * k)).convert("RGBA")
+            rgba.putalpha(a)
+            # The tile's rows past the image (a short last strip) stay as the
+            # dump sized them, transparent.
+            if rows < s["height"]:
+                full = Image.new("RGBA", (ow * k, s["height"] * k), (0, 0, 0, 0))
+                full.paste(rgba, (0, 0))
+                rgba = full
+            out.append((s["hash"], rgba))
+        print(f"backgrounds.py: {variant}: game layer {ow}x{oh} at screen ({ox},{oy}): "
+              f"{len(layer)} strips, HD from the image with the layer's alpha")
+    print(f"backgrounds.py: {variant}: {source.name} {sw}x{sh} -> HD {width * k}x{SCREEN_H * k} "
+          f"({k}x)")
+    return out, version
+
+
 def write_pack(eid: str, variants: dict[str, list[tuple[str, object]]], version: int,
                operation: str) -> None:
     """Write the strips under hd/<id>[-wide]/ and merge them into hd/rt64.json,
@@ -548,7 +796,9 @@ def cmd_hd(args) -> int:
             if dump.is_dir():
                 shutil.rmtree(dump)
             dump.mkdir(parents=True)
+            extra = {"OGRE_SAVE": str(args.save)} if args.save is not None else {}
             run_route(args.app, args.rom, scene, step, {
+                **extra,
                 "OGRE_DUMP_TEX": str(dump),
                 "OGRE_BG": "1",
                 "OGRE_BG_DIR": str(PACK),
@@ -556,7 +806,10 @@ def cmd_hd(args) -> int:
                 "OGRE_WIDESCREEN": "on" if variant == "wide" else "off",
             }, f"OGRE_DUMP_TEX={dump}" + (" and WIDESCREEN on" if variant == "wide" else ""),
                 log=dump / "run.log")
-        strips, version = build_variant(variant, source, dump, args.scale)
+        if scene in SCREEN_ROUTES:
+            strips, version = build_screen_variant(variant, scene, source, dump, args.scale)
+        else:
+            strips, version = build_variant(variant, source, dump, args.scale)
         variants[variant] = strips
     write_pack(eid, variants, version, args.operation)
     if args.from_dir is None and args.dump is None:
@@ -592,6 +845,9 @@ def main() -> int:
                     help="reuse the dumps of an earlier --dump instead of running")
     hd.add_argument("--app", type=Path, default=None)
     hd.add_argument("--rom", type=Path, default=DEFAULT_ROM)
+    hd.add_argument("--save", type=Path, default=None,
+                    help="battery save for routes that need one (the Load Game book 0x12, "
+                         "and the Hugo Report 0x08 from a save on the world map)")
     # stall: RT64 decodes a strip before the frame that first draws it, so no
     # strip shows at game resolution; the cathedral's 116 strips cost 16.1 ms
     # once. stream: background threads load them and the game-resolution strip

@@ -11,11 +11,14 @@ namespace ogre {
 //
 // The setting (`settings.hpp`) is a toggle, not an aspect ratio: RT64 has one
 // Expand mode, and this decides when it is on. `Off` is always 4:3, and `On` is
-// Expand while the dispatcher runs a scene in the expand set (the mission `0x03`
-// and the dialogue/cutscene scene `0x0D`, plus every scene the HD-background
-// pack covers) and 4:3 elsewhere, in a window that stays 16:9 either way.
-// Scene `0x0D` expands with or without the pack: its own 496x384 backdrop has
-// content the 4:3 view crops, so the wider view reveals it.
+// Expand while the dispatcher runs a scene in the expand set (the mission `0x03`,
+// the dialogue/cutscene scene `0x0D`, the world map `0x05` and the Organize
+// Screen `0x06`, plus every scene the HD-background pack covers) and 4:3
+// elsewhere, in a window that stays 16:9 either way. Scene `0x0D` expands with
+// or without the pack: its own 496x384 backdrop has content the 4:3 view crops,
+// so the wider view reveals it. The map and the Organize Screen are laid out in
+// 2D, so Expand alone would leave them 4:3; this also publishes their extension
+// (`widescreen_gbi.hpp`), which turns on their patched draws.
 //
 // Called once per frame from the app's `update_gfx` callback, because the
 // scene can change on any frame. The function reads the live
@@ -45,6 +48,11 @@ void widescreen_fit_window(SDL_Window* window);
 // is re-derived after the window is back under SDL's control and not before.
 // Safe to call from the renderer thread.
 void widescreen_request_refit();
+
+// RT64's swap chain size, reported by the renderer at each present. The world
+// map's extension is derived from it, the way RT64 derives Expand's aspect.
+// Safe to call from the renderer thread.
+void widescreen_note_swapchain(unsigned int width, unsigned int height);
 
 // The size a run should open its window at: 4:3 for `Off`, 16:9 otherwise.
 void widescreen_initial_window_size(int& width, int& height);

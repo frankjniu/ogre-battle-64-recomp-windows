@@ -282,6 +282,12 @@ if (EMSCRIPTEN)
         src/save_import.cpp
         src/hd_backgrounds.cpp
         src/map_cursor.cpp
+        src/map_widescreen.cpp
+        src/mission_widescreen.cpp
+        src/organize_widescreen.cpp
+        src/cutscene_widescreen.cpp
+        src/screen_backdrops.cpp
+        src/widescreen_gbi.cpp
         src/mission_cursor.cpp
         src/ram_key.cpp
     )
@@ -289,6 +295,7 @@ else()
     set(OGRE_APP_SOURCES
         src/main.cpp
         src/sdl_platform.cpp
+        src/audio_out.cpp
         src/crash_log.cpp
         src/synth_frame.cpp
         src/rsp.cpp
@@ -309,6 +316,12 @@ else()
         src/quick_save.cpp
         src/hd_backgrounds.cpp
         src/map_cursor.cpp
+        src/map_widescreen.cpp
+        src/mission_widescreen.cpp
+        src/organize_widescreen.cpp
+        src/cutscene_widescreen.cpp
+        src/screen_backdrops.cpp
+        src/widescreen_gbi.cpp
         src/mission_cursor.cpp
         src/ram_key.cpp
     )
