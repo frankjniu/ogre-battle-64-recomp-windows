@@ -422,7 +422,7 @@ for Windows). Its matrix still lists macOS and Linux.
 
 Releases are published on `frankjniu/ogre-battle-64-recomp-windows` from the
 Windows machine. The fork's Release workflow is disabled: it needs a self-hosted
-runner or the private data repository, and the fork has neither. v0.9.0 was
+runner or the private data repository, and the fork has neither. v0.9.0 and v0.9.1 were
 made this way.
 
 ```sh
