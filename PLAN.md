@@ -47,9 +47,10 @@ ending and the attract loop.
 - **Logging on Windows:** `ogrebattle64.exe > run.log 2>&1` keeps its log, and a
   double-clicked launch still fills `error.log`'s captured sections on a crash
   (`tools/smoke-dist.sh` check 5 launches through Explorer to prove it).
-- **Releases:** v0.9.0 (2026-10-31) is the last published release, a Windows
-  zip on this fork (`frankjniu/ogre-battle-64-recomp-windows`, tag at
-  `22390aa`). It carries all the 2026-10-30/31 work. The app reports 0.9.0
+- **Releases:** v0.9.1 (2026-11-01) is the last published release, a Windows
+  zip on this fork (`frankjniu/ogre-battle-64-recomp-windows`), tagged at the
+  merge of the version bump. It adds the 2026-11-01 work (PR #4) to v0.9.0
+  (2026-10-31, tag at `22390aa`). The app reports 0.9.1
   (`recomp::Version` in `app/src/main.cpp`, which the mods'
   `minimum_recomp_version` is checked against). Releases are Windows-only and
   built on this machine; the fork's Release workflow is disabled
