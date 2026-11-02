@@ -19,8 +19,7 @@
 # plain image is used in both modes.
 #
 # Scene 0x0D is the dialogue/cutscene scene of the New Game opening. Step 2 is
-# the cathedral (Archbishop Odiron). The opening's steps 1..19 are decoded in
-# docs/HANDOFF-2026-09-15-session44.md.
+# the cathedral (Archbishop Odiron); docs/scenes.md lists the opening's steps.
 #
 # Scenes 0x04 (the title), 0x08 (the Hugo Report) and 0x12 (the Load Game
 # book) take screen backdrops: the port draws the whole image behind the game's
@@ -30,6 +29,13 @@
 # hugo-wide.png are AI-upscaled and outpainted from the game's own art, so they
 # are not in the repository (see docs/guides/hd-backgrounds.md -> "Screen
 # backdrops").
+#
+# The njpeg backgrounds (battle, dialogue, cutscene and town pictures) need no
+# line here: njpeg/<key>.png replaces the asset with that key wherever the game
+# decodes it, and takes precedence over a step line. tools/njpeg.py writes
+# them, with their HD strips in hd/njpeg-*; they are derived from the ROM, so
+# they are not in the repository (see docs/guides/hd-backgrounds.md -> "njpeg
+# images by asset").
 #
 # Lines that start with '#' and blank lines are ignored.
 #

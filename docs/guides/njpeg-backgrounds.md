@@ -1,42 +1,43 @@
-# The game's njpeg backgrounds (and the ones like the New Game cathedral)
+# njpeg backgrounds
 
-Other large backgrounds in Ogre Battle 64 are built by the **same machinery** as
-the New Game opening's cathedral, and the dominant one is the **same size**, so
-the source-selection rule that produced the session-56/57 stale-backdrop
-rectangle applies to all of them. Read this before debugging any large
-background that shows part of the previous screen.
+The dialogue, cutscene and battle backdrops are njpeg images: Huffman-coded YUV
+that the game decodes partly on the CPU and partly in an RSP microcode.
+`tools/njpeg.py` decodes them offline from the ROM. This guide covers
+the asset format, the pipeline, the readback rule, and how to check a backdrop.
+The replacement pack that writes over these backdrops is `hd-backgrounds.md`; the
+microcode is `rsp-microcode.md`.
 
 ## The pipeline
 
-1. **Asset** — an `njpeg` blob in the ROM: magic `'HU'`, then `u16` width and
-   `u16` height (big-endian), then `'HUFF'`, then a `u16` macroblock count.
-2. **Decode** — the game submits an `M_NJPEGTASK` (RSP task type 4) that decodes
-   the blob to 16-bit YUV in place (`docs/guides/rsp-microcode.md`,
-   session 47 in git history).
-3. **Draw** — the gfx ucode `0x800A5110` (**S2DEX 2.08**) draws the macroblocks
-   as `G_OBJ_RECTANGLE_R`s into a game framebuffer
-   (session 51 in git history).
-4. **CPU readback** — `func_ovlE_8019976C` (bankE) copies the drawn framebuffer
-   out, **four passes per assembly**, each with its own decode+draw, into four
-   fixed heap buffers.
-5. **Blit** — the game draws the assembled backdrop with the F3DEX2 ucode
+1. **Asset.** An njpeg blob in the ROM (format below).
+2. **Decode.** The CPU Huffman decode `func_8008B250`, then four `M_NJPEGTASK`
+   (RSP task type 4) tasks with the microcode at `0x8009ED80`, which decode to
+   16-bit YUV in place.
+3. **Draw.** The gfx ucode `0x800A5110` (S2DEX 2.08) draws the macroblocks into a
+   game framebuffer: `0xDC` is `G_OBJ_MOVEMEM` and `0xDA` is `G_OBJ_RECTANGLE_R`.
+   A YUV `LOADTILE` is the RDP's two-plane format, and the colour matrix is the
+   game's `G_SETCONVERT` (AGENTS.md → "njpeg backgrounds").
+4. **CPU readback.** `func_ovlE_8019976C` (bank unit E) copies the framebuffer
+   out, one pass per chunk, each with its own decode and draw. The same module
+   is also in record 10 and record 10b (bank C, which the battle scene `0x0E`
+   loads) and in the title module; `hd-backgrounds.md` → "njpeg images by
+   asset" lists the four copies and their state pointers.
+5. **Blit.** The game draws the assembled backdrop with the F3DEX2 ucode
    `0x8009F540` as textured quads, one `G_LOADTILE` strip per quad, from four
    RGBA16 images: `0x80243E28` (320x240, after the `'B5'` header at
-   `0x80243E10`), `0x80269660` (176x240), `0x8027E090` (320x144) and
-   `0x802948C0` (176x144). A strip is 320x6 or 176x11 texels (5 or 10 new rows
-   plus one overlap row); the cathedral draws 116 strips per frame. On screen the
-   right chunks start at column 320 and the bottom chunks at row 239, over the
-   top chunks' last row (`docs/guides/hd-backgrounds.md`).
+   `0x80243E10`), `0x80269660` (176x240), `0x8027E090` (320x144) and `0x802948C0`
+   (176x144). Strip geometry and the on-screen canvas rects are in
+   `hd-backgrounds.md`.
 
-Session 57's fix lives in step 4: the copy's source must be the **game's own
-`state[0x64]`** (its framebuffer-table choice), never RT64's scratch word, which
-is stale at the first pass of every assembly. That rule is in
-`tools/njpeg_readback.py` and applies to every background on this path, not just
-the cathedral.
+## Asset format and inventory
 
-## Asset format and the full inventory
+```
+u32 size | 'HU' | s8 qscale | u8 0 | u16 width | u16 height | 'HUFF' | u16 macroblocks | bits
+```
 
-The dimensions are in the blob, so the whole set is enumerable:
+All fields are big-endian. Every asset satisfies
+`macroblocks == (width/16) * (height/16)`; a disagreement means the layout
+changed. This enumerates them from the ROM (in the WSL tree, where the ROM is):
 
 ```sh
 python3 - <<'EOF'
@@ -46,136 +47,113 @@ o = d.find(b'HUFF'); n = 0
 while o != -1:
     w = int.from_bytes(d[o-4:o-2], 'big'); h = int.from_bytes(d[o-2:o], 'big')
     mb = int.from_bytes(d[o+4:o+6], 'big')
-    assert mb == (w // 16) * (h // 16), "macroblock count must match w/h"
-    print(f"asset rom 0x{o-6:06X}  {w}x{h}  mb={mb}")
+    assert d[o-8:o-6] == b'HU' and mb == (w // 16) * (h // 16)
+    print(f"asset rom 0x{o-12:06X}  {w}x{h}  mb={mb}")
     n += 1; o = d.find(b'HUFF', o + 1)
 print(n, "njpeg assets")
 EOF
 ```
 
-`0x{o-6}` is the asset start (the `u16` size field precedes the `'HU'` magic).
-**Every one of the 75 assets satisfies `mb == (w/16)*(h/16)`** — that is the
-check that the header layout is right; if a future extraction disagrees, the
-layout changed.
+The ROM offset printed is the asset's size word. The ROM holds 75 njpeg assets:
+42 are 320x240 (the first at `0x594398`), and the other 33 come in 24 sizes from
+336x256 down to 128x96. `tools/njpeg.py list <rom>` prints them with their pack
+keys.
 
-| size | macroblocks | count | asset ROM (first few) |
-|---|---|---|---|
-| 320x240 | 300 | 42 | 0x59439E, 0x59A632, 0x5A0E0A … |
-| 224x192 | 168 | 3 | 0x810862, 0x817BA2, 0x820022 |
-| 208x192 | 156 | 3 | 0x8145AA, 0x81BF6A, 0x8242C2 |
-| 336x256 | 336 | 2 | 0x800C8E, 0x803EAE |
-| 320x160 | 200 | 2 | 0x7985E2, 0x7A422E |
-| 320x96 | 120 | 2 | 0x7E56BA, 0x1D8F56E |
-| 176x240 | 165 | 2 | 0x72256C, 0x7D1B9E |
-| 80x240 | 75 | 2 | 0x759F06, 0x796E3A |
-| 336x176 | 231 | 1 | 0x80B896 |
-| 320x208 | 260 | 1 | 0x724DB4 |
-| 320x176 | 220 | 1 | 0x75B346 |
-| 320x144 | 180 | 1 | 0x7D4EE6 |
-| 320x112 | 140 | 1 | 0x7EFA1E |
-| 192x240 | 180 | 1 | 0x7E229A |
-| 192x96 | 72 | 1 | 0x7E788A |
-| 176x208 | 143 | 1 | 0x72987C |
-| 176x144 | 99 | 1 | 0x7D91D6 |
-| 160x240 | 150 | 1 | 0x7A21B6 |
-| 160x160 | 100 | 1 | 0x7A73CE |
-| 144x240 | 135 | 1 | 0x7EDFC6 |
-| 144x112 | 63 | 1 | 0x7F1166 |
-| 128x240 | 120 | 1 | 0x1D8DC0E |
-| 128x96 | 48 | 1 | 0x1D90BA6 |
-| 80x176 | 55 | 1 | 0x75E3EE |
-| 80x160 | 50 | 1 | 0x79BBE2 |
+41 of the 75 are chunks of 10 `'B5'` compositions: `'B5'`, a version byte (3),
+a chunk count, an `s16` anchor pair, then per chunk `s16 x, s16 y, u16 w, u16 h,
+u32 size, u32 0` followed by the chunk's asset (`func_ovlE_8019A0A8` reads the
+entries). Eight are four-chunk dialogue backdrops like the cathedral
+(`0x7CADAC`); `0x800C74` is three 336-wide chunks stacked 655 rows tall and
+`0x810848` is six chunks 422x556, which look like panning scenes. The other 34
+assets are single 320x240 images: 29 outdoor terrains (grass, desert, snow,
+forest, swamp, coast and fort walls; the battle backdrops by their look, not yet
+confirmed in a battle), a banquet hall `0x66A54A`, a village `0x682F24`, a
+market `0x6E205A`, a lit hall `0x7175A6` and a book `0x8FFEA6`.
 
-**42 of the 75 are 320x240** — the same size as the New Game backdrop pieces —
-which is the answer to "do the other large backgrounds use the same size?" for
-the dominant case. The rest are smaller pieces (sub-images, portraits, partial
-backgrounds). All of them go through the same decode/draw/readback path.
-
-## What one assembly copies (measured, session 57)
-
-`func_ovlE_8019976C`'s row loop is
-`memcpy(state[0x70], state[0x64], 2*state[0x78])` per row, `state[0x7A]` rows,
-source stride a fixed `0x280` (640 bytes = 320 px), destination stride
-`2*state[0x78]`. `state[0x78]` is the width in pixels: `lh a2,0x78(state)` at
-`0x80199884` with `sll a2,a2,1` in the delay slot is the `memcpy` length, and
-`lh v1,0x7A(state)` at `0x801998b4` bounds the row count. Four passes per
-assembly, into four fixed buffers:
-
-| pass | destination | `state[0x78]` x `state[0x7A]` (width x rows) | canvas position |
-|---|---|---|---|
-| 0 | `0x801AAE90` | 320 x 240 | top left `(0, 0)` |
-| 1 | `0x801D06B0` | 176 x 240 | top right `(320, 0)` |
-| 2 | `0x801E50D0` | 320 x 144 | bottom left `(0, 239)` |
-| 3 | `0x801FB8F0` | 176 x 144 | bottom right `(320, 239)` |
-
-The session-57 version of this table had the two halfwords swapped (`240 x 320`
-for pass 0). The canvas positions were measured on 2026-10-31 with a
-`mods/backgrounds/` pack whose pixels encode their own row and column: each
-pass's pixels appear at that position on screen.
-
-**Pass 0 is the one that goes stale** — it is the first pass after a step change,
-so RT64's scratch word still names the previous step's target. The developer
-reported the broken on-screen tile as the **top-left** of the scene's four-image
-2x2 composition, and pass 0 is the top-left chunk (table above).
-
-**Do not read the framebuffer as the scene.** At the cathedral step
-`0x80000400` contains four background chunks in a 2x2 arrangement with black
-seams (`docs/proofs/native-newgame-backdrop-chunks.png`), but the developer
-confirms the chunks are **out of order** — the arrangement in the framebuffer is
-*not* the on-screen arrangement. Reordering (and rescaling) the chunks is what
-the readback and the following blit are for, and the four copies taken together
-are exactly what makes the finished backdrop. Any statement of the form "chunk X
-is the top-left of the scene" has to come from the blit that consumes those
-buffers, not from this render.
-
-## Traps that cost this project sessions
-
-* **The three game framebuffers are contiguous 320x240 buffers** —
-  `D_800A8204 = {0x80000400, 0x80025C00, 0x8004B400}`, `0x25800` apart. Render
-  `0x80000400` for 320 rows and rows 240-319 are the *next* buffer's content (in
-  session 57's dump, the name-entry form — which is why
-  `docs/proofs/native-newgame-backdrop-chunks.png` shows a form strip below the
-  chunks; that strip is **not** part of the background). Any over-read or
-  mis-sourced read shows the neighbour, which is why "the backdrop holds the
-  previous screen" always looked like a timing bug.
-* **RT64's scratch word `0x807FFC08` is not a valid readback source.** It is only
-  re-set by a YUV-texture-then-colour-image pair and is never cleared.
-* **The readback is ordered by the game's DP-completion wait**
-  (`events.cpp:432`), not by `sp_complete()`, and `ogre_sync_framebuffers()`
-  forces the RDP's pixels back to RDRAM before the copy. The session-50
-  `waitForGameFramebuffers`/`OGRE_NJ_WAIT_MS` RSP-worker poll was deleted in
-  session 77: it never blocked in this path, and every scene that does not render
-  into its three fixed addresses paid its full 500 ms timeout per display list
-  (the boot's publisher stills ran at 2 lists/s instead of 30 —
-  session 77 in git history).
-
-## Checking another background
+## Offline decode (`tools/njpeg.py`)
 
 ```sh
-OGRE_NJREAD_LOG=1 OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=2500   OGRE_TAP_BUTTON="start,a,start,a,start,a,start,a,start,a,a,a,a"   OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=25000 ./build-app/ogrebattle64 assets/ogre64.z64   > /dev/null 2> /tmp/njread.log
-grep njread /tmp/njread.log
+tools/njpeg.py list   <rom>              # assets, sizes, pack keys
+tools/njpeg.py decode <rom> -o <dir>     # every asset as an 8-bit PNG
+tools/njpeg.py prep   <rom> -o <dir>     # each composition or single image, assembled,
+                                         # plus a 4x Lanczos upscaler input and a layout json
+tools/njpeg.py compare <rom> <rom offset> <reference.png> [--x X --y Y]
 ```
 
-One line per pass. For the New Game cathedral, `sig` must cycle
-`573FF47B8A5A3279`, `48892A76C362A4BA`, `3F79B6732153B2FD`, `38BCBEBE5B555C3C`,
-and `alt` (what the old scratch-first rule would have read, `0` when the two
-agree) must be `0`. A non-zero `alt` at the first pass of an assembly is the
-stale-backdrop bug; its value names the previous screen.
+The decoder repeats the game's two halves:
 
-To inspect the *result*, drive the live console from game state (a wall-clock
-`dump` schedule shifts the tap route) — see `docs/guides/app-build.md` →
-`OGRE_NJREAD_LOG`.
+- **Huffman** (`func_8008B250`, `func_8008B6E0`): per macroblock four Y blocks
+  with the luminance tables (`0x800AA0A0` DC, `0x800AA120` AC) and two chroma
+  blocks with the chrominance tables (`0x800AA0E0`, `0x800AA290`). The tables
+  are 16 `u16` counts then the values, the JPEG Annex K tables. Bits are read
+  MSB first with no byte stuffing; `(0,0)` ends a block.
+- **Microcode** (`njpgdspMain`; N64 JPEG manual chapter 5): DC terms are
+  differences from the previous block of the same component (the Y blocks chain
+  one predictor, U and V their own); the zigzag scan runs over the transposed
+  block; the quantisation table at `0x800AC070` is the JPEG luminance table,
+  stored transposed, scaled 1/4 for `qscale = -2`; then an inverse DCT with no
+  +128 level shift.
 
-## Open questions (for whoever needs them)
+The draw (`func_ovlE_80199130`) sets `G_SETCONVERT` `0xEC15FD5D 0x3B78E42A`
+(`k0..k5 = 175, -43, -89, 222, 114, 42`) and one combiner cycle
+`(TEXEL0 - K4) * K5 + TEXEL0` (`0xFC17FE2F 0x77FCF87C`). The tool applies both,
+with RT64's scaling (`2K+1`/256 for k0..k3, x/255 for K4 and K5).
 
-* Whether every one of the 75 assets reaches `func_ovlE_8019976C`, or some take a
-  different (non-readback) path; the step table
-  (session 44 §1 in git history) maps the opening's steps to assets.
+The microcode's output scale was measured against the port's own decode of the
+cathedral (`tools/backgrounds.py extract 01`): a least-squares fit on the
+320x240 chunk gave `Y' = 1.039*Y - 4.70` and chroma x1.035. With that, the
+other three chunks match the port's RGBA5551 readback exactly at 83-88 % of
+texels, mean error 1.0-1.4 levels of 255. The rest is the microcode's
+fixed-point IDCT. The tool writes 8-bit RGB, which is a better upscaler input
+than the 5-bit readback.
 
-## See also
+## The readback
 
-* session 57 (git history) — the stale-source fix, the live-console
-  A/B, and the 2x2 tile identification.
-* `docs/guides/rsp-microcode.md` — the `M_NJPEGTASK` decoder and RSPRecomp.
-* session 51 (git history) — the S2DEX2 object commands and the
-  YUV16 two-plane tile format.
+`func_ovlE_8019976C`'s row loop is
+`memcpy(state[0x70], state[0x64], 2*state[0x78])` per row for `state[0x7A]` rows,
+with a fixed source stride of `0x280` (640 bytes, 320 px) and a destination
+stride of `2*state[0x78]`. `state[0x78]` is the width in pixels
+(`lh a2,0x78(state)` at `0x80199884`, `sll a2,a2,1` in the delay slot) and
+`state[0x7A]` the row count (`lh v1,0x7A(state)` at `0x801998B4`);
+`state = *(u32*)0x8019A680`. The four passes and their destinations are the
+table in `hd-backgrounds.md`.
+
+The copy's source must be the game's own framebuffer choice `state[0x64]`.
+RT64's scratch word `0x807FFC08` is set only by a YUV-texture-then-colour-image
+pair and never cleared, so at the first pass of an assembly it still names the
+previous step's target, and the backdrop then shows part of the previous screen
+in its top-left chunk. `tools/njpeg_readback.py` (re-applied by
+`make bank-recomp`) makes the copy read `state[0x64]` and call
+`ogre_sync_framebuffers()`, which writes the RDP's pixels back to RDRAM first.
+The game's DP-completion wait already orders the copy after the render, so no
+other wait is added.
+
+## Traps
+
+- `tools/njpeg_readback.py` (the source rule and `ogre_sync_framebuffers()`)
+  patches only bank E's copy. Bank C's two copies (battle and record 10b) copy
+  `state[0x64]` with no write-back first; whether a battle backdrop can show a
+  stale chunk is not checked.
+- The three game framebuffers are contiguous 320x240 buffers,
+  `D_800A8204 = {0x80000400, 0x80025C00, 0x8004B400}`, `0x25800` apart. Reading
+  `0x80000400` for more than 240 rows shows the next buffer's content. A
+  mis-sourced read shows a neighbour, which looks like a timing bug.
+- The framebuffer holds the four chunks in a 2x2 arrangement that is not the
+  on-screen order. The on-screen position of a chunk comes from the blit that
+  consumes the four buffers, not from the framebuffer render.
+
+## Checking a backdrop
+
+```sh
+OGRE_NO_AUDIO=1 OGRE_NJREAD_LOG=1 OGRE_SCENE=title OGRE_SPEED=4 OGRE_TAP_MS=2500 \
+  OGRE_TAP_BUTTON="start,a,start,a,start,a,start,a,start,a,a,a,a" \
+  OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=25000 "$APP" "$ROM" 2> njread.log
+grep njread njread.log
+```
+
+One line per pass. At the New Game cathedral, `sig` cycles `573FF47B8A5A3279`,
+`48892A76C362A4BA`, `3F79B6732153B2FD`, `38BCBEBE5B555C3C`, and `alt` (what the
+scratch word would have read, `0` when the two agree) is `0`. A non-zero `alt` at
+the first pass of an assembly is the stale-backdrop fault; its value names the
+previous screen. To inspect the result, take a live-console dump triggered from
+game state (`app-build.md` → "njpeg and HD backgrounds").

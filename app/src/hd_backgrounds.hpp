@@ -1,16 +1,21 @@
 // HD backgrounds: an external pack of PNGs that replaces the game's own
-// dialogue/cutscene backdrops.
+// njpeg backdrops (dialogue, cutscene and battle backgrounds).
 //
-// The game builds every large backdrop on the njpeg path: four RSP-decoded
-// sub-images are copied by `func_ovlE_8019976C` (bank unit E) into four fixed
-// buffers, merged into a `'B5'` image, and blitted. That code is in a streamed
-// bank unit, which a `.nrm` code mod cannot hook, so the port calls in from the
-// generated unit instead: `tools/hd_backgrounds.py` places a call to
-// `ogre_hd_background(rdram)` at the end of the readback copy.
+// Four records carry the same njpeg module, each with its own state pointer:
+// the dialogue engine (bank E, 0x8019A680), record 10 and record 10b (bank C,
+// 0x801D0700 and 0x801F0570; the battle scene loads record 10) and the title
+// module (0x801BA6F0). Bank code is outside the `.nrm` hook map, so
+// `tools/hd_backgrounds.py` places two calls in each copy's generated code:
 //
-// At that point the game's `state` object names the pass it just wrote:
+//   ogre_njpeg_source(rdram, STATE)  before the CPU Huffman decode: records the
+//                                    asset, by a hash of its compressed stream
+//                                    (`state[0x6C]`, from its 'HUFF' tag)
+//   ogre_njpeg_pass(rdram, STATE)    after the pass's row copy: replaces the
+//                                    pass's pixels
 //
-//   state = *(u32*)0x8019A680
+// At the pass the `state` object names what it just wrote:
+//
+//   state = *(u32*)STATE
 //   state[0x74]  destination buffer (the pass's pixels)
 //   state[0x78]  destination width
 //   state[0x7A]  destination height
@@ -18,14 +23,12 @@
 //                `state[0x74]` and the pixels at +8; non-zero for `'B5'`, whose
 //                pixels start at `state[0x74]`
 //
-// The current step and scene are read from the scripted-sequence words; the pack
-// maps (scene, step) to a PNG. Each of the four passes gets its rectangle of the
-// 496x384 canvas (`chunk_rect`; `docs/guides/hd-backgrounds.md`).
-//
-// The PNG is decoded once at startup, box-filtered to the canvas and converted to
-// big-endian RGBA5551, then written over the pass's pixels in the runtime byte
-// order (`MEM_H`/`MEM_B` in `recomp.h`). HD detail comes from the RT64 texture
-// pack in `<pack>/hd`, which `tools/backgrounds.py hd` cuts from the same PNG.
+// An asset with an image in `<pack>/njpeg/<key>.png` gets that image, which is
+// the asset's size and already RGBA5551-exact (tools/njpeg.py). Otherwise, in
+// the dialogue engine, `backgrounds.txt` maps the scripted step to a 496x384
+// canvas and each of the four passes gets its rectangle (`chunk_rect`;
+// `docs/guides/hd-backgrounds.md`). HD detail comes from the RT64 texture pack
+// in `<pack>/hd`, cut from the same art.
 
 #pragma once
 

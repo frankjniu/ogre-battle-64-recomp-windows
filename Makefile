@@ -80,6 +80,9 @@ recomp: recomp-prep $(ELF)
 	rm -rf RecompiledFuncs
 	$(N64RECOMP) config/config.toml
 	python3 tools/cross_bank.py dispatch --only 0x80198D28,0x801AFC2C,0x801980A0,0x801B00D0,0x8019A7C0,0x8019A884,0x8019AF0C,0x8019B060,0x8019B340,0x8019C4A8,0x8019C69C,0x8019D67C,0x801A103C,0x801C19B0,0x801C214C,0x801B7FC0,0x801AB740,0x801AB76C
+	@# The title module's njpeg copy is in RecompiledFuncs; give it the same
+	@# HD-background calls as the bank copies (see bank-recomp below).
+	python3 tools/hd_backgrounds.py
 
 # The cross-bank dispatch inside `recomp` can only see bank records that
 # `make bank-recomp` has already written to app/src/bank_funcs.inc. Without it
@@ -255,7 +258,7 @@ recompcov:
 # `make refscan DUMP=<rdram image>`: check the Item Randomizer's roster scan
 # (`func_8016B774` reimplemented in the mod) against the game's own `+0x02`
 # byte, from an `OGRE_DUMP_RDRAM` image. `mismatches 0` is the pass; see
-# tools/refscan.py and docs/notes-item-equipped.md.
+# tools/refscan.py and docs/items.md.
 refscan:
 	@test -n "$(DUMP)" || { echo "usage: make refscan DUMP=<rdram image>" >&2; exit 2; }
 	python3 tools/refscan.py "$(DUMP)"
@@ -406,10 +409,12 @@ bank-recomp: bank
 	@# in; the game's own pointer can be left at the framebuffer table's
 	@# placeholder entry. Regenerated above, so re-apply here (session 48).
 	python3 tools/njpeg_readback.py
-	@# The HD-background pack needs a call at the end of the same readback pass,
-	@# after the copied pixels reach their destination buffer. Bank units are
-	@# outside the mod hook map, so the app hooks in from the generated unit
-	@# instead (`app/src/hd_backgrounds.cpp`; a no-op with no pack installed).
+	@# The HD-background pack needs two calls in each njpeg copy (units E and C,
+	@# and the title module in RecompiledFuncs, which `recomp` patches): one at
+	@# the Huffman decode names the asset, one at the end of the readback pass
+	@# replaces its pixels. Bank units are outside the mod hook map, so the app
+	@# hooks in from the generated code (`app/src/hd_backgrounds.cpp`; a no-op
+	@# with no pack installed).
 	python3 tools/hd_backgrounds.py
 	@# The mouse drives the world map's cursor (scene 0x05) from the map
 	@# module's own cursor draw, which is bank code and so outside the mod hook

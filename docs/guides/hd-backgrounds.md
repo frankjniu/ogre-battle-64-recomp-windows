@@ -1,107 +1,68 @@
 # HD backgrounds (`mods/backgrounds/`)
 
-The step-by-step procedure for a new replacement is `hd-workflow.md`; this
-guide is the reference for the mechanisms.
+A pack of PNGs that replaces whole backdrops: the njpeg images (battle,
+dialogue, cutscene and town backgrounds, by asset), the step-keyed cathedral
+canvas of scene `0x0D`, and the screen backdrops of the title (`0x04`), the
+Load Game book (`0x12`) and the Hugo Report (`0x08`). The pack writes its image
+at the game's resolution; HD detail comes from RT64 replacement strips cut from
+the same PNG. The procedure for a new replacement, the art route and the
+texture-pack tool `tools/hdtex.py` are in `hd-workflow.md`.
 
-A pack of PNGs that replaces the game's dialogue and cutscene backdrops. The
-game draws those backdrops from full-screen `njpeg` images
-(`docs/guides/njpeg-backgrounds.md`); this feature writes the pack's image over
-the pixels the game copies out of the decoder, before the game composes and
-blits them.
-
-The first worked example is the New Game cathedral (Archbishop Odiron), scene
-`0x0D` step 2.
+Code: `app/src/hd_backgrounds.cpp` (the pack, the njpeg write, the strip marks),
+`app/src/screen_backdrops.cpp` (the screen backdrop hooks),
+`tools/backgrounds.py` (extract and HD strips), `tools/njpeg.py` (the offline
+njpeg decoder and the asset-keyed pack).
 
 ## The pack
 
 ```
 mods/backgrounds/
   backgrounds.txt     the mapping
-  01.png              the image for one background
-  make-example.py     the script that wrote 01.png (a placeholder)
+  01.png, 01-wide.png the cathedral placeholder (tracked, a test image)
+  make-example.py     the script that wrote the placeholder
+  title.png, loadgame.png, hugo.png, hugo-wide.png   screen art (gitignored)
+  njpeg/<key>.png     one njpeg asset each, at its own size (tools/njpeg.py, gitignored)
+  hd/                 RT64 replacement strips and rt64.json (generated, gitignored)
+  hd-src/             HD masters kept by tools/hdtex.py (gitignored)
+  reference/          extracted originals (gitignored, ignored by the loader)
 ```
 
-`backgrounds.txt` is one line per background, whitespace separated:
+`backgrounds.txt` has one line per backdrop, whitespace separated; `#` starts a
+comment:
 
 ```
-<id>   <name>        <scene>  <step>
-01     cathedral     0x0D     2
+<id>  <name>     <scene>  <step>
+01    cathedral  0x0D     2
+02    title      0x04     -
+03    loadgame   0x12     -
+04    hugo       0x08     -
 ```
 
-* `id` names the image file in the same folder: `<id>.png`, or `<name>.png` if
-  that is missing.
-* `name` is a label for the log.
-* `scene` is the scene id that draws the backdrop (`docs/scenes.md`).
-* `step` is the scripted step number in `D_8018F1C0`.
+- `id` names the image: `<id>.png`, or `<name>.png` if that is missing.
+- `scene` is the scene that draws the backdrop (`docs/scenes.md`).
+- `step` is the scripted step `D_8018F1C0` for an njpeg backdrop, and `-` for a
+  screen backdrop.
+- `<id>-wide.png` (or `<name>-wide.png`) is the variant used with WIDESCREEN on.
+  Without it the plain image serves both modes.
 
-`#` starts a comment; blank lines are ignored. An image whose file is missing is
-reported and skipped, and a pack with no loadable entry is a no-op.
+A missing image is reported and skipped. The port uses the first of these
+folders that holds a `backgrounds.txt`:
 
-The port looks for a pack in this order and uses the first folder that contains
-a `backgrounds.txt`:
+1. `$OGRE_BG_DIR` (when set, the only folder searched);
+2. `<config>/mods/backgrounds` (`<config>` is the executable's folder;
+   `app-build.md` → "Config directory");
+3. `<config>/../mods/backgrounds`;
+4. `<working directory>/mods/backgrounds`.
 
-1. `$OGRE_BG_DIR` — when set, this is the **only** folder searched
-2. `<config>/mods/backgrounds` (`<config>` is the executable's folder by
-   default; see `docs/guides/app-build.md` → "Config directory")
-3. `<config>/../mods/backgrounds` — this is the repository's own `mods/` when
-   the app runs from `build-app/`
-4. `<working directory>/mods/backgrounds`
+`OGRE_BG=0` turns the pack off for one run (`[hdbg] pack disabled`), and
+`OGRE_BG_HD=0` keeps the pack but skips the HD strips. Every scene in
+`backgrounds.txt` joins the WIDESCREEN Expand set.
 
-### Running with and without the pack
+## Dialogue backdrops (njpeg, scene `0x0D`)
 
-The pack is loaded automatically when a `backgrounds.txt` is found. To compare a
-run against the vanilla art:
-
-```sh
-# with the pack (default, when mods/backgrounds/ exists)
-./build-app/ogrebattle64 assets/ogre64.z64
-
-# without it, for one run
-OGRE_BG=0 ./build-app/ogrebattle64 assets/ogre64.z64          # 0, off, false or no
-
-# without it, by pointing the pack folder somewhere empty
-OGRE_BG_DIR=/tmp/no-backgrounds ./build-app/ogrebattle64 assets/ogre64.z64
-
-# a different pack folder than the default search
-OGRE_BG_DIR=/path/to/another-pack ./build-app/ogrebattle64 assets/ogre64.z64
-```
-
-`OGRE_BG=0` logs `[hdbg] pack disabled (OGRE_BG=0)`; an empty `OGRE_BG_DIR` logs
-`[hdbg] no backgrounds.txt found (looked in 1 place(s))`. With the pack off, the
-game's own `njpeg` backdrop is drawn unchanged and `OGRE_BG_LOG` prints no
-`[hdbg] pass` lines. WIDESCREEN is unaffected: scene `0x0D` is in the Expand set
-whether or not the pack is installed, and the game's own 496x384 backdrop has
-content that the 4:3 view crops, so the wide view reveals it.
-
-## Extracting the original (the reference to draw over)
-
-`tools/backgrounds.py` produces the game's own backdrop as a PNG at the canvas
-size, for an artist to draw the replacement over:
-
-```sh
-make bg-extract                              # mapping 01, the cathedral
-make bg-extract BG_ID=02                     # another mapping
-tools/backgrounds.py extract 01 --step 6     # another step of scene 0x0D
-tools/backgrounds.py extract --all           # a plain boot; keep every dump
-tools/backgrounds.py extract 01 --from /tmp/dump   # file an existing dump
-```
-
-The tool runs the app with `OGRE_BG_DUMP=<dir>`, which writes one
-`original-step<NNNN>.png` per assembly, before the pack replaces anything, and
-files it as `mods/backgrounds/reference/<id>-<name>-original.png`. That
-directory is gitignored: it is extracted art and the repository never commits
-it. The port ignores the subdirectory when it loads the pack, so a reference
-cannot be mistaken for a replacement.
-
-The dump is a live capture of the readback, not an offline ROM decode: the four
-`njpeg` sub-images are Huffman-coded and only the game's RSP microcode decodes
-them. It runs on every pass the readback copies, so one run through the opening
-writes the reference for every backdrop it assembles; a later background needs
-only a mapping line and a run that reaches it.
-
-## What the image should be
-
-The game's backdrop is a **496x384 canvas** tiled by four `njpeg` sub-images:
+The game decodes four njpeg sub-images and copies each out of a framebuffer in
+`func_ovlE_8019976C` (bank unit E; `njpeg-backgrounds.md`). The four copies
+tile a 496x384 canvas:
 
 | pass | copy destination | size | canvas rect |
 |---|---|---|---|
@@ -110,246 +71,116 @@ The game's backdrop is a **496x384 canvas** tiled by four `njpeg` sub-images:
 | 2 | `0x801E50D0` | 320x144 | `(0, 239)` |
 | 3 | `0x801FB8F0` | 176x144 | `(320, 239)` |
 
-The rects are where the game draws each chunk on screen, measured with a pack
-whose pixels encode their own canvas row and column: the right chunks start at
-column 320, and the bottom chunks start at row 239, over the top chunks' last
-row. The asset's chunk headers (ROM `0x7CADB4` and following) hold
-`(-229,-235)`, `(90,-235)`, `(-229,4)` and `(90,4)`, which space the rows 239
-apart and the columns 319 apart. Canvas row 383 is never drawn. Until
-2026-10-31 the bottom chunks were placed at row 240, and the screen skipped
-canvas row 239: a one-row break across the whole backdrop.
+The rects are where the game draws each chunk, measured with a pack whose pixels
+encode their own row and column. The bottom chunks start at row 239, over the
+top chunks' last row; the asset's chunk headers (ROM `0x7CADB4` and following)
+hold `(-229,-235)`, `(90,-235)`, `(-229,4)` and `(90,4)`. Canvas row 383 is never
+drawn.
 
-Author the PNG as the whole backdrop. The port box-filters it to 496x384,
-splits it by those rects, and writes each part over the pass's pixels. Author the
-plain image at the canvas aspect (496x384, or a multiple such as 1984x1536) so
-the port maps it without a second scaling; `tools/backgrounds.py` extracts
-exactly this canvas as the reference to draw over.
+`ogre_njpeg_pass` (next section) runs at the end of each pass copy. When the
+pass's asset has no `njpeg/<key>.png`, the dialogue engine's passes fall back to
+this step-keyed canvas: the entry is matched by step (at the readback the scene
+word still holds the `0x02` loader, so the step is the key and the scene is
+checked only when it matches), and the pass's sub-rectangle of the canvas is
+written over its pixels as RGBA5551 in the runtime's byte order (`MEM_H` at
+`offset ^ 2`).
 
-A file named `<id>-wide.png` (or `<name>-wide.png`) beside the plain image is
-the **widescreen variant**, used when the WIDESCREEN setting is on. Author it in
-the widescreen aspect (16:9, for example 1920x1080). The port does not stretch
-it to the canvas: it scales it uniformly to the canvas width and anchors the
-result to the canvas bottom, so circles stay round. (A 16:9 source stretched to
-the 496x384 canvas instead displays 29 % narrow: a circle drawn 1:1 measured
-0.71 aspect against 0.96 for a canvas-aspect source.) The rows above the image
-repeat its first row, but the draw shows the lower part of the canvas, so those
-rows are off-screen in practice. `mods/backgrounds/01-wide.png` is the example;
-its round rose window is also the aspect check. Without the variant, the plain
-image is used in both modes.
+Authoring:
 
-The pack writes the backdrop at the game's resolution. The detail above it
-comes from the HD strips (next section), which are cut from the same PNG; the
-larger the PNG, the more detail survives (author at 1984x1536 for 4x).
+- The plain image is the whole canvas: 496x384 or a multiple (1984x1536 for 4x).
+  The port box-filters it to 496x384 and splits it by the rects above.
+- The `-wide` image is 16:9 (for example 1920x1080). The port scales it
+  uniformly to the canvas width and anchors it to the canvas bottom
+  (`to_canvas_fit`), so circles stay round. Stretching a 16:9 image to the
+  canvas would show it 29 % narrow. The round rose window in `01-wide.png` is the
+  aspect check.
+- The game's own letterbox at the top and bottom of the dialogue screen is part
+  of the scene and is not filled.
+- The image is chosen by the WIDESCREEN setting, not by the live aspect, because
+  the backdrop is assembled in the `0x02` loader before `0x0D` expands. The log
+  tells them apart: `applied 'cathedral' (01 wide)` against `(01)`.
 
-## HD strips (`mods/backgrounds/hd/`)
+Scene `0x0D` expands with or without the pack: the game's 496x384 backdrop has
+content that the 4:3 view crops.
 
-The game draws the composed backdrop with the F3DEX2 ucode `0x8009F540` as
-textured quads, not texture rectangles. The four canvas chunks sit as RGBA16
-images at `0x80243E28` (320x240), `0x80269660` (176x240), `0x8027E090`
-(320x144) and `0x802948C0` (176x144), and each quad loads one strip with
-`G_LOADTILE`: 320x6 or 176x11 texels, 5 or 10 new rows plus one overlap row.
-That is 116 loads per frame, measured at the cathedral. The last strip of a
-240-row chunk loads one row past the chunk's end.
-
-RT64 replaces a texture by the hash of the TMEM it was loaded into, so each
-strip is replaced separately. `tools/backgrounds.py hd <id>` (or
-`make bg-hd BG_ID=<id>`) builds the replacements:
+### Extracting the original
 
 ```sh
-tools/backgrounds.py hd 01 --rom <rom>       # plain and, if present, -wide
-tools/backgrounds.py hd 01 --scale 4         # force 4x (default: PNG width / 496, rounded)
-tools/backgrounds.py hd 01 --dump D          # keep RT64's texture dumps in D
-tools/backgrounds.py hd 01 --from D          # rebuild from D without running
+make bg-extract                              # mapping 01, the cathedral
+make bg-extract BG_ID=02                     # another mapping
+tools/backgrounds.py extract 01 --step 6     # another step of scene 0x0D
+tools/backgrounds.py extract --all           # a plain boot; keep every dump
+tools/backgrounds.py extract 01 --from <dir> # file an existing dump
+tools/backgrounds.py list                    # print the mappings
 ```
 
-1. It runs the app on the mapping's route with the pack applied and
-   `OGRE_DUMP_TEX` set, once with WIDESCREEN off and once with it on when a
-   `<id>-wide.png` exists (the wide image writes other pixels, so its strips
-   have other hashes).
-2. From RT64's dump it reads each strip's hash, source address and rows
-   (`<hash>.v5.rice.json`) and its size (`.tile.json`), and names the chunk by
-   its size.
-3. It checks each strip's dumped pixels against the canvas the pack wrote (the
-   same box filter and the same `make_strips_unique` pass as
-   `hd_backgrounds.cpp`) and stops when fewer than 98 % of the texels match,
-   which is what a different chunk layout produces. The cathedral matches
-   exactly (0 of 220,976 texels differ per variant). It also counts the strip
-   positions that have their own hash in the dump: RT64 dumps one file per
-   hash, so a missing position shares a hash with another strip. The cathedral
-   has 116 of 116 in both variants.
-4. It resamples the PNG to an integer multiple of the canvas with Lanczos
-   (the `-wide` image placed as `to_canvas_fit` places it), cuts each strip's
-   rectangle, and writes `hd/<id>/<hash>.png`, `hd/<id>-wide/<hash>.png` and
-   `hd/rt64.json`, keeping other mappings' entries.
+The tool runs the app with `OGRE_BG_DUMP=<dir>`, which writes one
+`original-step<NNNN>.png` per assembly before the pack replaces anything, and
+files it as `mods/backgrounds/reference/<id>-<name>-original.png`. It is a live
+capture of the readback. (This guide said until 2026-11-01 that only the game's
+microcode can decode the sub-images; `tools/njpeg.py` decodes every njpeg asset
+from the ROM, next section.)
 
-The app loads `<pack>/hd` as an RT64 texture pack at renderer start when the
-pack is loaded and `hd/rt64.json` exists, and logs `[hdbg] texture pack <dir>`.
-`OGRE_BG_HD=0` skips it for one run and keeps the game-resolution write. The
-replacements use RT64's half-texel shift and the `stall` operation: RT64 decodes
-a strip before the frame that first draws it, so no strip shows at game
-resolution. Measured at normal speed on the cathedral, the 116 strips cost
-16.1 ms of decoding once (1.44 ms at most for one). `--operation stream` loads
-them on background threads instead, with no wait; the game-resolution strip
-draws until its PNG is ready, and all 116 were in HD 21.1 ms after the first
-was queued (one or two frames at 60 Hz). `mods/backgrounds/hd/` is generated
-and gitignored. Rebuild it after changing a PNG, `chunk_rect` or
-`make_strips_unique`.
+## njpeg images by asset (`njpeg/<key>.png`)
 
-RT64 replaces a strip by the hash of its texels, so two strips with the same
-game-resolution pixels would share one HD image; that happens in slow vertical
-gradients and flat areas (the placeholder pair had 4 such strips in the plain
-image and 43 in the wide one). When the pack loads an image,
-`make_strips_unique` (`app/src/hd_backgrounds.cpp`) flips the lowest blue bit of
-one texel in each strip that repeats an earlier one, in the strip's third row,
-which no other strip loads. Each strip changes at most one texel by 1/31 in one
-channel, and that texel is drawn only when the HD strips are not loaded.
+Four records carry the same njpeg module, each with its own state pointer
+(`tools/hd_backgrounds.py` lists the call sites):
 
-## Widescreen
+| copy | unit | state pointer | decode setup | readback |
+|---|---|---|---|---|
+| dialogue engine (`0x02`/`0x0D`) | bank E, record 0 | `0x8019A680` | `func_ovlE_80199A08` | `func_ovlE_8019976C` |
+| record 10 (battle `0x0E`, mask `0x3C00`) | bank C | `0x801D0700` | `func_ovlC_801CE084` | `func_ovlC_801CDDE8` |
+| record 10b | bank C | `0x801F0570` | `func_ovlC_801EF4A4` | `func_ovlC_801EF208` |
+| title module | `RecompiledFuncs` | `0x801BA6F0` | `func_801B7874` | `func_801B75D8` |
 
-With WIDESCREEN on, the window is 16:9 and a scene the toggle does not expand is
-pillarboxed: the 4:3 game image sits in the middle with black bars at the sides.
-The mission (`0x03`) and the dialogue/cutscene scene (`0x0D`) expand, so the
-backdrop fills the whole width with more of the canvas at the sides. Scene `0x0D`
-does this **with or without the pack**: the game's own backdrop already has
-content that the 4:3 view crops. The dialogue box, the portrait and the text keep
-their own size and position in the wider view.
+Bank code is outside the `.nrm` mod hook map, so `tools/hd_backgrounds.py`
+places two calls in each copy's generated code; `make bank-recomp` and
+`make recomp` re-apply them:
 
-The scene list is `expand_scenes()` in `app/src/widescreen.cpp`: `0x03`,
-`0x0D`, the world map `0x05` and the Organize Screen `0x06` by default, plus every scene in
-`backgrounds.txt`. `OGRE_WS_SCENES`
-replaces the default set for a developer run:
+- `ogre_njpeg_source(rdram, STATE)` just before the CPU Huffman decode
+  `func_8008B250(state[0x6C], state[0x68])`. `state[0x6C]` points at the
+  compressed stream's `'HUFF'` tag; the asset's key is FNV-1a 64 over its first
+  64 bytes. The bytes come from the ROM, so the key is the same on every
+  machine, and `tools/njpeg.py list` prints it (75 assets, 75 keys).
+- `ogre_njpeg_pass(rdram, STATE)` after the pass counter store
+  (`sb $v0, 0x7E($v1)`). If `njpeg/<key>.png` exists and has the pass's size,
+  its texels replace the pass's (`state[0x74]`, +8 on the single-image path).
+  Otherwise the dialogue engine's pass goes to the step-keyed canvas above.
 
-```sh
-OGRE_LAUNCHER_KEYS=space OGRE_WIDESCREEN=on OGRE_WS_SCENES=0x03,0x0D \
-  OGRE_SPEED=8 OGRE_SCENE=new-game OGRE_STEP=2 OGRE_NJPEG=1 \
-  OGRE_CAPTURE_PRESENT=/tmp/ws OGRE_CAPTURE_EVERY=100 OGRE_EXIT_AFTER_MS=25000 \
-  ./build-app/ogrebattle64 assets/ogre64.z64
-```
+The PNG is the asset at its own size with RGBA5551-exact values, written by
+`tools/njpeg.py pack`, which also cuts the HD strips. Because the port writes
+exactly these texels, the tool computes RT64's hash of every strip offline
+(`rt64_hash`, a port of `rt64_tmem_hasher.h` version 5). Checked on the
+cathedral: the tool reproduced all 116 strip hashes of a capture from its RDRAM
+bytes, and in a run with a pack built from a cathedral master, RT64 loaded
+exactly the 116 hashes the tool had computed.
 
-`widescreen.cpp` logs `[widescreen] aspect ratio expand (scene 0x000D, mode ON)`
-when scene `0x0D` expands. With WIDESCREEN off the aspect stays `Original` and
-the image is unchanged.
+A capture (`OGRE_DUMP_TEX`) of the same pipeline is still needed once per draw
+layout: it gives the rows each strip loads, and the bytes past the image that a
+240-row chunk's last strip reads (one row more: a heap block header, the next
+chunk's record and its first texels). `pack` matches each chunk to the captured
+image by comparing texels with the offline decode, and overlays the pack's
+texels on every captured address.
 
-The image the pack writes is chosen by the setting, not by the live aspect: the
-backdrop is assembled one scene early, in the `0x02` loader, where the aspect is
-still `Original`. With WIDESCREEN on and a `<id>-wide.png` present, the wide
-image is used; otherwise the plain image is. The log tells them apart:
-`applied 'cathedral' (01 wide) ...` against `applied 'cathedral' (01) ...`.
+`OGRE_BG_LOG=1` prints `[hdbg] njpeg pass state=… key=… WxH at …` per pass and
+`[hdbg] applied njpeg <key>.png …` when the pack replaces it. `OGRE_BG_DUMP=<dir>`
+also writes the game's own pixels of each asset once per run, as
+`njpeg-<key>-<w>x<h>.png`.
 
-The game's own vertical letterbox (black at the top and bottom of the dialogue
-screen) is part of the scene and is not filled.
+## Screen backdrops (title, Load Game, Hugo Report)
 
-## How it works
-
-1. The game decodes each `njpeg` sub-image with the RSP and draws it into a game
-   framebuffer.
-2. `func_ovlE_8019976C` (bank unit E) copies the framebuffer into one of four
-   fixed buffers, one pass per sub-image. Its per-pass state is
-   `state = *(u32*)0x8019A680`: `state[0x74]` is the destination, `state[0x78]`
-   and `state[0x7A]` are its width and height, and `state[0x80]` selects the
-   `'B5'` path (pixels at `state[0x74]`) or the single-image path (pixels at
-   `+8`).
-3. Bank units are outside the `.nrm` mod hook map (`docs/guides/app-build.md` →
-   "What a hook can reach"), so the app calls in from the generated unit
-   instead. `tools/hd_backgrounds.py` places `ogre_hd_background(rdram)` at the
-   end of the pass copy, next to the `ogre_sync_framebuffers()` call that
-   `tools/njpeg_readback.py` places there. Both are re-applied by
-   `make bank-recomp`.
-4. `ogre_hd_background` reads the current step and scene, looks the step up in
-   the pack, and writes the sub-rectangle of the image over the pass's pixels.
-   The write is in the runtime's byte order: `MEM_H` is a native `u16` at
-   `offset ^ 2` and `MEM_B` a native `u8` at `offset ^ 3` (`recomp.h`). The
-   image is 16-bit big-endian RGBA5551.
-
-The app-side code is `app/src/hd_backgrounds.cpp`; the pack is loaded once at
-startup from `main.cpp`.
-
-## Verifying
-
-`OGRE_BG_LOG=1` prints a line per pass and per applied chunk:
-
-```
-[hdbg] 01         cathedral    scene=0x0D step=2   <- 01.png (1280x960 -> 496x384)
-[hdbg] pack /Users/momo/dev/ogre/mods/backgrounds: 1 background(s) loaded
-[hdbg] pass dest=0x801AAE90 320x240 step=2 scene=0x7FFF next=0x02 -> cathedral
-[hdbg] applied 'cathedral' (01) step=2 chunk (0,0) 320x240 to 0x801AAE90
-[hdbg] pass dest=0x801D06B0 176x240 step=2 scene=0x7FFF next=0x02 -> cathedral
-[hdbg] applied 'cathedral' (01) step=2 chunk (320,0) 176x240 to 0x801D06B0
-[hdbg] pass dest=0x801E50D0 320x144 step=2 scene=0x7FFF next=0x02 -> cathedral
-[hdbg] applied 'cathedral' (01) step=2 chunk (0,240) 320x144 to 0x801E50D0
-[hdbg] pass dest=0x801FB8F0 176x144 step=2 scene=0x7FFF next=0x02 -> cathedral
-[hdbg] applied 'cathedral' (01) step=2 chunk (320,240) 176x144 to 0x801FB8F0
-```
-
-At the readback the scene word `D_800C4C26` still holds the `0x02` loader (which
-preloads the backdrop for the `0x0D` visit), and `D_8018F1C2` holds `0x02`, so
-neither matches the mapped `0x0D`. The entry's step is the identifying value and
-the scene is preferred only when it matches; `scene=0x7FFF` in the line above is
-`D_800C4C26` holding a control value (`0xFFFF`).
-
-`OGRE_BG_DEBUG=1` paints each pass a solid colour instead of the pack image —
-320x240 red, 176x240 green, 320x144 blue, 176x144 yellow — so a screen capture
-reads the four-pass composition directly.
-
-The fastest way to the cathedral is the `OGRE_STEP` shortcut:
-
-```sh
-OGRE_LAUNCHER_KEYS=space OGRE_SPEED=8 OGRE_SCENE=new-game OGRE_STEP=2 \
-  OGRE_NJPEG=1 OGRE_BG_LOG=1 OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=20000 \
-  ./build-app/ogrebattle64 assets/ogre64.z64
-```
-
-`OGRE_LAUNCHER_KEYS=space` is needed when `.nrm` mods are installed in
-`<config>/mods`: the start screen is shown for any install with mods, and
-without a key the run waits there and never reaches the game. The alternative is
-to move the `.nrm` files aside for the run.
-
-The composed backdrop is drawn a few seconds after scene `0x0D` starts; a live
-RDRAM snapshot taken at the scene's first frame holds the raw `njpeg` chunks and
-not the composed screen.
-
-## Screen backdrops: the title, the Load Game book and the Hugo Report
-
-The title (scene `0x04`), the Load Game book (scene `0x12`) and the Hugo Report
-(scene `0x08`) do not use `njpeg`; the port patches their own draws to show a
-pack image behind the game's logo, menu, windows, text and sprites
-(`app/src/screen_backdrops.cpp`, hooks in `config/config.toml` and
-`config/banks/config-bankK.toml`). A mapping line for one of these scenes has no
-step:
-
-```
-02    title      0x04  -
-03    loadgame   0x12  -
-04    hugo       0x08  -
-```
-
-The image (`<id>.png` or `<name>.png`) is box-filtered to 240 rows with its
-aspect kept, its width rounded to a multiple of 4, and centred on the 320-wide
-screen. A 16:9 image fills the widescreen sides; its centre 4:3 is what a 4:3
-window shows. The port stages it as RGBA16 at `0x80600000` (free RDRAM above the
-game's 4 MiB) and draws it in strips of as many rows as fit in TMEM's 4 KB, with
-RT64 extended-GBI rectangles at signed coordinates. A `-wide` image is optional:
-without one the same image serves both modes. Each listed scene is added to the
-Expand set, as for the `njpeg` backdrops.
-
-`tools/backgrounds.py hd <id>` builds the HD strips for a screen backdrop the same
-way as for the cathedral: it runs the app to the scene (`OGRE_SCENE=title`),
-reads every strip loaded from `0x80600000` in RT64's dump, checks its texels
-against the staged image (the title matches 100 %, 60 of 60 strips with their
-own hash), and cuts each strip from the PNG at `round(height / 240)` times.
-
-A strip whose texels are all equal, such as the black margin above the Hugo
-Report's tablet, gets the lowest blue bit of its mark row's last texel flipped
-before the duplicate check (`make_screen_strips_unique` in
-`hd_backgrounds.cpp` and the tool). Unmarked, it shares its hash with any flat
-game texture of its size: RT64's dump filed the Hugo Report's top strip under a
-320-wide black image at `0x80298140`, and its HD replacement would draw there
-too. The title and Load Game images have no flat strip, so their packs are
-unchanged.
-
-On Windows the tool picks `dist/ogre-battle-64-recomp/ogrebattle64.exe` before
-`build-dist/`; pass `--app build-dist/ogrebattle64.exe` when `dist/` is older
-than the build, or the run uses the old code.
+These screens do not use njpeg. Hooks on their own draws show the pack image
+behind the game's logo, menu, windows, text and sprites (hooks in
+`config/config.toml` and `config/banks/config-bankK.toml`). The image is
+box-filtered to 240 rows with its aspect kept, its width rounded to a multiple
+of 4, and centred on the 320-wide screen; a 16:9 image fills the widescreen
+sides, and its centre 4:3 is what a 4:3 window shows. The port stages it as
+RGBA16 at `0x80600000` (free RDRAM above the game's 4 MiB) and draws it in
+strips of as many rows as fit in TMEM's 4 KB, as extended-GBI rectangles at
+signed coordinates under `gEXSetRectAspect(ADJUST)`. RT64 stretches a
+NONE-origin rectangle that spans the whole scissor width
+(`coversScissorWidth`), so without the ADJUST aspect the image shows 4/3 too
+wide.
 
 ### The title (`0x04`)
 
@@ -365,99 +196,154 @@ The title module (streamedC, ROM `0x1CE040` → `0x80197B90`, compiled in
 | soldiers | `state+0x90 + 0x24*D_801BA558` | CI8 72x48, 3 frames | (22, 127) |
 | hill | `state+0x6C` | RGBA32 200x112 | (0, 126) |
 
-Between them it draws three fog overlays, `func_8019C5D4(0/2/1)`: white
+Between the layers it draws three fog overlays, `func_8019C5D4(0/2/1)`: white
 rectangles over a wrapped 64x64 I8 image. With a pack image:
 
-- At the sky's `func_80198ECC` entry the pack image is drawn first.
-- The sky's and both cloud layers' rectangles become `G_SPNOOP`s after each
-  call. Their texture loads stay, because each fog group inherits the tile the
-  layer before it left (the renderer's `OGRE_FOG` repair depends on that).
-- The hill stays the game's. The soldier sprite is black below their feet, and
+- The pack image is drawn at the sky's `func_80198ECC` entry.
+- The rectangles of the sky and both cloud layers become `G_SPNOOP`s. Their
+  texture loads stay, because each fog group inherits the tile the layer before
+  it left (the renderer's `OGRE_FOG` repair depends on that).
+- The hill stays the game's: the soldier sprite is black below their feet, and
   the hill, drawn after it, hides that block. The hill's 23 strips get HD
   replacements cut from the same PNG with the hill's own alpha
   (`SCREEN_OVERLAYS` in `tools/backgrounds.py`).
-- Under Expand, each fog row is continued past its ends with rectangles of the
-  same chunk width and `s` (`extend_fog`). Rows the hill covers at the left edge
-  (screen y 139 and below) are not extended on the left: the game's hill hides
-  its own fog there.
+- Under Expand, `extend_fog` continues each fog row past its ends with
+  rectangles of the same chunk width and `s`. Rows at screen y 139 and below are
+  not extended on the left, because the game's hill hides its own fog there.
 
-The image must keep the game's geometry: the soldiers are drawn at their
-native place, and the hill's HD strips are cut from the PNG. The art in use is
-the game's backdrop without the soldiers (sky, clouds and hill composited from
-RDRAM), outpainted to 16:9 and upscaled to 4096x2294 with the Higgsfield
-connector. Of four outpaints, two moved the hill's ridge near the left edge
-20 rows down, which showed as a step at x = 0 against the game's hill; the one
-in use keeps the ridge within 2 rows (mean difference 4.7 levels over the 4:3
-region). Check a new image the same way before using it. `title.png` is derived
-from the game's art and is not in the repository (`.gitignore`).
-
-RT64 stretches a NONE-origin rectangle that spans the whole scissor width to
-the wide picture (`coversScissorWidth` in `rt64_framebuffer_renderer.cpp`)
-unless its rect aspect is `G_EX_ASPECT_ADJUST`. The backdrop strips span it, so
-the draw sets `gEXSetRectAspect(ADJUST)` around them; without it the image
-showed 4/3 too wide.
+The image keeps the game's geometry: the soldiers draw at their native place,
+and the hill's ridge in the PNG must meet the game's hill.
 
 ### The Load Game book (`0x12`)
 
 The book screen is 3D. `func_801A9C68` sets the viewport `0x801B8D10`, the
-projection (`func_801A8FB4`), the setup list `0x801B8CA0`, and draws the object
-list `func_801A6BE8`: object 0 is the desk (a 15-vertex wood frame around the
-book, a CI8 32x64 tile that wraps along `s`), objects 1 and 2 are the book's
-soft shadows (an RGBA32 16x32 image), and the book follows, whose leather cover
-spans the 4:3 width. Expand alone shows more desk, black slivers at both edges
-(the frame ends at screen x -47 and 369), and the cover's edges at x 0 and 320.
+projection (`func_801A8FB4`) and the setup list `0x801B8CA0`, then draws the
+object list `func_801A6BE8`: object 0 is the desk (a 15-vertex wood frame, a CI8
+32x64 tile that wraps along `s`), objects 1 and 2 are the book's soft shadows (an
+RGBA32 16x32 image), and the book follows. Expand alone shows more desk, black
+slivers at both edges (the frame ends at screen x -47 and 369), and the cover's
+edges.
 
-With a pack image the backdrop is drawn before the setup list, with 1-cycle,
+With a pack image the backdrop is drawn before the setup list with 1-cycle,
 opaque, no-Z state, and the desk object's `G_DL` becomes a `G_SPNOOP`. The
 shadows, the book and the text stay the game's, so the shadows fall on the new
-desk. The art was made from the desk rendered alone at 4:3 (the probe that
-dropped the other objects is gone), outpainted and upscaled like the title's.
-The hole under the book was filled first by interpolating each column between
-the rows above and below it. A first fill copied the rows above the hole
-downwards; its bottom edge was a horizontal step, and the outpaint continued
-that step across both side extensions at screen y 213.
+desk.
 
 ### The Hugo Report (`0x08`)
 
 The map's R menu opens the Hugo Report (descriptor `0x8018FC64`, records 14 and
-30). Its backdrop is a stone tablet with a griffin relief on black, a CI8
-320x240 image record (`+3` texel size code 1, `+4`/`+6` width and height, texels
-at `+8`, the RGBA16 TLUT after them; at `0x80197E00` in the captured run).
+30). Its backdrop is a CI8 320x240 image record (`+3` texel size code 1,
+`+4`/`+6` width and height, texels at `+8`, the RGBA16 TLUT after them).
 `func_ovlK_802349AC(record)` (unit K, bankRec14d) writes `G_DL 0x8023DF68`
-(1-cycle, TLUT RGBA16, point filter, combiner `TEXEL0 * PRIMITIVE +
-ENVIRONMENT`), SETPRIMCOLOR white, the TLUT load and TEXTURE on (0x50 bytes),
-then `func_ovlK_8022B9A0(record, 0, 0)` draws 40 strips of 6 rows.
+(1-cycle, TLUT RGBA16, point filter, combiner `TEXEL0 * PRIMITIVE + ENVIRONMENT`),
+SETPRIMCOLOR white, the TLUT load and TEXTURE on (0x50 bytes), then
+`func_ovlK_8022B9A0(record, 0, 0)` draws 40 strips of 6 rows.
 
-With a pack image, the hook after the strip call (`0x80234B4C`) keeps the first
-0x50 bytes and writes the pack backdrop over the strips, with the TLUT off
-around them. It acts only when the record is CI8 320x240 and its TLUT hashes to
-`0x1E1F0BCE` (FNV-1a over the 512 bytes in guest order), so another image drawn
-through the same function stays the game's. `[hdbg] hugo report: image … left
-alone` logs a mismatch.
+The hook after the strip call (`0x80234B4C`) keeps the first 0x50 bytes and
+writes the pack backdrop over the strips, with the TLUT off around them. It acts
+only when the record is CI8 320x240 and its TLUT hashes to `0x1E1F0BCE` (FNV-1a
+over the 512 bytes in guest order). `[hdbg] hugo report: image … left alone`
+logs a mismatch. The Events, Miscellany and Tips pages that draw another image
+through the same function keep the game's.
 
-The art: the tablet's interior (columns 40..279 of the game's image, read from
-an RDRAM dump with `tools/rdram.py image 0x80197E08 --fmt ci8 --palette
-0x801AAA08`) was enlarged 4x, outpainted to 16:9 and upscaled to 4096x2294 with
-the Higgsfield connector (`hugo-wide.png`). The outpaint continued the tablet
-sideways with its own rough edges and black margins, and kept the griffin at
-the game's place and size (channel means within 6 levels of the original over
-the 4:3 interior). `hugo.png`, the 4:3 image for WIDESCREEN off, is the centre
-4:3 of the wide image with the wide image's outer 44 columns (in 240-row units)
-cross-faded in over 14 columns at each side, so the 4:3 view keeps the
-original's black margins. Both are derived from the game's art and gitignored.
+## HD strips (`mods/backgrounds/hd/`)
 
-`tools/backgrounds.py hd 04 --save <battery>` reaches the screen from the title:
-Load Game, A on the first slot (a save on the world map), then R, right and A on
-the map, at `OGRE_SPEED=1`. The run matched 40 of 40 plain strips and 60 of 60
-wide strips, cut at 10x.
+The game draws an njpeg backdrop with the F3DEX2 ucode `0x8009F540` as textured
+quads, one `G_LOADTILE` strip per quad, from four RGBA16 images: `0x80243E28`
+(320x240), `0x80269660` (176x240), `0x8027E090` (320x144) and `0x802948C0`
+(176x144). A strip is 320x6 or 176x11 texels (5 or 10 new rows plus one overlap
+row); the cathedral draws 116 strips per frame. A screen backdrop's strips are
+loaded from the staging buffer `0x80600000`.
+
+RT64 replaces each strip by the hash of its texels.
+`make bg-hd BG_ID=<id>` (`tools/backgrounds.py hd <id>`) builds the replacements:
+
+```sh
+make bg-hd                                          # 01, the cathedral
+make bg-hd BG_ID=02 BG_ROM=<rom>                    # the title
+make bg-hd BG_ID=03 BG_ROM=<rom> BG_SAVE=<battery>  # the Load Game book
+make bg-hd BG_ID=04 BG_ROM=<rom> BG_SAVE=<battery>  # the Hugo Report (a save on the map)
+tools/backgrounds.py hd 01 --scale 4                # force 4x
+tools/backgrounds.py hd 01 --dump <dir>             # keep RT64's texture dumps
+tools/backgrounds.py hd 01 --from <dir>             # rebuild from a dump without running
+tools/backgrounds.py hd 01 --app build-dist/ogrebattle64.exe   # pick the exe
+```
+
+1. It runs the app on the mapping's route (`SCREEN_ROUTES` for a screen
+   backdrop) with the pack applied and `OGRE_DUMP_TEX` set, once with WIDESCREEN
+   off and once with it on when a `-wide` image exists.
+2. From RT64's dump it reads each strip's hash, source address and rows
+   (`<hash>.v5.rice.json`) and size (`.tile.json`).
+3. It checks each strip's texels against the image the port wrote (the same box
+   filter and the same marking pass as the app) and stops when fewer than 98 % of
+   the texels match, which is what a different chunk layout produces. It also
+   counts the strip positions that have their own hash.
+4. It resamples the PNG with Lanczos to an integer scale (njpeg: PNG width / 496;
+   screen backdrop: `round(height / 240)`), cuts each strip's rectangle, and
+   writes `hd/<id>/<hash>.png`, `hd/<id>-wide/<hash>.png` and `hd/rt64.json`,
+   keeping other folders' entries.
+
+A good run reports 100 % of texels matching and N of N positions with their own
+hash:
+
+```
+plain: 320x240 backdrop at x 0: 40 of 40 staged strips are this image (100.0% ...), 40 of 40 positions with their own hash
+wide: 428x240 backdrop at x -54: 60 of 180 staged strips are this image (100.0% ...), 60 of 60 positions with their own hash
+```
+
+Other screens staged at `0x80600000` on the route show up as extra staged strips
+and are filtered by their texels. Rebuild the strips after changing a PNG,
+`chunk_rect` or the marking passes.
+
+Two strips with the same texels would share one HD image. The marking passes
+make every strip unique: `make_strips_unique` (njpeg) flips the lowest blue bit
+of one texel in the third row of each strip that repeats an earlier one, a row
+no other strip loads; `make_screen_strips_unique` (screen backdrops) does the
+same to the mark row's last texel of a flat strip, which would otherwise share
+its hash with any flat game texture of its size. Both are mirrored in the tool.
+The changed texel is drawn only when the HD strips are not loaded.
+
+The app loads `<pack>/hd` as an RT64 texture pack at renderer start and logs
+`[hdbg] texture pack <dir>`. The strips use RT64's `stall` operation: RT64
+decodes a strip before the frame that first draws it, so no strip shows at game
+resolution (116 cathedral strips cost 16.1 ms once). `--operation stream`
+decodes on background threads with no wait, and a strip draws at game resolution
+until its PNG is ready.
+
+## Verifying
+
+```sh
+OGRE_NO_AUDIO=1 OGRE_LAUNCHER_KEYS=space OGRE_SPEED=8 OGRE_SCENE=new-game OGRE_STEP=2 \
+  OGRE_BG_LOG=1 OGRE_SCENE_LOG=1 OGRE_EXIT_AFTER_MS=20000 "$APP" "$ROM"
+```
+
+`OGRE_SCENE=new-game OGRE_STEP=2` reaches the cathedral in a few seconds.
+`OGRE_LAUNCHER_KEYS=space` passes the start screen, which shows whenever a `.nrm`
+mod is installed. `OGRE_BG_LOG=1` prints one line per pass and per applied
+chunk:
+
+```
+[hdbg] pass dest=0x801AAE90 320x240 step=2 scene=0x7FFF next=0x02 -> cathedral
+[hdbg] applied 'cathedral' (01) step=2 chunk (0,0) 320x240 to 0x801AAE90
+```
+
+`OGRE_BG_DEBUG=1` paints each pass a solid colour instead of the pack image
+(320x240 red, 176x240 green, 320x144 blue, 176x144 yellow), so a capture shows
+the four-pass composition. The composed backdrop is drawn a few seconds after
+scene `0x0D` starts; an RDRAM image at the scene's first frame holds the raw
+njpeg chunks.
 
 ## Limits
 
-* Only the four-chunk layout above is recognized. A backdrop with different
-  chunk sizes or positions is left alone (the log says `no canvas rect`).
-* The pack replaces the backdrop only, not the dialogue box or the portraits.
-* The HD strips need one capture run per mapping and per variant, and a run
-  reaches only the backdrops its route assembles (`OGRE_STEP` for scene `0x0D`).
-* `make_strips_unique` assumes the draw's strip layout (6 rows every 5 for a
+- The step-keyed canvas knows only the cathedral's four-chunk 496x384 layout
+  (`[hdbg] … no canvas rect` for others). The asset-keyed `njpeg/` images have no
+  layout limit.
+- An asset's HD strips need a capture of a pass drawn the same way (the same
+  pipeline, chunk size and buffer); the last strip of a 240-row chunk hashes
+  bytes past the image, which a different heap layout changes.
+- The pack replaces the backdrop only, not the dialogue box or the portraits.
+- The HD strips need one capture run per mapping and per variant, and a run
+  reaches only the backdrops its route assembles.
+- `make_strips_unique` assumes the draw's strip layout (6 rows every 5 for a
   320-wide chunk, 11 every 10 for a 176-wide one); the tool's hash count reports
   a backdrop drawn another way.

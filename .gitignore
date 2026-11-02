@@ -8,6 +8,9 @@ mods/backgrounds/hd/
 # HD masters of the game's textures (tools/hdtex.py pack): AI-upscaled from the
 # ROM's art, so derived from the ROM.
 mods/backgrounds/hd-src/
+# The njpeg images by asset (tools/njpeg.py pack): game-size images cut from the
+# AI-upscaled art, so derived from the ROM.
+mods/backgrounds/njpeg/
 # The title, Load Game and Hugo Report backdrops are AI-upscaled and
 # outpainted from the game's own art, so they are derived from the ROM and stay
 # out of the repository like other assets.

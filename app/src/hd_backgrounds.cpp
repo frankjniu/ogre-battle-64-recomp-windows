@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -118,10 +119,21 @@ struct Entry {
     ScreenImage screen_wide;
 };
 
+// A replacement for one njpeg asset, from `<pack>/njpeg/<key>.png` (the key is
+// `njpeg_key`). The PNG is the asset's own size; the pass's pixels are replaced
+// as they are, so tools/njpeg.py can compute the HD strips' hashes offline.
+struct NjpegImage {
+    int width = 0;
+    int height = 0;
+    std::string file;
+    std::vector<uint16_t> pixels;  // width x height, guest-order RGBA5551
+};
+
 struct Pack {
     bool loaded = false;
     std::filesystem::path dir;
     std::vector<Entry> entries;
+    std::unordered_map<uint64_t, NjpegImage> njpeg;
 };
 
 Pack g_pack;
@@ -402,6 +414,48 @@ bool load_entry_image(Entry& e) {
     return true;
 }
 
+// `<pack>/njpeg/<16 hex digits>.png`: one image per njpeg asset, named by its
+// key (`njpeg_key`), at the asset's own size. tools/njpeg.py writes them with
+// RGBA5551 values already (each channel `v * 255 / 31` rounded), so the pass
+// gets exactly the texels the tool hashed for the HD strips.
+void load_njpeg(const std::filesystem::path& dir) {
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dir, ec)) {
+        return;
+    }
+    for (const auto& item : std::filesystem::directory_iterator(dir, ec)) {
+        const std::filesystem::path& p = item.path();
+        if (p.extension() != ".png") {
+            continue;
+        }
+        const std::string stem = p.stem().string();
+        if (stem.size() != 16 || stem.find_first_not_of("0123456789abcdef") != std::string::npos) {
+            continue;
+        }
+        int w = 0, h = 0, comp = 0;
+        uint8_t* rgba = stbi_load(p.string().c_str(), &w, &h, &comp, 4);
+        if (rgba == nullptr) {
+            std::fprintf(stderr, "[hdbg] njpeg %s: cannot read (%s)\n", p.string().c_str(),
+                         stbi_failure_reason());
+            continue;
+        }
+        NjpegImage img;
+        img.width = w;
+        img.height = h;
+        img.file = p.filename().string();
+        img.pixels.resize(size_t(w) * h);
+        for (size_t i = 0; i < img.pixels.size(); ++i) {
+            const uint8_t* px = rgba + i * 4;
+            img.pixels[i] = uint16_t((to_5bit(px[0]) << 11) | (to_5bit(px[1]) << 6) |
+                                     (to_5bit(px[2]) << 1) | 1);
+        }
+        stbi_image_free(rgba);
+        g_pack.njpeg[std::strtoull(stem.c_str(), nullptr, 16)] = std::move(img);
+    }
+    std::fprintf(stderr, "[hdbg] njpeg %s: %zu image(s)\n", dir.string().c_str(),
+                 g_pack.njpeg.size());
+}
+
 // `backgrounds.txt`: one `<id> <name> <scene> <step>` per line, '#' comments.
 bool load_pack(const std::filesystem::path& dir) {
     std::FILE* f = std::fopen((dir / "backgrounds.txt").string().c_str(), "rb");
@@ -433,7 +487,8 @@ bool load_pack(const std::filesystem::path& dir) {
         }
     }
     std::fclose(f);
-    g_pack.loaded = !g_pack.entries.empty();
+    load_njpeg(dir / "njpeg");
+    g_pack.loaded = !g_pack.entries.empty() || !g_pack.njpeg.empty();
     std::fprintf(stderr, "[hdbg] pack %s: %zu background(s) loaded\n", dir.string().c_str(),
                  g_pack.entries.size());
     return true;
@@ -711,16 +766,146 @@ const ogre::ScreenBackdrop* ogre::hd_backgrounds_screen(uint16_t scene, bool wid
     return nullptr;
 }
 
-// Called by the generated njpeg readback (tools/hd_backgrounds.py) at the end of
-// each pass's row copy.
-extern "C" void ogre_hd_background(uint8_t* rdram) {
+namespace {
+
+// The dialogue engine's copy of the njpeg module (bank E) keeps its state
+// pointer here; the step-keyed backdrops (`backgrounds.txt`) only apply to it.
+constexpr uint32_t kDialogueState = 0x8019A680u;
+
+// The njpeg asset a pipeline is decoding, by the address of its state pointer
+// (tools/hd_backgrounds.py lists the four). `ogre_njpeg_source` sets it at the
+// Huffman decode; the pass that follows reads it.
+std::unordered_map<uint32_t, uint64_t> g_source;
+
+// FNV-1a 64 over the first 64 bytes of the compressed stream, from its 'HUFF'
+// tag: the stream is the ROM's bytes, so the key is the same on every machine
+// and tools/njpeg.py computes it from the ROM (`list`). The 75 assets have 75
+// different keys.
+constexpr uint32_t kKeyBytes = 64;
+
+uint64_t njpeg_key(const uint8_t* rdram, uint32_t stream) {
+    uint64_t h = 0xCBF29CE484222325ull;
+    for (uint32_t i = 0; i < kKeyBytes; ++i) {
+        h ^= load_u8(rdram, stream + i);
+        h *= 0x100000001B3ull;
+    }
+    return h;
+}
+
+// `OGRE_BG_DUMP`: the game's own pixels of each asset pass, once per key per
+// run, as `njpeg-<key>-<w>x<h>.png`. A played route (a battle) names the keys
+// its backdrops use and gives a reference to compare tools/njpeg.py with.
+std::unordered_set<uint64_t> g_dumped_keys;
+
+void dump_njpeg_pass(const uint8_t* rdram, uint32_t base, uint32_t w, uint32_t h, uint64_t key) {
+    if (!g_dump.enabled || !g_dumped_keys.insert(key).second) {
+        return;
+    }
+    std::vector<uint8_t> rgba(size_t(w) * h * 4);
+    for (size_t i = 0; i < size_t(w) * h; ++i) {
+        const uint32_t v = load_u16(rdram, base + uint32_t(i) * 2);
+        rgba[i * 4 + 0] = uint8_t(((v >> 11) & 31) * 255 / 31);
+        rgba[i * 4 + 1] = uint8_t(((v >> 6) & 31) * 255 / 31);
+        rgba[i * 4 + 2] = uint8_t(((v >> 1) & 31) * 255 / 31);
+        rgba[i * 4 + 3] = 255;
+    }
+    char name[64];
+    std::snprintf(name, sizeof(name), "njpeg-%016llx-%ux%u.png", (unsigned long long)key, w, h);
+    const std::filesystem::path out = g_dump.dir / name;
+    const int ok = stbi_write_png(out.string().c_str(), int(w), int(h), 4, rgba.data(), int(w) * 4);
+    std::fprintf(stderr, "[hdbg] dump %s%s\n", out.string().c_str(), ok ? "" : " (failed)");
+}
+
+// Replace the pass's pixels with the pack's image for its asset. Returns true
+// when the pack had one.
+bool asset_backdrop(uint8_t* rdram, uint32_t state_ptr, uint32_t base, uint32_t w, uint32_t h,
+                    uint64_t key) {
+    const auto it = g_pack.njpeg.find(key);
+    if (it == g_pack.njpeg.end()) {
+        return false;
+    }
+    const NjpegImage& img = it->second;
+    if (uint32_t(img.width) != w || uint32_t(img.height) != h) {
+        std::fprintf(stderr, "[hdbg] njpeg %s is %dx%d; the pass is %ux%u, left alone\n",
+                     img.file.c_str(), img.width, img.height, w, h);
+        return false;
+    }
+    uint32_t addr = base;
+    for (size_t i = 0; i < img.pixels.size(); ++i, addr += 2) {
+        store_u16(rdram, addr, img.pixels[i]);
+    }
+    if (std::getenv("OGRE_BG_LOG") != nullptr) {
+        std::fprintf(stderr, "[hdbg] applied njpeg %s %ux%u to 0x%08X (state 0x%08X)\n",
+                     img.file.c_str(), w, h, base, state_ptr);
+    }
+    return true;
+}
+
+void step_backdrop(uint8_t* rdram);
+
+}  // namespace
+
+// Called by the generated njpeg decode setup (tools/hd_backgrounds.py) just
+// before the CPU Huffman decode `func_8008B250(state[0x6C], state[0x68])`.
+extern "C" void ogre_njpeg_source(uint8_t* rdram, uint32_t state_ptr) {
     if (!g_pack.loaded && !g_dump.enabled) {
         return;
     }
+    const uint32_t state = load_u32(rdram, state_ptr);
+    if (state < kKseg0 || state >= kRamEnd) {
+        return;
+    }
+    const uint32_t stream = load_u32(rdram, state + 0x6Cu);
+    if (stream < kKseg0 || uint64_t(stream) + kKeyBytes > kRamEnd ||
+        load_u8(rdram, stream) != 'H' || load_u8(rdram, stream + 1) != 'U' ||
+        load_u8(rdram, stream + 2) != 'F' || load_u8(rdram, stream + 3) != 'F') {
+        g_source.erase(state_ptr);
+        return;
+    }
+    g_source[state_ptr] = njpeg_key(rdram, stream);
+}
 
+// Called by the generated njpeg readback (tools/hd_backgrounds.py) at the end of
+// each pass's row copy, after the pass counter store.
+extern "C" void ogre_njpeg_pass(uint8_t* rdram, uint32_t state_ptr) {
+    if (!g_pack.loaded && !g_dump.enabled) {
+        return;
+    }
+    const uint32_t state = load_u32(rdram, state_ptr);
+    const auto src = g_source.find(state_ptr);
+    if (state >= kKseg0 && state < kRamEnd && src != g_source.end()) {
+        const uint32_t dest = load_u32(rdram, state + 0x74u);
+        const uint32_t w = load_u16(rdram, state + 0x78u);
+        const uint32_t h = load_u16(rdram, state + 0x7Au);
+        // The single-image path writes an 8-byte header at `dest`.
+        const uint32_t base = dest + (load_u8(rdram, state + 0x80u) == 0 ? 8u : 0u);
+        const uint64_t key = src->second;
+        g_source.erase(src);
+        if (base >= kKseg0 && uint64_t(base) + uint64_t(w) * h * 2 <= kRamEnd) {
+            dump_njpeg_pass(rdram, base, w, h, key);
+            if (std::getenv("OGRE_BG_LOG") != nullptr) {
+                std::fprintf(stderr, "[hdbg] njpeg pass state=0x%08X key=%016llx %ux%u at 0x%08X\n",
+                             state_ptr, (unsigned long long)key, w, h, base);
+            }
+            if (g_pack.loaded && std::getenv("OGRE_BG_DEBUG") == nullptr &&
+                asset_backdrop(rdram, state_ptr, base, w, h, key)) {
+                return;
+            }
+        }
+    }
+    if (state_ptr == kDialogueState) {
+        step_backdrop(rdram);
+    }
+}
+
+namespace {
+
+// The step-keyed backdrop (`backgrounds.txt`, the cathedral's 496x384 canvas)
+// for the dialogue engine's passes.
+void step_backdrop(uint8_t* rdram) {
     // The pipeline's state object. The pointer lives at a fixed guest word in
     // the main segment; the fields are the ones func_ovlE_8019976C reads.
-    const uint32_t state = load_u32(rdram, 0x8019A680u);
+    const uint32_t state = load_u32(rdram, kDialogueState);
     if (state < kKseg0 || state >= kRamEnd) {
         return;
     }
@@ -808,3 +993,5 @@ extern "C" void ogre_hd_background(uint8_t* rdram) {
                  match->name.c_str(), match->id.c_str(), use_wide ? " wide" : "", step, cx, cy,
                  w, h, base);
 }
+
+}  // namespace

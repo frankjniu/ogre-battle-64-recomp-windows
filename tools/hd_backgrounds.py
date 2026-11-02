@@ -1,33 +1,35 @@
 #!/usr/bin/env python3
-"""Call the app's HD-background hook from the njpeg readback.
+"""Call the app's HD-background hooks from every njpeg pipeline.
 
-The game assembles every large dialogue/cutscene backdrop on the njpeg path:
-`func_ovlE_8019976C` (bank unit E) copies one sub-image per pass out of a game
-framebuffer into a fixed buffer, and `func_ovlE_80199D30` later merges the four
-buffers into the `'B5'` image the blit reads. Bank units are not covered by the
-mod hook map (`docs/guides/app-build.md` -> "What a hook can reach"), so a `.nrm`
-code mod cannot reach this code. The port calls in from the generated unit
-instead, next to the existing `ogre_sync_framebuffers()` call that
-`tools/njpeg_readback.py` places at the copy's source load.
+The game decodes its full-screen njpeg images (`docs/guides/njpeg-backgrounds.md`)
+with one module that four records carry, each with its own state object:
 
-This script inserts `ogre_hd_background(rdram)` at the end of the pass copy, in
-`func_ovlE_8019976C`, between the store that bumps the pass counter and the
-common return label `L_80199954`:
+| copy | unit | state pointer | decode setup | readback |
+|---|---|---|---|---|
+| dialogue engine (scene 0x02/0x0D) | bank E, record 0 | `0x8019A680` | `func_ovlE_80199A08` | `func_ovlE_8019976C` |
+| battle and movie (record 10) | bank C, `bankRec10` | `0x801D0700` | `func_ovlC_801CE084` | `func_ovlC_801CDDE8` |
+| record 10b | bank C, `bankRec10b` | `0x801F0570` | `func_ovlC_801EF4A4` | `func_ovlC_801EF208` |
+| title module (streamedC) | `RecompiledFuncs` | `0x801BA6F0` | `func_801B7874` | `func_801B75D8` |
 
-    0x80199950  sb   $v0, 0x7E($v1)      # state[0x7E]++: this pass is done
-    >>> ogre_hd_background(rdram);
-    L_80199954:                          # every other path jumps here directly
+The four copies are the same code at different addresses: the decode setup
+loads the compressed stream's address from `state+0x6C` into `$a0` and calls
+the CPU Huffman decoder `func_8008B250`; the readback copies one pass of pixels
+and ends with `sb $v0, 0x7E($v1)` (the pass counter) before its return label.
 
-The call is therefore reached only on the path that copied pixels, after the
-pixels are in the destination buffer, and before the merge runs. The app-side
-function reads the game's state object at 0x8019A680 for the destination,
-dimensions and header flag, and writes the pack's image if the current
-(scene, step) is mapped. The symbol is defined for every build
-(`app/src/hd_backgrounds.cpp`) and no-ops when no pack is installed, so the null
-and web builds are unchanged.
+Bank units are outside the `.nrm` mod hook map (`docs/guides/app-build.md` ->
+"What a hook can reach"), so the app is called from the generated code. Each
+pipeline gets two calls (`app/src/hd_backgrounds.cpp`):
 
-It is a code *generation* fix, like `tools/njpeg_readback.py`: `make bank-recomp`
-regenerates `Bank*Funcs/`, so the insertion is re-applied on every run.
+    ogre_njpeg_source(rdram, STATE);   before the call to func_8008B250:
+                                       records which asset this pass decodes
+    ogre_njpeg_pass(rdram, STATE);     after the pass-counter store: lets the
+                                       pack replace the pass's pixels
+
+Both are defined for every build and are no-ops without a pack.
+
+It is a code *generation* fix, like `tools/njpeg_readback.py`: `make
+bank-recomp` and `make recomp` regenerate the files, and both run this script.
+A file that is not present is skipped, so the script works after either target.
 
 Usage:
     python3 tools/hd_backgrounds.py           # apply (idempotent)
@@ -41,85 +43,126 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TARGET = ROOT / "BankEFuncs" / "funcs_0.c"
 
-# The end of the stage-3 row copy: the pass counter store, then the return
-# label that the other state-machine paths jump to directly.
-ANCHOR = (
-    "    // 0x80199950: sb          $v0, 0x7E($v1)\n"
-    "    MEM_B(0X7E, ctx->r3) = ctx->r2;\n"
-    "L_80199954:\n"
-)
+MARK = "// hd backgrounds"
 
-CALL_MARKER = "// hd backgrounds: the pass's pixels are in their buffer now."
-
-CALL = (
-    "    " + CALL_MARKER + "\n"
-    "    // Let the image pack replace them (app/src/hd_backgrounds.cpp). A no-op\n"
-    "    // when no pack is installed.\n"
-    "    ogre_hd_background(rdram);\n"
-)
-
-DECL_MARKER = "// hd backgrounds: replace a copied backdrop with a pack image."
+# (label, file, state pointer, Huffman call address, pass-end store address)
+SITES = [
+    ("dialogue", "BankEFuncs/funcs_0.c", 0x8019A680, 0x80199CCC, 0x80199950),
+    ("record 10", "BankCFuncs/funcs_2.c", 0x801D0700, 0x801CE348, None),
+    ("record 10", "BankCFuncs/funcs_5.c", 0x801D0700, None, 0x801CDFCC),
+    ("record 10b", "BankCFuncs/funcs_5.c", 0x801F0570, 0x801EF768, None),
+    ("record 10b", "BankCFuncs/funcs_10.c", 0x801F0570, None, 0x801EF3EC),
+    ("title", "RecompiledFuncs/funcs_14.c", 0x801BA6F0, 0x801B7B38, 0x801B77BC),
+]
 
 DECL = (
-    DECL_MARKER
-    + "\n"
-    + "#ifdef __cplusplus\n"
-    + 'extern "C" void ogre_hd_background(uint8_t* rdram);\n'
-    + "#else\n"
-    + "void ogre_hd_background(uint8_t* rdram);\n"
-    + "#endif\n"
+    MARK + ": njpeg source and pass hooks (app/src/hd_backgrounds.cpp).\n"
+    "#ifdef __cplusplus\n"
+    'extern "C" {\n'
+    "#endif\n"
+    "void ogre_njpeg_source(uint8_t* rdram, uint32_t state_ptr);\n"
+    "void ogre_njpeg_pass(uint8_t* rdram, uint32_t state_ptr);\n"
+    "#ifdef __cplusplus\n"
+    "}\n"
+    "#endif\n"
 )
 
-# Matched from the marker through the call, so --revert can remove it again.
-APPLIED_RE = re.compile(
-    r"\n    " + re.escape(CALL_MARKER) + r".*?\n    ogre_hd_background\(rdram\);\n",
+# The previous version of this script inserted one call in bank E.
+LEGACY_CALL_RE = re.compile(
+    r"\n    // hd backgrounds: the pass's pixels are in their buffer now\..*?"
+    r"\n    ogre_hd_background\(rdram\);\n",
     re.DOTALL,
 )
-DECL_APPLIED_RE = re.compile(
-    r"\n"
-    + re.escape(DECL_MARKER)
-    + r"\n#ifdef __cplusplus\nextern \"C\" void ogre_hd_background\(uint8_t\* rdram\);\n"
-    + r"#else\nvoid ogre_hd_background\(uint8_t\* rdram\);\n#endif\n",
-    re.DOTALL,
+LEGACY_DECL_RE = re.compile(
+    r"\n// hd backgrounds: replace a copied backdrop with a pack image\.\n"
+    r"#ifdef __cplusplus\nextern \"C\" void ogre_hd_background\(uint8_t\* rdram\);\n"
+    r"#else\nvoid ogre_hd_background\(uint8_t\* rdram\);\n#endif\n",
 )
+
+DECL_RE = re.compile(r"\n" + re.escape(MARK) + r": njpeg source and pass hooks.*?#endif\n.*?#endif\n",
+                     re.DOTALL)
+CALL_RE = re.compile(r"    " + re.escape(MARK) + r": [^\n]*\n    ogre_njpeg_(source|pass)\(rdram, 0x[0-9A-F]+u\);\n")
+
+
+def source_anchor(addr: int) -> re.Pattern:
+    # The jal's comment, its delay slot (emitted first) and the call itself.
+    return re.compile(
+        rf"(    // 0x{addr:08X}: jal         0x8008B250\n"
+        rf"    // 0x{addr + 4:08X}: lw          \$a1, 0x68\(\$v0\)\n"
+        rf"    ctx->r5 = MEM_W\(ctx->r2, 0X68\);\n)"
+        rf"(    (?:LOOKUP_FUNC\(0x8008B250\)|func_8008B250)\(rdram, ctx\);\n)"
+    )
+
+
+def pass_anchor(addr: int) -> re.Pattern:
+    return re.compile(
+        rf"(    // 0x{addr:08X}: sb          \$v0, 0x7E\(\$v1\)\n"
+        rf"    MEM_B\(0X7E, ctx->r3\) = ctx->r2;\n)"
+        rf"(L_{addr + 4:08X}:\n)"
+    )
 
 
 def apply() -> int:
-    src = TARGET.read_text()
-    if CALL_MARKER in src:
-        print("hd_backgrounds: already applied")
-        return 0
-    if src.count(ANCHOR) != 1:
-        print(
-            f"hd_backgrounds: error: expected exactly one anchor in "
-            f"{TARGET.relative_to(ROOT)} (found {src.count(ANCHOR)}); did the "
-            f"recompiler output change?",
-            file=sys.stderr,
-        )
-        return 1
-    header = '#include "recomp.h"\n'
-    if header not in src:
-        print(f"hd_backgrounds: error: no {header!r} in {TARGET.relative_to(ROOT)}",
-              file=sys.stderr)
-        return 1
-    src = src.replace(header, header + DECL, 1)
-    src = src.replace(ANCHOR, ANCHOR.replace("L_80199954:\n", CALL + "L_80199954:\n"), 1)
-    TARGET.write_text(src)
-    print(f"hd_backgrounds: patched {TARGET.relative_to(ROOT)}")
-    return 0
+    by_file: dict[str, list] = {}
+    for site in SITES:
+        by_file.setdefault(site[1], []).append(site)
+    status = 0
+    for rel, sites in by_file.items():
+        path = ROOT / rel
+        if not path.exists():
+            print(f"hd_backgrounds: {rel} not generated; skipped")
+            continue
+        src = path.read_bytes().decode()
+        src, _ = LEGACY_CALL_RE.subn("\n", src)
+        src, _ = LEGACY_DECL_RE.subn("\n", src)
+        changed = False
+        for label, _rel, state, src_addr, pass_addr in sites:
+            for addr, anchor, fn in ((src_addr, source_anchor, "source"),
+                                     (pass_addr, pass_anchor, "pass")):
+                if addr is None:
+                    continue
+                call = (f"    {MARK}: {label} njpeg {fn} (0x{addr:08X})\n"
+                        f"    ogre_njpeg_{fn}(rdram, 0x{state:08X}u);\n")
+                if call in src:
+                    continue
+                pat = anchor(addr)
+                if len(pat.findall(src)) != 1:
+                    print(f"hd_backgrounds: error: no unique anchor for the {label} {fn} hook "
+                          f"at 0x{addr:08X} in {rel}; did the recompiler output change?",
+                          file=sys.stderr)
+                    status = 1
+                    continue
+                src = pat.sub(lambda m: m.group(1) + call + m.group(2), src, count=1)
+                changed = True
+        if MARK + ": njpeg source and pass hooks" not in src:
+            header = '#include "recomp.h"\n'
+            if header not in src:
+                print(f"hd_backgrounds: error: no {header!r} in {rel}", file=sys.stderr)
+                return 1
+            src = src.replace(header, header + DECL, 1)
+            changed = True
+        if changed:
+            path.write_bytes(src.encode())
+            print(f"hd_backgrounds: patched {rel}")
+        else:
+            print(f"hd_backgrounds: {rel} already applied")
+    return status
 
 
 def revert() -> int:
-    src = TARGET.read_text()
-    src, n1 = APPLIED_RE.subn("\n", src)
-    src, n2 = DECL_APPLIED_RE.subn("\n", src)
-    if (n1 + n2) == 0:
-        print("hd_backgrounds: nothing to revert")
-        return 0
-    TARGET.write_text(src)
-    print(f"hd_backgrounds: reverted {n1 + n2} block(s) in {TARGET.relative_to(ROOT)}")
+    for rel in sorted({s[1] for s in SITES}):
+        path = ROOT / rel
+        if not path.exists():
+            continue
+        src = path.read_bytes().decode()
+        src, n1 = CALL_RE.subn("", src)
+        src, n2 = DECL_RE.subn("\n", src)
+        src, n3 = LEGACY_CALL_RE.subn("\n", src)
+        src, n4 = LEGACY_DECL_RE.subn("\n", src)
+        if n1 + n2 + n3 + n4:
+            path.write_bytes(src.encode())
+            print(f"hd_backgrounds: reverted {n1 + n2 + n3 + n4} block(s) in {rel}")
     return 0
 
 
